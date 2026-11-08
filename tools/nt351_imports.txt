@@ -112,6 +112,7 @@ GetTextMetricsW
 GetTextExtentPointW
 PatBlt
 GetDIBits
+StretchBlt
 
 [WINMM.DLL]
 timeBeginPeriod

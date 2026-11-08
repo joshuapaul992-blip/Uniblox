@@ -604,7 +604,9 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     g_pz = ub_clampf(g_pz + mz * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
 
     bool on_ground = g_py <= 0.0f;
-    if (play_keys && in->key_down[UB_KEY_SPACE] && on_ground) {
+    /* pressed-or-held: at low frame rates a quick tap can start and end
+     * between two frames, so key_down alone would miss it */
+    if (play_keys && (in->key_down[UB_KEY_SPACE] || in->key_pressed[UB_KEY_SPACE]) && on_ground) {
         g_vy = JUMP_SPEED;
         g_jumps++;
         ub_debug("jump %u", g_jumps);

@@ -181,6 +181,14 @@ tests/          host unit tests (make test)
     game now loads OpenGL with `SetErrorMode` (no dialog), logs why a copy
     was rejected, and falls back to the system's `opengl32.dll`, then to
     the software renderer.
+  - A second run (2560x1421, Sandy Bridge CPU) rendered in 8-14 ms but
+    presented in 153 ms. The breakdown said only ~7 ms because NT 3.51's
+    GDI runs in CSRSS and queues calls; the cost landed at the next flush.
+    Present timing now calls GdiFlush after each step, and the 32-bit path
+    renders through a DIB section (shared memory, NT 3.5+, looked up at run
+    time), so frames are no longer shipped to CSRSS with StretchDIBits.
+    Jumping also accepts a press that began and ended between two frames,
+    which matters at low frame rates.
   - The software renderer took 2.7 ms per frame, but presenting at
     1920x1080 took 90 ms, so the game ran at 10-12 fps. Presenting now
     uses a 32-bit `BI_BITFIELDS` DIB when the system accepts one (no

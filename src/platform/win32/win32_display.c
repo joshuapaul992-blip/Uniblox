@@ -9,7 +9,15 @@
  * With no text to draw, the image is stretched straight onto the window
  * instead, saving a full-window copy.
  *
- * On 15/16/24/32-bit desktops a 32-bit BI_BITFIELDS DIB is tried first:
+ * Fastest path (32-bit colour, NT 3.5 and later): the frame is copied
+ * into a DIB section, whose memory GDI shares with us, and blitted from a
+ * memory DC. On NT 3.51 GDI runs in a separate server process (CSRSS), so
+ * StretchDIBits must ship every frame's pixels across to it in chunks;
+ * with a DIB section nothing crosses, which matters at 1080p and above.
+ * GDI also queues drawing calls; GdiFlush() after each step makes the
+ * timing breakdown honest.
+ *
+ * Otherwise, on 15/16/24/32-bit desktops a 32-bit BI_BITFIELDS DIB is tried first:
  * it is our own pixel layout, so no per-pixel conversion is needed and a
  * 32-bit desktop gets a straight copy. If the system refuses it (the first
  * StretchDIBits returns 0), we fall back to 24-bit for good.
@@ -29,6 +37,17 @@ static u8 *g_dib;            /* 24bpp bottom-up copy (XRGB32 format) */
 static u32 *g_dib32;         /* 32bpp bottom-up copy (XRGB32 format) */
 static struct { BITMAPINFOHEADER h; DWORD masks[3]; } g_bmi32;
 static int g_use32 = -1;     /* -1 untested, 0 refused, 1 works */
+
+/* DIB section path (looked up at run time: NT 3.5+) */
+typedef HBITMAP(WINAPI *pfn_CreateDIBSection)(HDC, const BITMAPINFO *, UINT, void **, HANDLE, DWORD);
+typedef BOOL(WINAPI *pfn_GdiFlush)(void);
+static pfn_CreateDIBSection p_CreateDIBSection;
+static pfn_GdiFlush p_GdiFlush;
+static int g_use_section = -1;  /* -1 untested, 0 unavailable, 1 works */
+static HDC g_secdc;
+static HBITMAP g_secbmp, g_secold;
+static u32 *g_secbits;
+static int g_sec_w, g_sec_h;
 static int g_dib_pitch;
 static BITMAPINFO g_bmi;
 static u8 *g_dib8;           /* 8bpp bottom-up copy (INDEX8 format) */
@@ -56,8 +75,57 @@ void plat_set_sw_resolution(int height)
     g_sw_height = height < 0 ? 0 : height;
 }
 
+static void gdi_flush(void)
+{
+    if (p_GdiFlush) p_GdiFlush();
+}
+
+static void free_section(void)
+{
+    if (g_secdc) {
+        SelectObject(g_secdc, g_secold);
+        DeleteDC(g_secdc);
+        g_secdc = NULL;
+    }
+    if (g_secbmp) DeleteObject(g_secbmp);
+    g_secbmp = NULL;
+    g_secbits = NULL;
+    g_sec_w = g_sec_h = 0;
+}
+
+/* (Re)create the DIB section for the current framebuffer size. */
+static bool ensure_section(HDC wdc)
+{
+    if (g_use_section == 0) return false;
+    if (g_secbmp && g_sec_w == g_fb.width && g_sec_h == g_fb.height) return true;
+    free_section();
+    void *bits = NULL;
+    g_secbmp = p_CreateDIBSection ? p_CreateDIBSection(wdc, (BITMAPINFO *)&g_bmi32, DIB_RGB_COLORS, &bits, NULL, 0) : NULL;
+    if (!g_secbmp || !bits) {
+        if (g_secbmp) DeleteObject(g_secbmp);
+        g_secbmp = NULL;
+        g_use_section = 0;
+        ub_info("display: DIB sections unavailable; using StretchDIBits");
+        return false;
+    }
+    g_secbits = (u32 *)bits;
+    g_secdc = CreateCompatibleDC(wdc);
+    g_secold = (HBITMAP)SelectObject(g_secdc, g_secbmp);
+    g_sec_w = g_fb.width;
+    g_sec_h = g_fb.height;
+    if (g_use_section < 0) ub_info("display: using a DIB section (frames are not copied to GDI)");
+    g_use_section = 1;
+    return true;
+}
+
 bool win32_sw_init(const ub_system_info *sys, int sw_height)
 {
+    HMODULE gdi = GetModuleHandleA("GDI32.DLL");
+    if (gdi) {
+        p_CreateDIBSection = (pfn_CreateDIBSection)(void *)GetProcAddress(gdi, "CreateDIBSection");
+        p_GdiFlush = (pfn_GdiFlush)(void *)GetProcAddress(gdi, "GdiFlush");
+    }
+    if (!p_CreateDIBSection) g_use_section = 0;
     g_palette_device = sys->palette_display;
     g_fb.format = sys->display_bpp <= 8 ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32;
     g_pending_format = g_fb.format;
@@ -290,37 +358,71 @@ void win32_sw_present(HDC wdc, ub_frame *frame)
 {
     int w = frame->width, h = frame->height;
     if (w <= 0 || h <= 0 || !g_fb.pixels) return;
-    u64 t0 = plat_time_us();
-    convert_framebuffer();
+    u64 t0 = plat_time_us(), t1, t2, t3;
     update_palette(wdc);
     if (g_hpal) {
         SelectPalette(wdc, g_hpal, FALSE);
         RealizePalette(wdc);
     }
-    u64 t1 = plat_time_us(), t2, t3;
+    bool one_to_one = g_fb.width == w && g_fb.height == h;
+    const char *path;
 
-    if (frame->text_count == 0) {
-        /* nothing to overlay: one stretch straight onto the window */
-        stretch_frame(wdc, w, h);
-        t2 = t3 = plat_time_us();
-    } else {
-        ensure_backbuffer(wdc, w, h);
-        if (g_hpal) {
-            SelectPalette(g_memdc, g_hpal, FALSE);
-            RealizePalette(g_memdc);
+    if (g_fb.format == UB_PIXEL_XRGB32 && ensure_section(wdc)) {
+        gdi_flush(); /* GDI must be done with the section before we write it */
+        for (int y = 0; y < g_fb.height; ++y)
+            memcpy(g_secbits + (size_t)(g_fb.height - 1 - y) * g_fb.width,
+                   g_fb.pixels + y * g_fb.pitch, (size_t)g_fb.width * 4);
+        t1 = plat_time_us();
+        if (one_to_one) {
+            /* text straight onto the section: one blit, still sharp */
+            if (frame->text_count) draw_text_queue(g_secdc, frame);
+            gdi_flush();
+            t2 = plat_time_us();
+            BitBlt(wdc, 0, 0, w, h, g_secdc, 0, 0, SRCCOPY);
+        } else if (frame->text_count) {
+            ensure_backbuffer(wdc, w, h);
+            SetStretchBltMode(g_memdc, COLORONCOLOR);
+            StretchBlt(g_memdc, 0, 0, w, h, g_secdc, 0, 0, g_fb.width, g_fb.height, SRCCOPY);
+            draw_text_queue(g_memdc, frame);
+            gdi_flush();
+            t2 = plat_time_us();
+            BitBlt(wdc, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
+        } else {
+            t2 = plat_time_us();
+            SetStretchBltMode(wdc, COLORONCOLOR);
+            StretchBlt(wdc, 0, 0, w, h, g_secdc, 0, 0, g_fb.width, g_fb.height, SRCCOPY);
         }
-        stretch_frame(g_memdc, w, h);
-        draw_text_queue(g_memdc, frame);
-        t2 = plat_time_us();
-        BitBlt(wdc, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
+        gdi_flush();
         t3 = plat_time_us();
+        path = "DIB section";
+    } else {
+        convert_framebuffer();
+        t1 = plat_time_us();
+        if (frame->text_count == 0) {
+            /* nothing to overlay: one stretch straight onto the window */
+            t2 = t1;
+            stretch_frame(wdc, w, h);
+        } else {
+            ensure_backbuffer(wdc, w, h);
+            if (g_hpal) {
+                SelectPalette(g_memdc, g_hpal, FALSE);
+                RealizePalette(g_memdc);
+            }
+            stretch_frame(g_memdc, w, h);
+            draw_text_queue(g_memdc, frame);
+            gdi_flush();
+            t2 = plat_time_us();
+            BitBlt(wdc, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
+        }
+        gdi_flush();
+        t3 = plat_time_us();
+        path = g_fb.format == UB_PIXEL_INDEX8 ? "8-bit DIB" : g_use32 > 0 ? "32-bit DIB" : "24-bit DIB";
     }
     u32 c = (u32)(t1 - t0) / 100u, st = (u32)(t2 - t1) / 100u, b = (u32)(t3 - t2) / 100u;
     ub_fmt(frame->present_detail, sizeof frame->present_detail,
            "copy %u.%u + %s %u.%u + blit %u.%u ms (%s, %dx%d -> %dx%d)", c / 10, c % 10,
-           frame->text_count ? "stretch+text" : "stretch", st / 10, st % 10, b / 10, b % 10,
-           g_fb.format == UB_PIXEL_INDEX8 ? "8-bit" : g_use32 > 0 ? "32-bit DIB" : "24-bit DIB",
-           g_fb.width, g_fb.height, w, h);
+           one_to_one ? "text" : frame->text_count ? "stretch+text" : "-", st / 10, st % 10,
+           b / 10, b % 10, path, g_fb.width, g_fb.height, w, h);
 }
 
 /* WM_QUERYNEWPALETTE / WM_PALETTECHANGED; returns true if handled. */
@@ -358,6 +460,7 @@ void win32_sw_shutdown(void)
     }
     if (g_font) DeleteObject(g_font);
     g_font = NULL;
+    free_section();
     if (g_hpal) DeleteObject(g_hpal);
     g_hpal = NULL;
     free_buffers();
