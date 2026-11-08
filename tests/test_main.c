@@ -16,18 +16,9 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-static int g_failures, g_checks;
+#include "test.h"
 
-#define CHECK(cond) do { \
-    g_checks++; \
-    if (!(cond)) { g_failures++; printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); } \
-} while (0)
-
-#define CHECK_STR(a, b) do { \
-    g_checks++; \
-    if (strcmp((a), (b)) != 0) { g_failures++; \
-        printf("  FAIL %s:%d: \"%s\" != \"%s\"\n", __FILE__, __LINE__, (a), (b)); } \
-} while (0)
+int g_failures, g_checks;
 
 /* --------------------------------------------------------------- fmt */
 
@@ -135,6 +126,18 @@ static void test_math(void)
     CHECK(fabs(ub_wrap_angle(7.0f) - (7.0 - 2 * M_PI)) < 1e-5);
     CHECK(fabs(ub_wrap_angle(-4.0f) - (-4.0 + 2 * M_PI)) < 1e-5);
     CHECK(ub_roundf(2.5f) == 3 && ub_roundf(-2.5f) == -3 && ub_roundf(-0.4f) == 0);
+    double worst_atan = 0;
+    for (int i = 0; i < 3600; ++i) {
+        double a = i * (2 * M_PI / 3600) - M_PI;
+        for (double r = 0.01; r < 1000; r *= 10) {
+            f32 y = (f32)(sin(a) * r), x = (f32)(cos(a) * r);
+            double e = fabs(remainder((double)ub_atan2f(y, x) - atan2((double)y, (double)x), 2 * M_PI));
+            if (e > worst_atan) worst_atan = e;
+        }
+    }
+    printf("  atan2 max error: %.2e\n", worst_atan);
+    CHECK(worst_atan < 2e-5);
+    CHECK(ub_atan2f(0, 0) == 0.0f);
 }
 
 /* --------------------------------------------------------------- wav */
@@ -330,6 +333,8 @@ int main(void)
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "fmt", test_fmt }, { "utf", test_utf }, { "path", test_path },
         { "math", test_math }, { "wav", test_wav }, { "mixer", test_mixer },
+        { "crt", test_crt }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render },
+        { "render fuzz", test_render_fuzz },
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; ++i) {
         printf("%s\n", tests[i].name);

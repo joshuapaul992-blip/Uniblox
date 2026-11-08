@@ -38,14 +38,19 @@ make check CC="clang --target=i686-w64-windows-gnu --sysroot=/usr/i686-w64-mingw
 - imports any DLL or function not on `tools/nt351_imports.txt`, the
   vetted list of APIs that exist on NT 3.51
 
+`make check` also disassembles the `.exe` and fails if it finds any
+instruction newer than the original Pentium (P6 `cmov`/`fcomi`/`fcmov`,
+MMX or SSE). The toolchain's own support library is built for the Pentium
+Pro, so this catches anything it pulls in.
+
 Anything newer has to be loaded at runtime with `GetProcAddress`, with a
 fallback.
 
 ## Testing
 
 - **Unit tests** for the OS-independent code (strings, UTF-8, paths, maths,
-  WAV loading, audio mixer), compiled natively with AddressSanitizer and
-  UBSan:
+  WAV loading, audio mixer, palette, the renderer and the C runtime),
+  compiled natively with AddressSanitizer and UBSan:
 
   ```bash
   make test
@@ -71,25 +76,31 @@ fallback.
 | File | What it is |
 |---|---|
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
-| `uniblox.cfg` | Settings saved on exit (camera zoom and angle, mute) |
+| `uniblox.cfg` | Settings saved on exit: camera zoom and angles, mute, colour mode (`colors=0` automatic, `8` or `32`), window size (`window_scale=1` or `2`) |
 | `sounds/jump.wav`, `sounds/land.wav`, `sounds/click.wav` | Optional. Replace the built-in sounds; any PCM 8/16-bit mono/stereo WAV works |
 
 If the folder is read-only (e.g. a CD-ROM), the game still runs; it just
 can't write the log or settings.
 
-## Controls (milestone 1 demo)
+## Controls (milestone 2 demo)
 
 | Input | Action |
 |---|---|
 | W A S D, or Up/Down arrows | Move (relative to the camera) |
 | Left/Right arrows | Turn the camera |
-| Hold right mouse button | Mouse-look: drag to orbit the camera |
+| Hold right mouse button | Orbit the camera (left/right and up/down) |
 | Mouse wheel | Zoom (NT 4.0 and later, or NT 3.51 with a wheel driver) |
 | Space | Jump |
 | Left click | Beep, panned left/right and pitched by where you click |
 | Enter or `/` | Type a message (Enter sends, Esc cancels) |
+| F5 | 10-second benchmark; the result goes on screen and into `uniblox.log` |
+| F6 | Window size 1x (320x240, no stretching, fastest) or 2x |
+| F8 | Switch between 32-bit colour and 8-bit palette rendering |
+| F3 | Hide the text overlay |
 | M | Mute / unmute |
 | Esc | Quit |
+
+There's no collision yet (that's milestone 4), so you can walk through walls.
 
 ## License
 

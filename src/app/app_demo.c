@@ -1,62 +1,145 @@
-/* Uniblox - Milestone 1 demo app.
+/* Uniblox - Milestone 2 demo app: a textured, lit room of parts.
  *
- * Exercises the platform layer on every target OS:
- *   - keyboard: WASD/arrows move, Space jumps, M mutes, Esc quits;
- *     Enter or '/' opens a chat-style text box (tests WM_CHAR)
- *   - mouse: hold the right button to orbit the camera (mouse-look),
- *     wheel zooms (NT 4.0+), left click plays a tone panned and pitched by
- *     where you click
- *   - audio: synthesized jump/land/click sounds, or sounds/jump.wav,
- *     sounds/land.wav and sounds/click.wav if they exist next to the .exe
- *   - files: camera zoom/angle and mute are saved to uniblox.cfg on exit
- *     and loaded on start; everything is logged to uniblox.log
+ *   - WASD/arrows move, Space jumps, hold the right mouse button to orbit
+ *     the camera (left/right and up/down), wheel zooms
+ *   - F5 runs a 10-second benchmark flythrough and logs the result
+ *   - F6 switches the window between 1x and 2x size (1x skips stretching)
+ *   - F8 switches between 32-bit colour and 8-bit palette rendering
+ *   - F3 hides the text overlay; M mutes; Enter or '/' opens a chat line;
+ *     left click beeps (panned/pitched by position); Esc quits
+ *   - settings (camera, mute, colour mode) are saved to uniblox.cfg
  *
- * The scene is a "mode 7" style floor plus screen-aligned blocks: just
- * enough 3D to check input and timing. The real renderer is milestone 2. */
+ * There is no collision yet (that is milestone 4): you can walk through
+ * walls, and the floor is always at height 0. */
 #include "app/app.h"
 #include "audio/ub_mixer.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
 #include "core/ub_string.h"
 #include "core/ub_utf.h"
+#include "core/ub_vec.h"
+#include "render/ub_render.h"
 
-#define WORLD_LIMIT 1000.0f
-#define FOCAL 160.0f
-#define MOVE_SPEED 30.0f
-#define TURN_SPEED 1.8f       /* radians/s for arrow keys */
-#define LOOK_SENSITIVITY 0.008f
-#define ZOOM_MIN 14.0f
-#define ZOOM_MAX 90.0f
-#define GRAVITY 100.0f
-#define JUMP_SPEED 40.0f
+#define WORLD_LIMIT 140.0f
+#define MOVE_SPEED 16.0f
+#define TURN_SPEED 1.8f        /* radians/s for arrow keys */
+#define LOOK_SENSITIVITY 0.006f
+#define PITCH_MIN (-1.35f)
+#define PITCH_MAX 0.35f
+#define ZOOM_MIN 6.0f
+#define ZOOM_MAX 60.0f
+#define GRAVITY 60.0f
+#define JUMP_SPEED 22.0f
 #define CONFIG_PATH "uniblox.cfg"
 #define TYPED_MAX 40
-
-typedef struct {
-    f32 x, z, size, height;
-    u32 color;
-} part;
-
-static const part k_parts[] = {
-    { 30, 60, 10, 0, 0x3070E0 },
-    { -40, 90, 14, 0, 0xE0C030 },
-    { 60, -30, 8, 0, 0xB050D0 },
-    { -70, -50, 12, 0, 0x30C0C0 },
-    { 0, 140, 20, 0, 0xF09030 },
-    { -20, -110, 10, 0, 0xE0E0E0 },
-};
+#define BENCH_SECONDS 10
+#define MAX_PARTS 128
 
 static ub_system_info g_sys;
-static f32 g_px, g_pz, g_py, g_vy;   /* player block */
-static f32 g_yaw;                    /* camera angle around the player */
-static f32 g_zoom = 34.0f;           /* camera distance */
+static ub_part_draw g_parts[MAX_PARTS];
+static int g_part_count;
+static int g_spinner = -1;            /* index of the animated part */
+
+static f32 g_px, g_pz = 4.0f, g_py, g_vy;   /* player feet position */
+static f32 g_facing;                  /* player yaw */
+static f32 g_yaw, g_pitch = -0.35f;   /* camera angles around the player */
+static f32 g_zoom = 22.0f;            /* camera distance */
+static f32 g_time;
 static bool g_muted;
+static int g_colors_cfg;              /* 0 = automatic, 8 or 32 = chosen with F8 */
+static int g_window_scale = 2;
+static bool g_hide_overlay;
 static char g_typed[TYPED_MAX + 1];
-static bool g_typing;                /* chat-style text entry is open */
+static bool g_typing;
 static char g_last_message[TYPED_MAX + 1];
 static u32 g_fps_frames, g_fps_accum_us, g_fps_x10;
 static u32 g_jumps, g_clicks;
 static ub_sound g_snd_jump, g_snd_land, g_snd_click;
+static ub_render_stats g_stats;
+
+/* benchmark */
+static bool g_bench;
+static f32 g_bench_t;
+static u32 g_bench_frames;
+static u64 g_bench_render_us, g_bench_present_us, g_bench_polys, g_bench_pixels;
+static char g_bench_result[UB_OVERLAY_LINE_LEN];
+
+/* --------------------------------------------------------------- scene */
+
+static ub_part_draw *add_part(ub_shape shape, f32 x, f32 y, f32 z, f32 sx, f32 sy, f32 sz,
+                              u32 color, ub_material mat)
+{
+    if (g_part_count >= MAX_PARTS) return &g_parts[MAX_PARTS - 1];
+    ub_part_draw *p = &g_parts[g_part_count++];
+    p->pos = v3(x, y, z);
+    p->size = v3(sx, sy, sz);
+    p->rot = mat3_identity();
+    p->color = color;
+    p->shape = (u8)shape;
+    p->material = (u8)mat;
+    return p;
+}
+
+static void add_tree(f32 x, f32 z, f32 scale)
+{
+    add_part(UB_SHAPE_CYLINDER, x, 3.0f * scale, z, 1.2f * scale, 6.0f * scale, 1.2f * scale,
+             0x6B4423, UB_MAT_WOOD);
+    add_part(UB_SHAPE_BALL, x, 7.5f * scale, z, 6.0f * scale, 5.0f * scale, 6.0f * scale,
+             0x3A9A3A, UB_MAT_GRASS);
+}
+
+/* A walled room (open roof) with a doorway facing the spawn point, and
+ * some things outside. Room interior: x -18..18, z 22..58. */
+static void build_scene(void)
+{
+    g_part_count = 0;
+    add_part(UB_SHAPE_BOX, 0, -0.5f, 20, 300, 1, 300, 0x4C8C3C, UB_MAT_GRASS);       /* ground */
+
+    /* room */
+    add_part(UB_SHAPE_BOX, 0, 0.05f, 40, 36, 0.1f, 36, 0xA0703C, UB_MAT_WOOD);       /* floor */
+    add_part(UB_SHAPE_BOX, 0, 6, 58.5f, 38, 12, 1, 0xB04A30, UB_MAT_BRICK);          /* north */
+    add_part(UB_SHAPE_BOX, -18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);        /* west */
+    add_part(UB_SHAPE_BOX, 18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);         /* east */
+    add_part(UB_SHAPE_BOX, -11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);     /* south, left */
+    add_part(UB_SHAPE_BOX, 11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);      /* south, right */
+    add_part(UB_SHAPE_BOX, 0, 10, 21.5f, 8, 4, 1, 0xB04A30, UB_MAT_BRICK);           /* lintel */
+    for (int i = 0; i < 4; ++i)                                                       /* pillars */
+        add_part(UB_SHAPE_CYLINDER, (i & 1) ? 14.0f : -14.0f, 6, (i & 2) ? 54.0f : 26.0f,
+                 2.5f, 12, 2.5f, 0x9A9A9A, UB_MAT_STONE);
+    for (int i = 0; i < 6; ++i)                                                       /* stairs */
+        add_part(UB_SHAPE_BOX, 15, (f32)(i + 1) * 0.5f, 31.0f + (f32)i * 3.0f, 5, (f32)(i + 1), 3,
+                 0x8B5A2B, UB_MAT_WOOD);
+    add_part(UB_SHAPE_WEDGE, -12, 1.5f, 46, 6, 3, 8, 0x8090A0, UB_MAT_METAL);         /* ramp */
+    add_part(UB_SHAPE_BOX, -12, 1.5f, 53, 6, 3, 6, 0x8090A0, UB_MAT_METAL);           /* landing */
+    add_part(UB_SHAPE_CYLINDER, 0, 1.5f, 40, 4, 3, 4, 0x7A8590, UB_MAT_METAL);        /* pedestal */
+    g_spinner = g_part_count;
+    add_part(UB_SHAPE_BOX, 0, 6, 40, 3, 3, 3, 0x2E8BEF, UB_MAT_PLASTIC);              /* spinner */
+    add_part(UB_SHAPE_BALL, -6, 1.5f, 30, 3, 3, 3, 0xF2C230, UB_MAT_PLASTIC);
+    add_part(UB_SHAPE_BALL, 6, 1.0f, 33, 2, 2, 2, 0x30C060, UB_MAT_PLASTIC);
+    add_part(UB_SHAPE_BALL, -4, 1.0f, 50, 2, 2, 2, 0xE04080, UB_MAT_PLASTIC);
+    add_part(UB_SHAPE_BOX, 6, 3.0f, 50, 6, 0.4f, 4, 0x9C6B3A, UB_MAT_WOOD);           /* table */
+    for (int i = 0; i < 4; ++i)
+        add_part(UB_SHAPE_BOX, (i & 1) ? 8.6f : 3.4f, 1.4f, (i & 2) ? 51.6f : 48.4f,
+                 0.4f, 2.8f, 0.4f, 0x6E4A26, UB_MAT_WOOD);
+
+    /* outside */
+    for (int i = 0; i < 4; ++i)                                                       /* path */
+        add_part(UB_SHAPE_BOX, 0, 0.05f, 2.5f + (f32)i * 5.0f, 4, 0.1f, 4, 0x8A8A8A, UB_MAT_STONE);
+    add_tree(-30, 8, 1.0f);
+    add_tree(32, -6, 1.2f);
+    add_tree(-34, 68, 0.9f);
+    add_tree(38, 62, 1.1f);
+    add_tree(-8, -30, 1.0f);
+    static const u32 tower[4] = { 0xD94040, 0xF2B233, 0x3FAE4A, 0x3F6FD9 };
+    for (int i = 0; i < 4; ++i) {                                                     /* block tower */
+        ub_part_draw *p = add_part(UB_SHAPE_BOX, 28, 1.5f + (f32)i * 3.0f, 20, 3, 3, 3, tower[i],
+                                   UB_MAT_PLASTIC);
+        p->rot = mat3_from_euler((f32)i * 0.3f, 0, 0);
+    }
+    add_part(UB_SHAPE_BOX, -40, 0.5f, -20, 20, 1, 20, 0xA3A2A5, UB_MAT_GRID);         /* grid pad */
+    add_part(UB_SHAPE_WEDGE, -40, 1.5f, -7, 8, 2, 6, 0xA3A2A5, UB_MAT_GRID);
+    ub_info("scene: %d parts", g_part_count);
+}
 
 /* ------------------------------------------------------------ sounds */
 
@@ -151,6 +234,9 @@ static bool key_is(const char *line, const char *key, const char **value)
     return true;
 }
 
+#define DEG(r) ub_roundf((r) * (180.0f / UB_PI))
+#define RAD(d) ((f32)(d) * (UB_PI / 180.0f))
+
 static void load_config(void)
 {
     char *text;
@@ -164,23 +250,35 @@ static void load_config(void)
         *end = 0;
         const char *v;
         if (key_is(line, "zoom", &v)) g_zoom = ub_clampf((f32)parse_int(v), ZOOM_MIN, ZOOM_MAX);
-        else if (key_is(line, "yaw_deg", &v)) g_yaw = (f32)parse_int(v) * (UB_PI / 180.0f);
+        else if (key_is(line, "yaw_deg", &v)) g_yaw = RAD(parse_int(v));
+        else if (key_is(line, "pitch_deg", &v)) g_pitch = ub_clampf(RAD(parse_int(v)), PITCH_MIN, PITCH_MAX);
         else if (key_is(line, "muted", &v)) g_muted = parse_int(v) != 0;
+        else if (key_is(line, "window_scale", &v)) g_window_scale = UB_CLAMP(parse_int(v), 1, 2);
+        else if (key_is(line, "colors", &v)) {
+            i32 c = parse_int(v);
+            g_colors_cfg = (c == 8 || c == 32) ? c : 0;
+        }
         *end = saved;
         line = end;
         while (*line == '\n' || *line == '\r') ++line;
     }
     plat_free(text);
-    ub_info("loaded %s: zoom %d, yaw %d deg, muted %d", CONFIG_PATH, (i32)g_zoom,
-            ub_roundf(g_yaw * (180.0f / UB_PI)), g_muted);
+    ub_info("loaded %s: zoom %d, yaw %d deg, pitch %d deg, muted %d, colors %d", CONFIG_PATH,
+            (i32)g_zoom, DEG(g_yaw), DEG(g_pitch), g_muted, g_colors_cfg);
 }
 
 static void save_config(void)
 {
-    char text[256];
+    char text[320];
     int n = ub_fmt(text, sizeof text,
-                   "# Uniblox settings (written on exit)\r\nzoom=%d\r\nyaw_deg=%d\r\nmuted=%d\r\n",
-                   (i32)g_zoom, ub_roundf(ub_wrap_angle(g_yaw) * (180.0f / UB_PI)), g_muted);
+                   "# Uniblox settings (written on exit)\r\n"
+                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\nmuted=%d\r\n"
+                   "# colors: 0 = automatic, 8 = 256-colour palette, 32 = full colour\r\n"
+                   "colors=%d\r\n"
+                   "# window_scale: 1 = 320x240 (fastest), 2 = 640x480\r\n"
+                   "window_scale=%d\r\n",
+                   (i32)g_zoom, DEG(ub_wrap_angle(g_yaw)), DEG(g_pitch), g_muted, g_colors_cfg,
+                   g_window_scale);
     if (plat_file_write_all(CONFIG_PATH, text, (u32)n)) ub_info("saved %s", CONFIG_PATH);
     else ub_warn("could not save %s", CONFIG_PATH);
 }
@@ -194,7 +292,12 @@ bool app_init(const ub_system_info *sys)
     if (ram_mb + 8 < UB_RAM_MIN_MB)
         ub_warn("only %u MB RAM; Uniblox needs %u MB (%u MB recommended)", ram_mb,
                 UB_RAM_MIN_MB, UB_RAM_REC_MB);
+    if (!ub_render_init()) return false;
     load_config();
+    if (g_colors_cfg == 8) plat_set_pixel_format(UB_PIXEL_INDEX8);
+    if (g_colors_cfg == 32) plat_set_pixel_format(UB_PIXEL_XRGB32);
+    if (g_window_scale != 2) plat_set_window_scale(g_window_scale);
+    build_scene();
     load_sound(&g_snd_jump, "sounds/jump.wav", synth_jump);
     load_sound(&g_snd_land, "sounds/land.wav", synth_land);
     load_sound(&g_snd_click, "sounds/click.wav", synth_click);
@@ -209,159 +312,125 @@ void app_shutdown(void)
     ub_sound_free(&g_snd_jump);
     ub_sound_free(&g_snd_land);
     ub_sound_free(&g_snd_click);
+    ub_render_shutdown();
     ub_info("demo: %u jumps, %u clicks", g_jumps, g_clicks);
 }
 
-static inline u32 rgb(u32 r, u32 g, u32 b)
-{
-    return (r << 16) | (g << 8) | b;
-}
-
-static u32 shade(u32 c, u32 num, u32 den)
-{
-    u32 r = ((c >> 16) & 0xFF) * num / den, g = ((c >> 8) & 0xFF) * num / den,
-        b = (c & 0xFF) * num / den;
-    return rgb(UB_MIN(r, 255u), UB_MIN(g, 255u), UB_MIN(b, 255u));
-}
-
-static void fill_rect(ub_framebuffer *fb, int x0, int y0, int x1, int y1, u32 c)
-{
-    x0 = UB_CLAMP(x0, 0, fb->width);
-    x1 = UB_CLAMP(x1, 0, fb->width);
-    y0 = UB_CLAMP(y0, 0, fb->height);
-    y1 = UB_CLAMP(y1, 0, fb->height);
-    for (int y = y0; y < y1; ++y) {
-        u32 *row = fb->pixels + y * fb->pitch;
-        for (int x = x0; x < x1; ++x) row[x] = c;
-    }
-}
-
-typedef struct {
-    f32 cam_x, cam_z, cam_h;
-    f32 fx, fz, rx, rz; /* forward and right unit vectors on the ground */
-    int horizon;
-} view;
-
-typedef struct {
-    f32 depth;
-    int sx, sy_ground, size, lift;
-    u32 color;
-    bool shadow;
-} sprite;
-
-static bool project(const view *v, ub_framebuffer *fb, f32 x, f32 z, f32 height,
-                    f32 size, u32 color, sprite *out)
-{
-    f32 dx = x - v->cam_x, dz = z - v->cam_z;
-    f32 cz = dx * v->fx + dz * v->fz;
-    if (cz < 2.0f) return false;
-    f32 cx = dx * v->rx + dz * v->rz;
-    f32 k = FOCAL / cz;
-    out->depth = cz;
-    out->sx = fb->width / 2 + ub_roundf(cx * k);
-    out->sy_ground = v->horizon - 1 + ub_roundf(v->cam_h * k);
-    out->size = ub_roundf(size * k);
-    out->lift = ub_roundf(height * k);
-    out->color = color;
-    out->shadow = true;
-    return true;
-}
-
-static void draw_sprite(ub_framebuffer *fb, const sprite *s)
-{
-    int half = s->size / 2;
-    if (s->shadow)
-        fill_rect(fb, s->sx - half, s->sy_ground - s->size / 6, s->sx + half,
-                  s->sy_ground + s->size / 6, rgb(30, 60, 30));
-    int top = s->sy_ground - s->lift - s->size;
-    fill_rect(fb, s->sx - half, top, s->sx + half, top + s->size, s->color);
-    fill_rect(fb, s->sx - half, top, s->sx + half, top + s->size / 5,
-              shade(s->color, 5, 4)); /* lit top face */
-    fill_rect(fb, s->sx + half - s->size / 6, top + s->size / 5, s->sx + half,
-              top + s->size, shade(s->color, 3, 4)); /* shaded side */
-}
-
-static void draw_floor(ub_framebuffer *fb, const view *v)
-{
-    const int w = fb->width, h = fb->height;
-    for (int y = 0; y < v->horizon; ++y) {      /* sky gradient */
-        u32 t = (u32)(y * 255 / v->horizon);
-        u32 c = rgb(90 + t / 4, 150 + t / 5, 255);
-        u32 *row = fb->pixels + y * fb->pitch;
-        for (int x = 0; x < w; ++x) row[x] = c;
-    }
-    /* Each row of floor is a straight line in the world: compute its two
-     * ends in floating point, then step across it in 16.16 fixed point. */
-    for (int y = v->horizon; y < h; ++y) {
-        f32 depth = v->cam_h * FOCAL / (f32)(y - v->horizon + 1);
-        f32 cx = v->cam_x + v->fx * depth, cz = v->cam_z + v->fz * depth;
-        f32 px = depth / FOCAL;
-        f32 lx = cx - v->rx * px * (f32)(w / 2), lz = cz - v->rz * px * (f32)(w / 2);
-        i32 wx = (i32)(lx * 65536.0f), wz = (i32)(lz * 65536.0f);
-        i32 sx = (i32)(v->rx * px * 65536.0f), sz = (i32)(v->rz * px * 65536.0f);
-        u32 fog = (u32)UB_CLAMP(255 - (i32)(depth * 0.5f), 40, 255);
-        u32 light = rgb(fog * 3 / 10, fog * 7 / 10, fog * 3 / 10);
-        u32 dark = rgb(fog * 2 / 10, fog * 5 / 10, fog * 2 / 10);
-        u32 *row = fb->pixels + y * fb->pitch;
-        for (int x = 0; x < w; ++x) {
-            row[x] = (((wx >> 19) ^ (wz >> 19)) & 1) ? light : dark;
-            wx += sx;
-            wz += sz;
-        }
-    }
-}
-
 /* Chat-style text entry: Enter or '/' opens it, Enter sends, Escape
- * cancels. While it is open, keys type text instead of moving. */
+ * cancels. While it is open, keys type text instead of moving. Works on
+ * the ordered character stream so fast typing is never reordered. */
 static void handle_typing(const ub_input *in)
 {
-    if (!g_typing) {
-        if (in->key_pressed[UB_KEY_ENTER] || in->text[0] == '/') {
-            g_typing = true;
-            g_typed[0] = 0; /* the '/' that opened it is not part of the text */
-        }
-        return;
-    }
-    int len = (int)ub_strlen(g_typed);
-    if (in->key_pressed[UB_KEY_ESCAPE]) {
-        g_typing = false;
-        return;
-    }
-    if (in->key_pressed[UB_KEY_BACKSPACE] && len > 0) {
-        /* remove one whole UTF-8 character */
-        do { --len; } while (len > 0 && ((u8)g_typed[len] & 0xC0) == 0x80);
-        g_typed[len] = 0;
-    }
     for (const char *p = in->text; *p;) {
         const char *start = p;
-        ub_utf8_decode(&p);
-        int n = (int)(p - start);
-        if (len + n > TYPED_MAX) break;
-        for (int i = 0; i < n; ++i) g_typed[len++] = start[i];
-        g_typed[len] = 0;
-    }
-    if (in->key_pressed[UB_KEY_ENTER]) {
-        if (len > 0) {
-            ub_info("typed: %s", g_typed);
-            for (int i = 0; i <= len; ++i) g_last_message[i] = g_typed[i];
+        u32 c = ub_utf8_decode(&p);
+        int len = (int)ub_strlen(g_typed);
+        if (!g_typing) {
+            if (c == '\r' || c == '/') {
+                g_typing = true;
+                g_typed[0] = 0; /* the '/' that opened it is not part of the text */
+            }
+            continue; /* anything else is a gameplay key */
         }
-        g_typed[0] = 0;
-        g_typing = false;
+        if (c == 0x1B) {
+            g_typing = false;
+        } else if (c == '\b') {
+            if (len > 0) {
+                do { --len; } while (len > 0 && ((u8)g_typed[len] & 0xC0) == 0x80);
+                g_typed[len] = 0;
+            }
+        } else if (c == '\r') {
+            if (len > 0) {
+                ub_info("typed: %s", g_typed);
+                for (int i = 0; i <= len; ++i) g_last_message[i] = g_typed[i];
+            }
+            g_typed[0] = 0;
+            g_typing = false;
+        } else if (c >= 32) {
+            int n = (int)(p - start);
+            if (len + n <= TYPED_MAX) {
+                for (int i = 0; i < n; ++i) g_typed[len + i] = start[i];
+                g_typed[len + n] = 0;
+            }
+        }
     }
+}
+
+static void start_benchmark(void)
+{
+    g_bench = true;
+    g_bench_t = 0;
+    g_bench_frames = 0;
+    g_bench_render_us = g_bench_present_us = g_bench_polys = g_bench_pixels = 0;
+    ub_info("benchmark: started (%d s flythrough)", BENCH_SECONDS);
+}
+
+static void finish_benchmark(ub_framebuffer *fb, bool cancelled)
+{
+    g_bench = false;
+    if (cancelled || g_bench_frames == 0) {
+        ub_info("benchmark: cancelled");
+        ub_fmt(g_bench_result, sizeof g_bench_result, "Benchmark cancelled");
+        return;
+    }
+    u32 fps10 = (u32)((f32)g_bench_frames * 10.0f / g_bench_t);
+    u32 ms10 = (u32)(g_bench_render_us / g_bench_frames / 100u);
+    u32 pms10 = (u32)(g_bench_present_us / g_bench_frames / 100u);
+    const char *mode = fb->format == UB_PIXEL_INDEX8 ? "8-bit" : "32-bit";
+    ub_fmt(g_bench_result, sizeof g_bench_result,
+           "Benchmark: %u.%u fps (render %u.%u ms, display %u.%u ms, %s, %dx)",
+           fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10, pms10 / 10, pms10 % 10, mode,
+           fb->window_scale);
+    ub_info("benchmark: %u frames in %u ms = %u.%u fps; render %u.%u ms/frame, display %u.%u ms/frame; "
+            "%u polys, %u pixels per frame; %dx%d %s, window %dx; %s; %s; %d bpp desktop",
+            g_bench_frames, (u32)(g_bench_t * 1000.0f), fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10,
+            pms10 / 10, pms10 % 10,
+            (u32)(g_bench_polys / g_bench_frames), (u32)(g_bench_pixels / g_bench_frames),
+            fb->width, fb->height, mode, fb->window_scale, g_sys.cpu_desc, g_sys.os_name,
+            g_sys.display_bpp);
 }
 
 void app_frame(ub_framebuffer *fb, const ub_input *in, u32 dt_us, ub_overlay *ov)
 {
+    if (!fb->palette) {
+        fb->palette = ub_render_palette();
+        fb->palette_serial++;
+    }
+    u32 real_dt_us = dt_us;
     if (dt_us > 100000) dt_us = 100000; /* clamp after stalls/debugger */
     const f32 dt = (f32)dt_us * 1e-6f;
+    g_time += dt;
+
+    /* --- text entry first: while it is open, keys do not move us --- */
+    bool was_typing = g_typing;
+    if (!g_bench) handle_typing(in);
+    bool play_keys = !was_typing && !g_typing && !g_bench;
+
+    /* --- function keys --- */
+    if (play_keys && in->key_pressed[UB_KEY_F3]) g_hide_overlay = !g_hide_overlay;
+    if (play_keys && in->key_pressed[UB_KEY_F5]) start_benchmark();
+    else if (g_bench && (in->key_pressed[UB_KEY_ESCAPE] || in->key_pressed[UB_KEY_F5])) {
+        finish_benchmark(fb, true);
+        play_keys = false; /* this Escape only cancels */
+    }
+    if (play_keys && in->key_pressed[UB_KEY_F6]) {
+        g_window_scale = fb->window_scale == 1 ? 2 : 1;
+        plat_set_window_scale(g_window_scale);
+    }
+    if (play_keys && in->key_pressed[UB_KEY_F8]) {
+        ub_pixel_format next = fb->format == UB_PIXEL_INDEX8 ? UB_PIXEL_XRGB32 : UB_PIXEL_INDEX8;
+        g_colors_cfg = next == UB_PIXEL_INDEX8 ? 8 : 32;
+        plat_set_pixel_format(next);
+    }
 
     /* --- camera controls --- */
-    bool want_look = in->mouse_down[UB_MOUSE_RIGHT] && in->has_focus;
+    bool want_look = in->mouse_down[UB_MOUSE_RIGHT] && in->has_focus && !g_bench;
     if (want_look != in->mouse_captured) ub_debug("mouse look %s", want_look ? "on" : "off");
     plat_set_mouse_capture(want_look);
     g_yaw += (f32)in->mouse_dx * LOOK_SENSITIVITY;
-    if (!g_typing && in->key_down[UB_KEY_LEFT]) g_yaw -= TURN_SPEED * dt;
-    if (!g_typing && in->key_down[UB_KEY_RIGHT]) g_yaw += TURN_SPEED * dt;
+    g_pitch = ub_clampf(g_pitch - (f32)in->mouse_dy * LOOK_SENSITIVITY, PITCH_MIN, PITCH_MAX);
+    if (play_keys && in->key_down[UB_KEY_LEFT]) g_yaw -= TURN_SPEED * dt;
+    if (play_keys && in->key_down[UB_KEY_RIGHT]) g_yaw += TURN_SPEED * dt;
     g_yaw = ub_wrap_angle(g_yaw);
     for (int n = in->wheel; n >= UB_WHEEL_NOTCH; n -= UB_WHEEL_NOTCH) g_zoom *= 0.88f;
     for (int n = in->wheel; n <= -UB_WHEEL_NOTCH; n += UB_WHEEL_NOTCH) g_zoom /= 0.88f;
@@ -369,11 +438,6 @@ void app_frame(ub_framebuffer *fb, const ub_input *in, u32 dt_us, ub_overlay *ov
 
     f32 fx = ub_sinf(g_yaw), fz = ub_cosf(g_yaw);
     f32 rx = fz, rz = -fx;
-
-    /* --- text entry first: while it is open, keys do not move us --- */
-    bool was_typing = g_typing;
-    handle_typing(in);
-    bool play_keys = !was_typing && !g_typing;
 
     /* --- movement, relative to the camera --- */
     f32 mf = 0, mr = 0;
@@ -384,8 +448,16 @@ void app_frame(ub_framebuffer *fb, const ub_input *in, u32 dt_us, ub_overlay *ov
         if (in->key_down['A']) mr -= 1;
     }
     if (mf != 0 && mr != 0) { mf *= 0.7071f; mr *= 0.7071f; }
-    g_px = ub_clampf(g_px + (fx * mf + rx * mr) * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
-    g_pz = ub_clampf(g_pz + (fz * mf + rz * mr) * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
+    f32 mx = fx * mf + rx * mr, mz = fz * mf + rz * mr;
+    if (mf != 0 || mr != 0) {
+        /* turn the character smoothly towards where it is going
+         * (yaw of direction (x, z) is atan2(x, z): yaw 0 faces +Z) */
+        f32 want = ub_atan2f(mx, mz);
+        f32 diff = ub_wrap_angle(want - g_facing);
+        g_facing = ub_wrap_angle(g_facing + diff * ub_clampf(dt * 12.0f, 0, 1));
+    }
+    g_px = ub_clampf(g_px + mx * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
+    g_pz = ub_clampf(g_pz + mz * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
 
     bool on_ground = g_py <= 0.0f;
     if (play_keys && in->key_down[UB_KEY_SPACE] && on_ground) {
@@ -412,10 +484,10 @@ void app_frame(ub_framebuffer *fb, const ub_input *in, u32 dt_us, ub_overlay *ov
         ub_mixer_set_master_volume(g_muted ? 0.0f : 0.8f);
         ub_debug("mute %s", g_muted ? "on" : "off");
     }
-    if (in->mouse_pressed[UB_MOUSE_LEFT]) {
+    if (!g_bench && in->mouse_pressed[UB_MOUSE_LEFT]) {
         ub_play_params p = ub_play_default();
         p.pan = (f32)(in->mouse_x * 2 - fb->width) / (f32)fb->width;
-        p.pitch = 2.0f - 1.5f * (f32)in->mouse_y / (f32)fb->height; /* higher up = higher pitch */
+        p.pitch = 2.0f - 1.5f * (f32)in->mouse_y / (f32)fb->height;
         ub_mixer_play(&g_snd_click, p);
         g_clicks++;
         ub_debug("click %u at %d,%d", g_clicks, in->mouse_x, in->mouse_y);
@@ -425,52 +497,96 @@ void app_frame(ub_framebuffer *fb, const ub_input *in, u32 dt_us, ub_overlay *ov
         plat_request_quit();
     }
 
-    /* --- render --- */
-    view v;
-    v.fx = fx; v.fz = fz; v.rx = rx; v.rz = rz;
-    v.cam_x = g_px - fx * g_zoom;
-    v.cam_z = g_pz - fz * g_zoom;
-    v.cam_h = 4.0f + g_zoom * 0.35f;
-    v.horizon = fb->height / 3;
-    draw_floor(fb, &v);
+    /* --- animate --- */
+    if (g_spinner >= 0)
+        g_parts[g_spinner].rot = mat3_from_euler(g_time * 0.9f, g_time * 0.5f, g_time * 0.3f);
 
-    sprite sprites[UB_ARRAY_COUNT(k_parts) + 1];
-    int count = 0;
-    for (int i = 0; i < UB_ARRAY_COUNT(k_parts); ++i) {
-        const part *p = &k_parts[i];
-        if (project(&v, fb, p->x, p->z, p->height, p->size, p->color, &sprites[count])) count++;
+    /* --- camera --- */
+    ub_camera cam;
+    vec3 target;
+    if (g_bench) {
+        /* fixed flythrough: orbit the room, then swoop through the door */
+        g_bench_t += (f32)real_dt_us * 1e-6f;
+        f32 t = g_bench_t / (f32)BENCH_SECONDS;
+        f32 a = t * UB_TWO_PI;
+        target = v3(0, 3, 40);
+        cam.yaw = a + UB_PI;
+        cam.pitch = -0.3f - 0.2f * ub_sinf(a * 2.0f);
+        f32 dist = 30.0f - 12.0f * ub_sinf(a);
+        cam.pos = v3(target.x + ub_sinf(a) * dist, 8.0f + 4.0f * ub_sinf(a * 2.0f),
+                     target.z + ub_cosf(a) * dist);
+        cam.yaw = ub_wrap_angle(cam.yaw);
+    } else {
+        target = v3(g_px, g_py + 2.5f, g_pz);
+        cam.yaw = g_yaw;
+        cam.pitch = g_pitch;
+        f32 cp = ub_cosf(g_pitch);
+        vec3 fwd = v3(fx * cp, ub_sinf(g_pitch), fz * cp);
+        cam.pos = v3_sub(target, v3_scale(fwd, g_zoom));
+        if (cam.pos.y < 0.5f) cam.pos.y = 0.5f; /* stay above the ground */
     }
-    if (project(&v, fb, g_px, g_pz, g_py, 8.0f, rgb(230, 70, 60), &sprites[count])) count++;
-    for (int i = 1; i < count; ++i) { /* far to near (painter's order) */
-        sprite s = sprites[i];
-        int j = i - 1;
-        while (j >= 0 && sprites[j].depth < s.depth) { sprites[j + 1] = sprites[j]; --j; }
-        sprites[j + 1] = s;
+    cam.fov_y = 70.0f * UB_PI / 180.0f;
+    cam.far_dist = 400.0f;
+
+    /* --- render --- */
+    ub_render_env env = ub_render_default_env();
+    ub_render_begin(fb, &cam, &env);
+    for (int i = 0; i < g_part_count; ++i) ub_render_part(&g_parts[i]);
+    if (!g_bench) {
+        ub_part_draw me;
+        me.pos = v3(g_px, g_py + 1.5f, g_pz);
+        me.rot = mat3_from_euler(g_facing, 0, 0);
+        me.size = v3(2, 3, 1.2f);
+        me.color = 0xE04A3C;
+        me.shape = UB_SHAPE_BOX;
+        me.material = UB_MAT_PLASTIC;
+        ub_render_part(&me);
+        ub_part_draw head = me;
+        head.pos = v3(g_px, g_py + 3.6f, g_pz);
+        head.size = v3(1.2f, 1.2f, 1.2f);
+        head.color = 0xF2C9A0;
+        head.shape = UB_SHAPE_BALL;
+        ub_render_part(&head);
     }
-    for (int i = 0; i < count; ++i) draw_sprite(fb, &sprites[i]);
+    ub_render_end(&g_stats);
+
+    if (g_bench) {
+        g_bench_frames++;
+        g_bench_render_us += g_stats.render_us;
+        g_bench_present_us += fb->present_us;
+        g_bench_polys += g_stats.polys_drawn;
+        g_bench_pixels += g_stats.pixels_tested;
+        if (g_bench_t >= (f32)BENCH_SECONDS) finish_benchmark(fb, false);
+    }
 
     /* --- overlay --- */
     g_fps_frames++;
-    g_fps_accum_us += dt_us;
+    g_fps_accum_us += real_dt_us;
     if (g_fps_accum_us >= 500000) {
         g_fps_x10 = (u32)((u64)g_fps_frames * 10000000u / g_fps_accum_us);
         g_fps_frames = 0;
         g_fps_accum_us = 0;
     }
-    u32 ram_mb = (u32)(g_sys.total_phys_bytes >> 20);
     ov->count = 0;
+    if (g_hide_overlay && !g_bench) return;
 #define LINE(...) ub_fmt(ov->lines[ov->count++], UB_OVERLAY_LINE_LEN, __VA_ARGS__)
-    LINE("Uniblox milestone 1 - %s", g_sys.os_name);
-    LINE("%u.%u fps   RAM %u MB%s   display %d bpp", g_fps_x10 / 10, g_fps_x10 % 10, ram_mb,
-         ram_mb + 8 < UB_RAM_MIN_MB ? " (below 384 MB minimum!)" : "", g_sys.display_bpp);
-    LINE("Audio: %s, %d voices%s", g_sys.audio_desc, ub_mixer_active_voices(),
-         g_muted ? ", MUTED" : "");
-    LINE("Mouse %d,%d  look %s  zoom %d  wheel %s", in->mouse_x, in->mouse_y,
-         in->mouse_captured ? "ON" : "off", (i32)g_zoom,
-         g_sys.has_mouse_wheel ? "yes" : "not reported");
-    if (g_typing) LINE("Say: %s_   (Enter send, Esc cancel)", g_typed);
-    else LINE("Last message: %s", g_last_message[0] ? g_last_message : "(press Enter or / to type)");
-    LINE("WASD/arrows move, Space jump, hold right mouse to look");
-    LINE("Wheel zoom, left click beeps, M mute, Esc quit");
+    u32 rms10 = g_stats.render_us / 100u, pms10 = fb->present_us / 100u;
+    LINE("Uniblox milestone 2 - %s", g_sys.os_name);
+    LINE("%s", g_sys.cpu_desc);
+    LINE("%u.%u fps  render %u.%u ms  display %u.%u ms  %u polys  %s %dx", g_fps_x10 / 10,
+         g_fps_x10 % 10, rms10 / 10, rms10 % 10, pms10 / 10, pms10 % 10, g_stats.polys_drawn,
+         fb->format == UB_PIXEL_INDEX8 ? "8-bit" : "32-bit", fb->window_scale);
+    if (g_bench) {
+        LINE("BENCHMARK running: %u s left (Esc cancels)",
+             (u32)((f32)BENCH_SECONDS - g_bench_t) + 1u);
+    } else {
+        LINE("Audio: %s%s   display %d bpp", g_sys.audio_desc, g_muted ? " (muted)" : "",
+             g_sys.display_bpp);
+        if (g_bench_result[0]) LINE("%s", g_bench_result);
+        if (g_typing) LINE("Say: %s_   (Enter send, Esc cancel)", g_typed);
+        else if (g_last_message[0]) LINE("Last message: %s", g_last_message);
+        LINE("WASD move, Space jump, right mouse look, wheel zoom");
+        LINE("F5 benchmark, F6 size, F8 colours, F3 hide text, Esc quit");
+    }
 #undef LINE
 }

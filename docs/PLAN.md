@@ -53,7 +53,7 @@ src/crt/        memcpy/memset/... (GCC emits calls to these); later
 src/core/       types, strings, UTF-8, safe paths, log, math (later containers, arenas)
 src/audio/      WAV loader, software mixer (32 voices, pitch, pan)
 src/platform/   OS interface; win32/ backend (later posix/ for the server)
-src/render/     sw/ software rasterizer (guaranteed path), gl/ OpenGL 1.x
+src/render/     software renderer: meshes, procedural textures, palette (later gl/ for OpenGL 1.x)
 src/world/      object tree, typed properties, events, place file I/O
 src/physics/    box/sphere collision, impulse solver, sleeping islands
 src/script/     sandboxed Lua 5.1 + Uniblox API
@@ -69,8 +69,8 @@ tests/          host unit tests (make test)
 | # | Milestone | Exit test | Status |
 |---|---|---|---|
 | 0 | Toolchain + hello window | One .exe runs on NT 3.51, 4.0, 2000, XP | **Done.** Confirmed running on a real install |
-| 1 | Platform layer | Input, timing, audio (waveOut), file I/O, a log file | **Built.** Passes unit tests and the Wine smoke test (NT 3.51/4.0/2000/XP settings); needs a real-hardware check, especially sound |
-| 2 | Software renderer | Textured, lit room of parts at 15+ fps, 320x240, on a Pentium-class VM, in 8-bit and 16-bit display modes | |
+| 1 | Platform layer | Input, timing, audio (waveOut), file I/O, a log file | **Done.** Confirmed working on a real install |
+| 2 | Software renderer | Textured, lit room of parts at 15+ fps, 320x240, on a Pentium-class VM, in 8-bit and 16-bit display modes | **Built.** Passes unit tests and the Wine smoke test. Needs: F5 benchmark on a Pentium-class VM, and a run on a real 256-colour desktop |
 | 3 | World model + place files | Save/load round-trips byte for byte | |
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | |
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | |
@@ -109,13 +109,41 @@ tests/          host unit tests (make test)
 - **Text input:** chat-style, with Enter or `/` to open it, so movement keys
   don't leak into typed text.
 
+## Milestone 2 notes
+
+- **Pipeline:** per part, a bounding-sphere frustum cull; then per face, a
+  back-face cull, flat sun + sky lighting, clipping against the near plane
+  and all four screen edges, and scan conversion as one convex polygon with
+  the top-left fill rule (no gaps or overlaps between faces).
+- **Visibility:** a 32-bit z-buffer of 1/z, so intersecting parts sort
+  correctly per pixel.
+- **Textures:** perspective-correct. 1/z, u/z and v/z are interpolated and
+  divided once every 16 pixels. Textures are 64x64 brightness maps
+  generated at startup (grid, brick, wood, grass, metal, stone), so any
+  part colour works with any material and the `.exe` needs no image files.
+- **Per-pixel cost:** each face's colour comes from a 32-entry lookup table
+  (lighting x texel brightness, or palette index with 2x2 dither). The
+  tables are cached across frames, so a static scene rebuilds almost none.
+- **8-bit mode:** 236 colours (6x6x6 cube + 20 greys) in palette slots
+  10-245, leaving Windows' 20 static colours alone. On a 256-colour desktop
+  the game builds and realises a Windows palette and blits with
+  `DIB_PAL_COLORS`.
+- **Shapes:** box, wedge, cylinder (12 sides) and ball (6x10), all flat
+  shaded.
+- **Measuring:** F5 runs a fixed 10-second flythrough and logs fps, render
+  and display time, CPU (from CPUID, with a clock measured from the TSC),
+  OS and colour depth. F6 drops the window to 1x to skip GDI's stretch.
+
 ## Open items
 
-- Real-hardware/emulator validation of milestone 1, especially sound on
-  NT 3.51 and NT 4.0 drivers, and the mouse wheel on NT 4.0.
+- Milestone 2 speed on a Pentium-class machine: run F5 in 86Box or PCem
+  and send the `benchmark:` line from `uniblox.log`. On a modern CPU under
+  Wine a frame takes about 1.1 ms to render and 0.9 ms to display; that
+  says little about a Pentium.
+- The 256-colour palette path can't be tested in Wine: its 8-bit display
+  mode shows almost nothing in colour even for the milestone 1 build, which
+  has no palette code. It needs a run on a real 256-colour NT desktop.
 - `.eh_frame` from libgcc ends up in the image (shown truncated as
   `.eh_fram`). The loader ignores it; drop it later with a linker script.
-- 8-bit display mode: GDI currently maps our 24-bit output onto the
-  system palette. Milestone 2 adds a proper palette path.
 - The name "Uniblox" is close to an existing trademark in the same genre.
   Fine as a codename; check it before any public release.

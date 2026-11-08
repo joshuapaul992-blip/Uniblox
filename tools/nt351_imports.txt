@@ -75,6 +75,9 @@ ReleaseCapture
 GetFocus
 GetSystemMetrics
 RegisterWindowMessageW
+# milestone 2
+InvalidateRect
+SetWindowPos
 
 [GDI32.DLL]
 BitBlt
@@ -89,6 +92,11 @@ SetStretchBltMode
 SetTextColor
 StretchDIBits
 TextOutW
+# milestone 2: 256-colour palettes
+CreatePalette
+SelectPalette
+RealizePalette
+GetSystemPaletteEntries
 
 [WINMM.DLL]
 timeBeginPeriod

@@ -59,7 +59,7 @@ start_game
 xdotool keydown w; sleep 0.4; xdotool keyup w           # move
 xdotool keydown space; sleep 0.1; xdotool keyup space   # jump
 sleep 0.8
-xdotool key Return; xdotool type --delay 50 'hi'; xdotool key Return   # chat text
+xdotool key --delay 0 Return h i Return                 # chat text, all in one burst
 xdotool key slash; xdotool type 'x'; xdotool key Escape  # open + cancel: must not quit
 eval "$(xdotool getwindowgeometry --shell "$WIN")"
 # Wine can drop a button event that arrives in the same instant as the
@@ -76,6 +76,11 @@ for _ in 1 2 3 4 5; do xdotool mousemove_relative -- 20 0; sleep 0.1; done
 xdotool mouseup 3
 sleep 0.5
 import -window root "$SHOT"
+xdotool key F8; sleep 1                                 # 8-bit palette rendering
+import -window root "${SHOT%.png}-8bit.png"
+xdotool key F8; sleep 0.3                               # back to 32-bit
+xdotool key F6; sleep 0.5; xdotool key F6; sleep 0.3    # window 1x, then back to 2x
+xdotool key F5; sleep 11.5                              # benchmark (10 s)
 stop_game
 
 # Run 2: settings must load back.
@@ -99,9 +104,14 @@ expect "$DIR/uniblox.old.log" "typed: hi" "typed text received"
 expect "$DIR/uniblox.old.log" "click 1 at" "left click received"
 expect "$DIR/uniblox.old.log" "mouse look on" "right button started mouse-look"
 expect "$DIR/uniblox.old.log" "saved uniblox.cfg" "settings saved"
-expect "$CFG" "zoom=23" "mouse wheel zoomed in 3 notches (34 -> 23)"
+expect "$DIR/uniblox.old.log" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
+expect "$DIR/uniblox.old.log" "benchmark: [0-9]* frames" "F5 benchmark completed"
+expect "$CFG" "colors=32" "colour choice saved"
+expect "$DIR/uniblox.old.log" "window scale 1x" "F6 resized the window"
+expect "$CFG" "zoom=14" "mouse wheel zoomed in 3 notches (22 -> 14)"
 if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
 else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
-echo "Screenshot: $SHOT"
+grep -o "benchmark: [0-9]* frames.*per frame" "$DIR/uniblox.old.log" | sed 's/^/  /' || true
+echo "Screenshot: $SHOT (8-bit: ${SHOT%.png}-8bit.png)"
 echo "Log:        $LOG (previous run: $DIR/uniblox.old.log)"
 exit $fail
