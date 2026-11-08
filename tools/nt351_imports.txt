@@ -20,6 +20,29 @@ QueryPerformanceFrequency
 GetTickCount
 Sleep
 OutputDebugStringA
+# milestone 1: files
+CreateFileW
+ReadFile
+WriteFile
+CloseHandle
+GetFileSize
+SetFilePointer
+FlushFileBuffers
+DeleteFileW
+GetFileAttributesW
+MoveFileExW
+GetModuleFileNameW
+GetLocalTime
+# milestone 1: threads and synchronisation
+CreateThread
+SetThreadPriority
+WaitForSingleObject
+CreateEventW
+SetEvent
+InitializeCriticalSection
+EnterCriticalSection
+LeaveCriticalSection
+DeleteCriticalSection
 
 [USER32.DLL]
 AdjustWindowRect
@@ -41,6 +64,17 @@ ReleaseDC
 ShowWindow
 TranslateMessage
 UpdateWindow
+# milestone 1: mouse and input
+ClientToScreen
+ClipCursor
+GetCursorPos
+SetCursorPos
+ShowCursor
+SetCapture
+ReleaseCapture
+GetFocus
+GetSystemMetrics
+RegisterWindowMessageW
 
 [GDI32.DLL]
 BitBlt
@@ -59,3 +93,11 @@ TextOutW
 [WINMM.DLL]
 timeBeginPeriod
 timeEndPeriod
+# milestone 1: audio
+waveOutGetNumDevs
+waveOutOpen
+waveOutClose
+waveOutPrepareHeader
+waveOutUnprepareHeader
+waveOutWrite
+waveOutReset

@@ -1,28 +1,32 @@
-/* Uniblox - Win32 platform backend.
- *
- * Baseline target is Windows NT 3.51, so this file may only call APIs that
- * exist there. tools/checkpe.py enforces that every function the .exe
- * imports is on the vetted list in tools/nt351_imports.txt. Anything newer
- * (mouse wheel, Raw Input, GlobalMemoryStatusEx, Direct3D, ...) must be
- * looked up at runtime with GetProcAddress and have a fallback.
+/* Uniblox - Win32 window, input and main loop.
  *
  * Display path: the app renders 32-bit XRGB top-down; we convert to a
  * bottom-up 24-bit DIB (the format every Windows version supports), stretch
  * it into an off-screen bitmap, draw overlay text with GDI, then BitBlt to
- * the window so there is no flicker. */
-#include <windows.h>
-#include <mmsystem.h>
-#include <stdarg.h>
-
-#include "platform/platform.h"
+ * the window so there is no flicker.
+ *
+ * Input: keyboard via WM_KEYDOWN/WM_KEYUP/WM_CHAR, mouse via the button
+ * and WM_MOUSEMOVE messages.
+ * Mouse-look re-centres the cursor every frame and reports the offset, the
+ * only relative-mouse method that works on NT 3.51 (Raw Input is XP+).
+ * The wheel arrives as WM_MOUSEWHEEL (NT 4.0+) or the registered
+ * "MSWHEEL_ROLLMSG" message that older IntelliPoint drivers send. */
+#include "platform/win32/win32_internal.h"
 #include "app/app.h"
+#include "audio/ub_mixer.h"
+#include "core/ub_log.h"
 #include "core/ub_string.h"
+#include "core/ub_utf.h"
 #include "crt/ub_crt.h"
 
+#ifndef WM_MOUSEWHEEL
+#define WM_MOUSEWHEEL 0x020A
+#endif
+#ifndef SM_MOUSEWHEELPRESENT
+#define SM_MOUSEWHEELPRESENT 75
+#endif
+
 static HWND g_hwnd;
-static HANDLE g_heap;
-static LARGE_INTEGER g_qpf, g_qpc0;
-static bool g_has_qpc;
 static ub_input g_input;
 static ub_overlay g_overlay;
 static ub_framebuffer g_fb;
@@ -32,63 +36,11 @@ static BITMAPINFO g_bmi;
 static HDC g_memdc;
 static HBITMAP g_membmp, g_oldbmp;
 static int g_mem_w, g_mem_h;
-
-/* ---------------------------------------------------------------- utils */
-
-u64 plat_time_us(void)
-{
-    if (g_has_qpc) {
-        LARGE_INTEGER now;
-        QueryPerformanceCounter(&now);
-        u64 ticks = (u64)(now.QuadPart - g_qpc0.QuadPart);
-        u64 freq = (u64)g_qpf.QuadPart;
-        return (ticks / freq) * 1000000u + ((ticks % freq) * 1000000u) / freq;
-    }
-    return (u64)GetTickCount() * 1000u;
-}
-
-void *plat_alloc(size_t bytes)
-{
-    return HeapAlloc(g_heap, HEAP_ZERO_MEMORY, bytes);
-}
-
-void plat_free(void *p)
-{
-    if (p) HeapFree(g_heap, 0, p);
-}
-
-void plat_log(const char *fmt, ...)
-{
-    char buf[512];
-    va_list ap;
-    va_start(ap, fmt);
-    ub_vfmt(buf, sizeof buf, fmt, ap);
-    va_end(ap);
-    OutputDebugStringA(buf);
-}
-
-/* ASCII/UTF-8 -> UTF-16 without MultiByteToWideChar(CP_UTF8), which NT 3.51
- * lacks. Handles 1-3 byte sequences (the BMP); anything else becomes '?'. */
-static int utf8_to_wide(const char *s, WCHAR *out, int cap)
-{
-    int n = 0;
-    const u8 *p = (const u8 *)s;
-    while (*p && n + 1 < cap) {
-        u32 c = *p++;
-        if (c >= 0xE0 && (p[0] & 0xC0) == 0x80 && (p[1] & 0xC0) == 0x80) {
-            c = ((c & 0x0F) << 12) | ((u32)(p[0] & 0x3F) << 6) | (p[1] & 0x3F);
-            p += 2;
-        } else if (c >= 0xC0 && c < 0xE0 && (p[0] & 0xC0) == 0x80) {
-            c = ((c & 0x1F) << 6) | (p[0] & 0x3F);
-            p += 1;
-        } else if (c >= 0x80) {
-            c = '?';
-        }
-        out[n++] = (WCHAR)c;
-    }
-    out[n] = 0;
-    return n;
-}
+static UINT g_msh_wheel_msg; /* registered wheel message, 0 if unavailable */
+static int g_text_len;
+static u16 g_high_surrogate;
+static bool g_look;          /* mouse-look active */
+static POINT g_look_restore; /* cursor position to restore afterwards */
 
 /* ---------------------------------------------------------- system info */
 
@@ -135,6 +87,9 @@ static void query_system(ub_system_info *sys)
     HDC dc = GetDC(NULL);
     sys->display_bpp = GetDeviceCaps(dc, BITSPIXEL) * GetDeviceCaps(dc, PLANES);
     ReleaseDC(NULL, dc);
+
+    /* Unknown indexes return 0 on older systems, so this is safe on 3.51. */
+    sys->has_mouse_wheel = GetSystemMetrics(SM_MOUSEWHEELPRESENT) != 0;
 }
 
 /* ------------------------------------------------------------- display */
@@ -203,22 +158,170 @@ static void present(HDC wdc)
 
     SetBkMode(g_memdc, TRANSPARENT);
     for (int i = 0; i < g_overlay.count; ++i) {
-        WCHAR wide[UB_OVERLAY_LINE_LEN];
-        int n = utf8_to_wide(g_overlay.lines[i], wide, UB_OVERLAY_LINE_LEN);
+        u16 wide[UB_OVERLAY_LINE_LEN];
+        int n = ub_utf8_to_utf16(g_overlay.lines[i], wide, UB_OVERLAY_LINE_LEN);
         int y = 4 + i * 16;
         SetTextColor(g_memdc, RGB(0, 0, 0));
-        TextOutW(g_memdc, 7, y + 1, wide, n);       /* drop shadow */
+        TextOutW(g_memdc, 7, y + 1, (LPCWSTR)wide, n);   /* drop shadow */
         SetTextColor(g_memdc, RGB(255, 255, 255));
-        TextOutW(g_memdc, 6, y, wide, n);
+        TextOutW(g_memdc, 6, y, (LPCWSTR)wide, n);
     }
 
     BitBlt(wdc, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
+}
+
+/* ---------------------------------------------------------------- input */
+
+static bool any_mouse_down(void)
+{
+    for (int i = 0; i < UB_MOUSE_BUTTONS; ++i) {
+        if (g_input.mouse_down[i]) return true;
+    }
+    return false;
+}
+
+static void client_center_screen(POINT *c, RECT *clip)
+{
+    RECT rc;
+    GetClientRect(g_hwnd, &rc);
+    POINT tl = { rc.left, rc.top }, br = { rc.right, rc.bottom };
+    ClientToScreen(g_hwnd, &tl);
+    ClientToScreen(g_hwnd, &br);
+    c->x = (tl.x + br.x) / 2;
+    c->y = (tl.y + br.y) / 2;
+    if (clip) {
+        clip->left = tl.x;
+        clip->top = tl.y;
+        clip->right = br.x;
+        clip->bottom = br.y;
+    }
+}
+
+void plat_set_mouse_capture(bool on)
+{
+    if (on && !g_input.has_focus) return;
+    if (on == g_look) return;
+    g_look = on;
+    g_input.mouse_captured = on;
+    if (on) {
+        POINT c;
+        RECT clip;
+        GetCursorPos(&g_look_restore);
+        SetCapture(g_hwnd);
+        ShowCursor(FALSE);
+        client_center_screen(&c, &clip);
+        ClipCursor(&clip);
+        SetCursorPos(c.x, c.y);
+    } else {
+        ClipCursor(NULL);
+        SetCursorPos(g_look_restore.x, g_look_restore.y);
+        ShowCursor(TRUE);
+        if (!any_mouse_down()) ReleaseCapture();
+    }
+}
+
+void plat_request_quit(void)
+{
+    g_input.quit_requested = true;
+}
+
+static void begin_input_frame(void)
+{
+    memset(g_input.key_pressed, 0, sizeof g_input.key_pressed);
+    memset(g_input.key_released, 0, sizeof g_input.key_released);
+    memset(g_input.mouse_pressed, 0, sizeof g_input.mouse_pressed);
+    memset(g_input.mouse_released, 0, sizeof g_input.mouse_released);
+    g_input.mouse_dx = g_input.mouse_dy = 0;
+    g_input.wheel = 0;
+    g_input.text[0] = 0;
+    g_text_len = 0;
+}
+
+static void poll_mouse_look(void)
+{
+    if (!g_look) return;
+    POINT p, c;
+    RECT clip;
+    GetCursorPos(&p);
+    client_center_screen(&c, &clip);
+    g_input.mouse_dx += p.x - c.x;
+    g_input.mouse_dy += p.y - c.y;
+    ClipCursor(&clip); /* the window may have moved */
+    SetCursorPos(c.x, c.y);
+}
+
+static void release_everything(void)
+{
+    for (int k = 0; k < UB_KEY_COUNT; ++k) {
+        if (g_input.key_down[k]) g_input.key_released[k] = true;
+        g_input.key_down[k] = false;
+    }
+    for (int b = 0; b < UB_MOUSE_BUTTONS; ++b) {
+        if (g_input.mouse_down[b]) g_input.mouse_released[b] = true;
+        g_input.mouse_down[b] = false;
+    }
+    plat_set_mouse_capture(false);
+    ReleaseCapture();
+}
+
+static void add_text_char(u32 cp)
+{
+    char tmp[4];
+    int n = ub_utf8_encode(cp, tmp);
+    if (g_text_len + n >= UB_TEXT_INPUT_MAX) return;
+    for (int i = 0; i < n; ++i) g_input.text[g_text_len++] = tmp[i];
+    g_input.text[g_text_len] = 0;
+}
+
+static void on_char(WPARAM wp)
+{
+    u32 c = (u32)(wp & 0xFFFF);
+    if (c >= 0xD800 && c <= 0xDBFF) {
+        g_high_surrogate = (u16)c;
+        return;
+    }
+    if (c >= 0xDC00 && c <= 0xDFFF) {
+        if (!g_high_surrogate) return;
+        c = 0x10000 + (((u32)g_high_surrogate - 0xD800) << 10) + (c - 0xDC00);
+    }
+    g_high_surrogate = 0;
+    if (c < 32 || c == 127) return; /* control keys come through key_pressed */
+    add_text_char(c);
+}
+
+static void on_mouse_button(int button, bool down, LPARAM lp)
+{
+    if (down && !g_input.mouse_down[button]) g_input.mouse_pressed[button] = true;
+    if (!down && g_input.mouse_down[button]) g_input.mouse_released[button] = true;
+    g_input.mouse_down[button] = down;
+    if (down) {
+        SetCapture(g_hwnd); /* keep getting the button-up outside the window */
+    } else if (!any_mouse_down() && !g_look) {
+        ReleaseCapture();
+    }
+    (void)lp;
+}
+
+static void update_mouse_pos(LPARAM lp)
+{
+    if (g_look) return; /* the pointer is pinned to the centre */
+    RECT rc;
+    GetClientRect(g_hwnd, &rc);
+    int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
+    if (rc.right > 0 && rc.bottom > 0) {
+        g_input.mouse_x = mx * g_fb.width / rc.right;
+        g_input.mouse_y = my * g_fb.height / rc.bottom;
+    }
 }
 
 /* --------------------------------------------------------------- window */
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    if (g_msh_wheel_msg && msg == g_msh_wheel_msg) {
+        g_input.wheel += (int)wp;
+        return 0;
+    }
     switch (msg) {
     case WM_CLOSE:
         g_input.quit_requested = true;
@@ -226,29 +329,48 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
-    case WM_KEYDOWN:
-    case WM_SYSKEYDOWN:
-        g_input.key_down[wp & 0xFF] = true;
-        if (wp == VK_ESCAPE) g_input.quit_requested = true;
-        break;
-    case WM_KEYUP:
-    case WM_SYSKEYUP:
-        g_input.key_down[wp & 0xFF] = false;
-        break;
+    case WM_SETFOCUS:
+        g_input.has_focus = true;
+        return 0;
     case WM_KILLFOCUS:
-        memset(g_input.key_down, 0, sizeof g_input.key_down);
-        break;
-    case WM_MOUSEMOVE: {
-        RECT rc;
-        GetClientRect(hwnd, &rc);
-        int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
-        if (rc.right > 0 && rc.bottom > 0) {
-            g_input.mouse_x = mx * g_fb.width / rc.right;
-            g_input.mouse_y = my * g_fb.height / rc.bottom;
-        }
-        g_input.mouse_left = (wp & MK_LBUTTON) != 0;
-        g_input.mouse_right = (wp & MK_RBUTTON) != 0;
-    } break;
+        g_input.has_focus = false;
+        release_everything();
+        return 0;
+    case WM_KEYDOWN:
+    case WM_SYSKEYDOWN: {
+        int k = (int)(wp & 0xFF);
+        bool was_down = (lp & (1L << 30)) != 0; /* auto-repeat */
+        if (!was_down) g_input.key_pressed[k] = true;
+        g_input.key_down[k] = true;
+        /* Let Alt+F4 through; swallow other system keys so a lone Alt or
+         * F10 does not freeze the game loop in menu mode. */
+        if (msg == WM_SYSKEYDOWN && wp == VK_F4) break;
+        return 0;
+    }
+    case WM_KEYUP:
+    case WM_SYSKEYUP: {
+        int k = (int)(wp & 0xFF);
+        if (g_input.key_down[k]) g_input.key_released[k] = true;
+        g_input.key_down[k] = false;
+        return 0;
+    }
+    case WM_CHAR:
+        on_char(wp);
+        return 0;
+    case WM_SYSCHAR:
+        return 0; /* no beep for Alt+letter */
+    case WM_MOUSEMOVE:
+        update_mouse_pos(lp);
+        return 0;
+    case WM_LBUTTONDOWN: update_mouse_pos(lp); on_mouse_button(UB_MOUSE_LEFT, true, lp); return 0;
+    case WM_LBUTTONUP:   update_mouse_pos(lp); on_mouse_button(UB_MOUSE_LEFT, false, lp); return 0;
+    case WM_RBUTTONDOWN: update_mouse_pos(lp); on_mouse_button(UB_MOUSE_RIGHT, true, lp); return 0;
+    case WM_RBUTTONUP:   update_mouse_pos(lp); on_mouse_button(UB_MOUSE_RIGHT, false, lp); return 0;
+    case WM_MBUTTONDOWN: update_mouse_pos(lp); on_mouse_button(UB_MOUSE_MIDDLE, true, lp); return 0;
+    case WM_MBUTTONUP:   update_mouse_pos(lp); on_mouse_button(UB_MOUSE_MIDDLE, false, lp); return 0;
+    case WM_MOUSEWHEEL:
+        g_input.wheel += (short)HIWORD(wp);
+        return 0;
     case WM_ERASEBKGND:
         return 1; /* we paint every pixel */
     case WM_PAINT: {
@@ -284,6 +406,7 @@ static bool create_window(HINSTANCE inst)
     if (!g_hwnd) return false;
     ShowWindow(g_hwnd, SW_SHOWNORMAL);
     UpdateWindow(g_hwnd);
+    g_input.has_focus = GetFocus() == g_hwnd;
     return true;
 }
 
@@ -291,6 +414,10 @@ static bool create_window(HINSTANCE inst)
 
 static int fatal(const WCHAR *what)
 {
+    char utf8[512];
+    ub_utf16_to_utf8((const u16 *)what, utf8, sizeof utf8); /* WCHAR is 16-bit on Win32 */
+    ub_error("fatal: %s", utf8);
+    ub_log_close();
     MessageBoxW(NULL, what, L"Uniblox", MB_OK | MB_ICONSTOP);
     return 1;
 }
@@ -298,35 +425,47 @@ static int fatal(const WCHAR *what)
 static int win32_main(void)
 {
     HINSTANCE inst = GetModuleHandleW(NULL);
-    g_heap = GetProcessHeap();
-    g_has_qpc = QueryPerformanceFrequency(&g_qpf) && g_qpf.QuadPart > 0;
-    if (g_has_qpc) QueryPerformanceCounter(&g_qpc0);
     timeBeginPeriod(1); /* 1 ms Sleep() granularity for the frame limiter */
+    win32_init_base_dir();
+    ub_log_open("uniblox.log", "uniblox.old.log");
 
     ub_system_info sys;
     memset(&sys, 0, sizeof sys);
     query_system(&sys);
+    {
+        char base[MAX_PATH * 3];
+        ub_utf16_to_utf8((const u16 *)win32_base_dir(), base, sizeof base);
+        ub_info("running from %s", base[0] ? base : "(current directory)");
+    }
+    ub_info("%s, %u MB RAM, %d bpp display, mouse wheel %s", sys.os_name,
+            (u32)(sys.total_phys_bytes >> 20), sys.display_bpp,
+            sys.has_mouse_wheel ? "reported" : "not reported");
+
+    g_msh_wheel_msg = RegisterWindowMessageW(L"MSWHEEL_ROLLMSG");
 
     if (!create_framebuffer()) return fatal(L"Out of memory allocating the framebuffer.");
     if (!create_window(inst)) return fatal(L"Could not create the main window.");
-    if (!app_init(&sys)) return fatal(L"Uniblox failed to initialise.");
+    win32_audio_open(&sys);
+    if (!app_init(&sys)) return fatal(L"Uniblox failed to initialise. See uniblox.log.");
 
     const u64 frame_us = 1000000u / 60u;
     u64 last = plat_time_us();
     MSG msg;
     while (!g_input.quit_requested) {
+        begin_input_frame();
         while (PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) g_input.quit_requested = true;
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if (g_input.quit_requested) break;
+        poll_mouse_look();
 
         u64 now = plat_time_us();
         u32 dt = (u32)(now - last);
         last = now;
 
         app_frame(&g_fb, &g_input, dt, &g_overlay);
+        if (g_input.quit_requested) break;
         convert_framebuffer();
         HDC dc = GetDC(g_hwnd);
         present(dc);
@@ -336,9 +475,15 @@ static int win32_main(void)
         if (spent < frame_us) Sleep((DWORD)((frame_us - spent) / 1000u));
     }
 
+    ub_info("shutting down");
+    plat_set_mouse_capture(false);
     app_shutdown();
+    win32_audio_close();
+    ub_mixer_shutdown();
     timeEndPeriod(1);
     DestroyWindow(g_hwnd);
+    ub_info("shutdown complete");
+    ub_log_close();
     return 0;
 }
 

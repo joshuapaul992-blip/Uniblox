@@ -21,11 +21,23 @@ CPU     ?= pentium
 OUT     := build/win32
 EXE     := $(OUT)/uniblox.exe
 
+# Engine sources shared by every build (no OS calls).
+CORE_SRCS := \
+	src/core/ub_string.c \
+	src/core/ub_math.c \
+	src/core/ub_utf.c \
+	src/core/ub_path.c \
+	src/core/ub_log.c \
+	src/audio/ub_mixer.c \
+	src/audio/ub_wav.c
+
 SRCS := \
 	src/crt/ub_crt.c \
-	src/core/ub_string.c \
-	src/app/app_hello.c \
-	src/platform/win32/win32_main.c
+	$(CORE_SRCS) \
+	src/app/app_demo.c \
+	src/platform/win32/win32_main.c \
+	src/platform/win32/win32_file.c \
+	src/platform/win32/win32_audio.c
 
 OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
@@ -65,7 +77,15 @@ LIBGCC ?= $(shell $(CROSS)gcc -print-libgcc-file-name)
 
 LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 
-.PHONY: all check clean
+# Host unit tests: the OS-independent code compiled natively for Linux with
+# AddressSanitizer and UBSan, against a stub platform layer.
+HOSTCC     ?= cc
+TEST_BIN   := build/host/uniblox_tests
+TEST_SRCS  := tests/test_main.c tests/stub_platform.c $(CORE_SRCS)
+TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Wno-unused-parameter -Isrc \
+	-fsanitize=address,undefined -fno-sanitize-recover=all
+
+.PHONY: all check test clean
 
 all: $(EXE)
 
@@ -79,6 +99,13 @@ $(OUT)/obj/%.o: src/%.c
 
 check: $(EXE)
 	$(PYTHON) tools/checkpe.py --allow tools/nt351_imports.txt $(EXE)
+
+test: $(TEST_BIN)
+	./$(TEST_BIN)
+
+$(TEST_BIN): $(TEST_SRCS) $(wildcard src/*/*.h src/*/*/*.h)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(TEST_FLAGS) -o $@ $(TEST_SRCS) -lm
 
 clean:
 	rm -rf build
