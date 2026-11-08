@@ -497,12 +497,13 @@ static void finish_benchmark(ub_frame *frame, bool cancelled)
            fps10 / 10, fps10 % 10, frame->width, frame->height, backend, mode_name(frame),
            ms10 / 10, ms10 % 10, pms10 / 10, pms10 % 10);
     ub_info("benchmark: %u frames in %u ms = %u.%u fps; render %u.%u ms/frame, present %u.%u ms/frame; "
-            "%u polys, %u pixels per frame; window %dx%d, render %dx%d; %s %s; %s; %s; %s",
+            "%u polys, %u pixels per frame; window %dx%d, render %dx%d; %s %s; %s; %s; %s%s%s",
             g_bench_frames, (u32)(g_bench_t * 1000.0f), fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10,
             pms10 / 10, pms10 % 10,
             (u32)(g_bench_polys / g_bench_frames), (u32)(g_bench_pixels / g_bench_frames),
             frame->width, frame->height, rw, rh, backend, mode_name(frame), g_renderer_desc,
-            g_sys.cpu_desc, g_sys.os_name);
+            g_sys.cpu_desc, g_sys.os_name, frame->present_detail[0] ? "; present: " : "",
+            frame->present_detail);
 }
 
 void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
@@ -705,6 +706,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         LINE("%u.%u fps (cap %s)  %dx%d %s  CPU %u.%u ms  present %u.%u ms  %u tris",
              g_fps_x10 / 10, g_fps_x10 % 10, cap, frame->width, frame->height, mode_name(frame),
              rms10 / 10, rms10 % 10, pms10 / 10, pms10 % 10, g_stats.polys_drawn);
+        if (frame->present_detail[0]) LINE("Present: %s", frame->present_detail);
         if (g_bench) {
             LINE("BENCHMARK running: %u s left (Esc cancels)", (u32)((f32)BENCH_SECONDS - g_bench_t) + 1u);
         } else {

@@ -46,6 +46,9 @@ DeleteCriticalSection
 # milestone 2.5: OpenGL is loaded at run time, never imported
 LoadLibraryA
 FreeLibrary
+SetErrorMode
+GetLastError
+GetSystemDirectoryA
 
 [USER32.DLL]
 AdjustWindowRect

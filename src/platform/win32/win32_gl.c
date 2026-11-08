@@ -40,26 +40,60 @@ void *plat_gl_proc(const char *name)
     return p;
 }
 
-bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver)
+/* Load an opengl32.dll and its wgl entry points; false (and unloaded) if
+ * it cannot be loaded or is missing any of them. */
+static bool load_gl_library(const char *path)
 {
-    *software_driver = false;
-    g_gl_dll = LoadLibraryA("OPENGL32.DLL");
+    g_gl_dll = LoadLibraryA(path);
     if (!g_gl_dll) {
-        ub_info("gl: opengl32.dll not found");
+        DWORD err = GetLastError();
+        ub_warn("gl: could not load %s (error %u%s)", path, (u32)err,
+                err == 127 ? ": it needs a newer version of Windows" :
+                err == 126 ? ": not found" : "");
         return false;
     }
     p_wglCreateContext = (pfn_wglCreateContext)(void *)GetProcAddress(g_gl_dll, "wglCreateContext");
     p_wglMakeCurrent = (pfn_wglMakeCurrent)(void *)GetProcAddress(g_gl_dll, "wglMakeCurrent");
     p_wglDeleteContext = (pfn_wglDeleteContext)(void *)GetProcAddress(g_gl_dll, "wglDeleteContext");
     p_wglGetProcAddress = (pfn_wglGetProcAddress)(void *)GetProcAddress(g_gl_dll, "wglGetProcAddress");
+    if (!p_wglCreateContext || !p_wglMakeCurrent || !p_wglDeleteContext || !p_wglGetProcAddress) {
+        ub_warn("gl: %s is not a usable OpenGL library", path);
+        FreeLibrary(g_gl_dll);
+        g_gl_dll = NULL;
+        return false;
+    }
+    return true;
+}
+
+bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver)
+{
+    *software_driver = false;
+    /* Windows looks for DLLs in the program's folder first, so an
+     * opengl32.dll copied there is tried before the system's. One built
+     * for a newer Windows makes the loader pop up "Entry Point Not Found";
+     * SetErrorMode suppresses that dialog, and we then try the system's
+     * own copy by full path. */
+    UINT old_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    bool loaded = load_gl_library("OPENGL32.DLL");
+    if (!loaded) {
+        char path[MAX_PATH];
+        UINT n = GetSystemDirectoryA(path, MAX_PATH - 16);
+        if (n > 0 && n < MAX_PATH - 16) {
+            ub_fmt(path + n, MAX_PATH - (int)n, "\\OPENGL32.DLL");
+            loaded = load_gl_library(path);
+            if (loaded) ub_info("gl: using %s", path);
+        }
+    }
+    SetErrorMode(old_mode);
+    if (!loaded) return false;
+
     HMODULE gdi = GetModuleHandleA("GDI32.DLL");
     pfn_ChoosePixelFormat p_Choose = gdi ? (pfn_ChoosePixelFormat)(void *)GetProcAddress(gdi, "ChoosePixelFormat") : NULL;
     pfn_SetPixelFormat p_Set = gdi ? (pfn_SetPixelFormat)(void *)GetProcAddress(gdi, "SetPixelFormat") : NULL;
     pfn_DescribePixelFormat p_Describe = gdi ? (pfn_DescribePixelFormat)(void *)GetProcAddress(gdi, "DescribePixelFormat") : NULL;
     p_SwapBuffers = gdi ? (pfn_SwapBuffers)(void *)GetProcAddress(gdi, "SwapBuffers") : NULL;
-    if (!p_wglCreateContext || !p_wglMakeCurrent || !p_wglDeleteContext || !p_wglGetProcAddress ||
-        !p_Choose || !p_Set || !p_Describe || !p_SwapBuffers) {
-        ub_warn("gl: OpenGL entry points missing");
+    if (!p_Choose || !p_Set || !p_Describe || !p_SwapBuffers) {
+        ub_warn("gl: this Windows has no OpenGL pixel-format functions");
         win32_gl_shutdown();
         return false;
     }

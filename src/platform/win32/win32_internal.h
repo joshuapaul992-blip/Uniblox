@@ -28,7 +28,7 @@ void win32_audio_close(void);
 /* software renderer output (win32_display.c) */
 bool win32_sw_init(const ub_system_info *sys, int sw_height);
 ub_framebuffer *win32_sw_prepare(int client_w, int client_h);
-void win32_sw_present(HDC wdc, const ub_frame *frame);
+void win32_sw_present(HDC wdc, ub_frame *frame);
 bool win32_sw_palette_message(HWND hwnd, UINT msg, WPARAM wp, LRESULT *result);
 void win32_sw_shutdown(void);
 

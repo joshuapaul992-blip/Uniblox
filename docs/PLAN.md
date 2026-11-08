@@ -175,6 +175,18 @@ tests/          host unit tests (make test)
   wait and a short spin at the end. It never waits when running below the
   cap. Measured under Wine at exactly 120.0, 144.0 and 59.9 fps for caps of
   120, 144 and 60. Vsync is off by default so the cap governs.
+- **Real NT 3.51 report (video):**
+  - An `opengl32.dll` built for newer Windows, sitting next to the `.exe`,
+    made the loader show "Entry Point Not Found: GetDiskFreeSpaceExW". The
+    game now loads OpenGL with `SetErrorMode` (no dialog), logs why a copy
+    was rejected, and falls back to the system's `opengl32.dll`, then to
+    the software renderer.
+  - The software renderer took 2.7 ms per frame, but presenting at
+    1920x1080 took 90 ms, so the game ran at 10-12 fps. Presenting now
+    uses a 32-bit `BI_BITFIELDS` DIB when the system accepts one (no
+    per-pixel colour conversion; falls back to 24-bit), and stretches
+    straight onto the window when there's no text (F3). The overlay and
+    the benchmark log show where present time goes (copy / stretch / blit).
 - **Bugs found while testing:**
   - The wedge's slope normal pointed inward, because the slope passes
     through the shape's centre, so the old "away from the centre"
