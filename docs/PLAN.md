@@ -50,7 +50,8 @@ The engine checks installed RAM at startup and warns below 384 MB.
 ```
 src/crt/        memcpy/memset/... (GCC emits calls to these); later
                 setjmp/longjmp, strtod, formatting for Lua
-src/core/       types, strings, math, containers, memory arenas
+src/core/       types, strings, UTF-8, safe paths, log, math (later containers, arenas)
+src/audio/      WAV loader, software mixer (32 voices, pitch, pan)
 src/platform/   OS interface; win32/ backend (later posix/ for the server)
 src/render/     sw/ software rasterizer (guaranteed path), gl/ OpenGL 1.x
 src/world/      object tree, typed properties, events, place file I/O
@@ -59,15 +60,16 @@ src/script/     sandboxed Lua 5.1 + Uniblox API
 src/net/        loopback + UDP transports, reliability, replication
 src/ui/         immediate-mode GUI (HUD and editor)
 src/app/        client / server / editor front ends
-tools/          build and verification tools
+tools/          build and verification tools (PE checker, Wine smoke test)
+tests/          host unit tests (make test)
 ```
 
 ## Milestones
 
 | # | Milestone | Exit test | Status |
 |---|---|---|---|
-| 0 | Toolchain + hello window | One .exe runs on NT 3.51, 4.0, 2000, XP | **Built; passes `make check` and Wine. Still needs a run on real NT 3.51/4.0 in 86Box or PCem** |
-| 1 | Platform layer | Input, timing, audio (waveOut), file I/O, a log file | |
+| 0 | Toolchain + hello window | One .exe runs on NT 3.51, 4.0, 2000, XP | **Done.** Confirmed running on a real install |
+| 1 | Platform layer | Input, timing, audio (waveOut), file I/O, a log file | **Built.** Passes unit tests and the Wine smoke test (NT 3.51/4.0/2000/XP settings); needs a real-hardware check, especially sound |
 | 2 | Software renderer | Textured, lit room of parts at 15+ fps, 320x240, on a Pentium-class VM, in 8-bit and 16-bit display modes | |
 | 3 | World model + place files | Save/load round-trips byte for byte | |
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | |
@@ -91,10 +93,26 @@ tools/          build and verification tools
   input, because NT 3.51 has no OS random-number source.
 - The dedicated server also builds for Linux (POSIX backend).
 
+## Milestone 1 notes
+
+- **Audio:** `waveOut` with 6 buffers of 512 frames (about 140 ms queued),
+  refilled by a polling thread. The format falls back from 22 kHz 16-bit
+  stereo to 11 kHz 8-bit mono for old cards. With no device the game runs
+  silently.
+- **Mouse-look:** the cursor is re-centred every frame (Raw Input is XP-only).
+- **Mouse wheel:** `WM_MOUSEWHEEL` on NT 4.0+, plus the registered
+  `MSWHEEL_ROLLMSG` message that IntelliPoint drivers send on NT 3.51.
+- **Files:** every game path is relative to the `.exe` folder and checked
+  by `ub_path_is_safe()`, which rejects `..`, drive letters and DOS device
+  names. This matters once places and scripts from other players can name
+  files. Saves go to a `.tmp` file first and are renamed over the old one.
+- **Text input:** chat-style, with Enter or `/` to open it, so movement keys
+  don't leak into typed text.
+
 ## Open items
 
-- Real-hardware/emulator validation of milestone 0 on NT 3.51 and NT 4.0
-  (86Box or PCem). Wine is only a smoke test.
+- Real-hardware/emulator validation of milestone 1, especially sound on
+  NT 3.51 and NT 4.0 drivers, and the mouse wheel on NT 4.0.
 - `.eh_frame` from libgcc ends up in the image (shown truncated as
   `.eh_fram`). The loader ignores it; drop it later with a linker script.
 - 8-bit display mode: GDI currently maps our 24-bit output onto the
