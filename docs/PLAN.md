@@ -189,6 +189,17 @@ tests/          host unit tests (make test)
     time), so frames are no longer shipped to CSRSS with StretchDIBits.
     Jumping also accepts a press that began and ended between two frames,
     which matters at low frame rates.
+  - The tester's display driver is WINVBE (VBE frame buffer). On NT 3.x
+    it doesn't enable write combining (NT 4.0+ only), so every byte
+    written to the screen is an uncached PCIe write: about 95 MB/s
+    measured, or 150 ms for a 2560x1421x32 frame. No user-mode change gets
+    past that; fewer bytes per frame does (smaller window, or a 16-bit
+    desktop).
+  - WINVBE's own OpenGL for NT 3.x is Mesa 7.8.2 in software and doesn't
+    mark its pixel formats generic. Auto mode now recognises software
+    OpenGL by its renderer name (software / llvmpipe / softpipe / swrast /
+    GDI Generic) and uses Uniblox's renderer instead; `renderer=opengl`
+    still forces it.
   - The software renderer took 2.7 ms per frame, but presenting at
     1920x1080 took 90 ms, so the game ran at 10-12 fps. Presenting now
     uses a 32-bit `BI_BITFIELDS` DIB when the system accepts one (no

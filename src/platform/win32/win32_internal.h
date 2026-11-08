@@ -32,8 +32,9 @@ void win32_sw_present(HDC wdc, ub_frame *frame);
 bool win32_sw_palette_message(HWND hwnd, UINT msg, WPARAM wp, LRESULT *result);
 void win32_sw_shutdown(void);
 
-/* OpenGL context (win32_gl.c). software_driver is set when the only
- * OpenGL available is Microsoft's unaccelerated "GDI Generic". */
+/* OpenGL context (win32_gl.c). software_driver is set when the OpenGL
+ * found renders on the CPU (Microsoft's "GDI Generic", WINVBE's ICD,
+ * Mesa llvmpipe/softpipe/swrast). */
 bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver);
 void win32_gl_swap(void);
 void win32_gl_shutdown(void);

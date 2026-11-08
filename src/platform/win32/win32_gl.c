@@ -29,6 +29,17 @@ static pfn_wglDeleteContext p_wglDeleteContext;
 static pfn_wglGetProcAddress p_wglGetProcAddress;
 static pfn_SwapBuffers p_SwapBuffers;
 
+/* Case-insensitive substring test (ASCII). */
+static bool contains_ci(const char *hay, const char *needle)
+{
+    for (; *hay; ++hay) {
+        const char *h = hay, *n = needle;
+        while (*h && *n && ((*h | 32) == (*n | 32))) { ++h; ++n; }
+        if (!*n) return true;
+    }
+    return false;
+}
+
 void *plat_gl_proc(const char *name)
 {
     if (!g_gl_dll) return NULL;
@@ -128,10 +139,26 @@ bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver)
         win32_gl_shutdown();
         return false;
     }
+    /* Software OpenGL that does not flag its pixel formats as generic:
+     * WINVBE's ICD ("WINVBE software (Mesa 7.8.2, x87)") and Mesa's
+     * llvmpipe / softpipe / swrast. Uniblox's own renderer is faster than
+     * these for this kind of scene, so auto mode prefers it. */
+    typedef const unsigned char *(WINAPI *pfn_glGetString)(unsigned int);
+    pfn_glGetString get_string = (pfn_glGetString)(void *)GetProcAddress(g_gl_dll, "glGetString");
+    if (get_string) {
+        const char *ren = (const char *)get_string(0x1F01 /* GL_RENDERER */);
+        const char *ven = (const char *)get_string(0x1F00 /* GL_VENDOR */);
+        if (!ren) ren = "";
+        if (!ven) ven = "";
+        ub_info("gl: %s / %s", ven, ren);
+        if (contains_ci(ren, "software") || contains_ci(ren, "llvmpipe") || contains_ci(ren, "softpipe") ||
+            contains_ci(ren, "swrast") || contains_ci(ren, "GDI Generic"))
+            *software_driver = true;
+    }
     pfn_wglSwapIntervalEXT swap_interval = (pfn_wglSwapIntervalEXT)plat_gl_proc("wglSwapIntervalEXT");
     if (swap_interval) swap_interval(vsync ? 1 : 0);
     ub_info("gl: context created (%d-bit colour, %d-bit depth%s%s)", got.cColorBits, got.cDepthBits,
-            *software_driver ? ", Microsoft software driver" : "", swap_interval ? "" : ", no vsync control");
+            *software_driver ? ", software rasteriser" : "", swap_interval ? "" : ", no vsync control");
     return true;
 }
 
