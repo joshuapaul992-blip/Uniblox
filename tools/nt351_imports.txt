@@ -1,0 +1,61 @@
+# Win32 functions Uniblox may import directly.
+#
+# Every entry here has been checked to exist in Windows NT 3.51 (most date
+# back to NT 3.1). Do NOT add a function just because the build needs it:
+# confirm it exists on NT 3.51 first. Newer APIs must be loaded at runtime
+# with GetProcAddress and given a fallback.
+
+[KERNEL32.DLL]
+ExitProcess
+GetModuleHandleA
+GetModuleHandleW
+GetProcAddress
+GetProcessHeap
+HeapAlloc
+HeapFree
+GetVersion
+GlobalMemoryStatus
+QueryPerformanceCounter
+QueryPerformanceFrequency
+GetTickCount
+Sleep
+OutputDebugStringA
+
+[USER32.DLL]
+AdjustWindowRect
+BeginPaint
+CreateWindowExW
+DefWindowProcW
+DestroyWindow
+DispatchMessageW
+EndPaint
+GetClientRect
+GetDC
+LoadCursorW
+LoadIconW
+MessageBoxW
+PeekMessageW
+PostQuitMessage
+RegisterClassW
+ReleaseDC
+ShowWindow
+TranslateMessage
+UpdateWindow
+
+[GDI32.DLL]
+BitBlt
+CreateCompatibleBitmap
+CreateCompatibleDC
+DeleteDC
+DeleteObject
+GetDeviceCaps
+SelectObject
+SetBkMode
+SetStretchBltMode
+SetTextColor
+StretchDIBits
+TextOutW
+
+[WINMM.DLL]
+timeBeginPeriod
+timeEndPeriod
