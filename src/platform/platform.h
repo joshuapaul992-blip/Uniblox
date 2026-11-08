@@ -12,13 +12,24 @@
 /* ------------------------------------------------------------ display */
 
 typedef enum {
+    UB_BACKEND_SOFTWARE,   /* app draws into a ub_framebuffer; works everywhere */
+    UB_BACKEND_OPENGL,     /* app draws with OpenGL; needs a driver (any GPU) */
+} ub_backend;
+
+typedef enum {
+    UB_BACKEND_PREF_AUTO,  /* OpenGL with a real (non-software) driver, else software */
+    UB_BACKEND_PREF_OPENGL,
+    UB_BACKEND_PREF_SOFTWARE,
+} ub_backend_pref;
+
+typedef enum {
     UB_PIXEL_XRGB32, /* 0x00RRGGBB per pixel; used on 15/16/24/32-bit displays */
     UB_PIXEL_INDEX8, /* palette index per pixel; used on 256-colour displays */
 } ub_pixel_format;
 
-/* Software framebuffer the app renders into, top-down rows. Both buffers
- * always exist; `format` says which one is shown this frame. The backend
- * converts to whatever the display needs. */
+/* Software framebuffer, top-down rows. Both buffers always exist; `format`
+ * says which one is shown this frame. It is usually smaller than the
+ * window and stretched to fit (see plat_set_sw_resolution). */
 typedef struct {
     ub_pixel_format format;
     u32 *pixels;            /* XRGB32 buffer */
@@ -28,28 +39,75 @@ typedef struct {
     int pitch;              /* in pixels, same for both buffers */
     const u32 *palette;     /* 256 x 0x00RRGGBB for INDEX8, set by the app */
     u32 palette_serial;     /* app increments this when palette contents change */
-    u32 present_us;         /* backend: time to convert + show the previous frame */
-    int window_scale;       /* backend: current window size as a multiple of width/height */
 } ub_framebuffer;
 
-/* Choose the pixel format from the next frame on. The backend picks a
- * default from the desktop colour depth (INDEX8 at 256 colours or fewer). */
+#define UB_TEXT_QUEUE_MAX 24
+#define UB_TEXT_ITEM_LEN 120
+
+/* Text for the software backend, drawn by the OS at window resolution after
+ * the frame is stretched, so it stays sharp. (The OpenGL renderer draws
+ * text itself from a font atlas.) */
+typedef struct {
+    int x, y;               /* window pixels, top-left of the line */
+    u32 color;              /* 0x00RRGGBB */
+    char text[UB_TEXT_ITEM_LEN];
+} ub_text_item;
+
+/* Everything the app needs to know to draw one frame. */
+typedef struct {
+    ub_backend backend;
+    int width, height;      /* window client area in pixels */
+    ub_framebuffer *fb;     /* software backend only, else NULL */
+    ub_text_item text[UB_TEXT_QUEUE_MAX]; /* software backend only */
+    int text_count;
+    int text_px;            /* font height for the text queue */
+    bool fullscreen;
+    u32 fps_cap;            /* 0 = unlimited */
+    u32 present_us;         /* time to show the previous frame */
+    u32 sleep_us;           /* time the frame limiter waited last frame */
+} ub_frame;
+
+/* Settings the platform needs before it creates the window, provided by
+ * app_preinit() (usually from the app's config file). */
+typedef struct {
+    ub_backend_pref backend;
+    int window_w, window_h; /* 0 = choose from the screen size */
+    bool fullscreen;
+    u32 fps_cap;            /* 0 = unlimited */
+    bool vsync;
+    int sw_height;          /* software backend: render height (0 = window height) */
+} ub_display_prefs;
+
+/* Choose the software pixel format from the next frame on. The default
+ * follows the desktop colour depth (INDEX8 at 256 colours or fewer). */
 void plat_set_pixel_format(ub_pixel_format f);
 
-/* Resize the window to scale x the framebuffer (1..3). At 1 the image is
- * copied to the screen without stretching, which is much cheaper on slow
- * machines. */
-void plat_set_window_scale(int scale);
+/* Software backend: render at this height (width follows the window's
+ * aspect ratio) and stretch to the window. 0 = the window's own size. */
+void plat_set_sw_resolution(int height);
 
-#define UB_OVERLAY_MAX_LINES 10
-#define UB_OVERLAY_LINE_LEN 96
+/* Borderless fullscreen on the monitor holding the window, or back. */
+void plat_set_fullscreen(bool on);
 
-/* Text drawn on top of the frame by the backend (until we have our own
- * font renderer). UTF-8. */
+/* Frame rate limit, 0 = unlimited. */
+void plat_set_fps_cap(u32 fps);
+
+/* OpenGL backend: address of a GL function (core 1.1 or extension), NULL
+ * if the driver lacks it. */
+void *plat_gl_proc(const char *name);
+
+/* A rasterised UI font for the OpenGL renderer: the 96 characters
+ * 32..127 in a 16 x 6 grid of cells, 8-bit coverage, top-down rows. */
 typedef struct {
-    char lines[UB_OVERLAY_MAX_LINES][UB_OVERLAY_LINE_LEN];
-    int count;
-} ub_overlay;
+    u8 *pixels;             /* plat_alloc'd; free with plat_free */
+    int width, height;      /* atlas size (powers of two) */
+    int cell_w, cell_h;     /* grid spacing; glyphs are drawn 1 pixel in from the cell corner */
+    int glyph_h;            /* height of the drawn glyph area */
+    int line_h;             /* recommended line spacing */
+    u8 advance[96];         /* horizontal advance per character */
+} ub_font_atlas;
+
+bool plat_font_atlas(int px_height, ub_font_atlas *out);
 
 /* -------------------------------------------------------------- input */
 
@@ -75,7 +133,10 @@ enum {
     UB_KEY_F3        = 0x72,
     UB_KEY_F5        = 0x74,
     UB_KEY_F6        = 0x75,
+    UB_KEY_F7        = 0x76,
     UB_KEY_F8        = 0x77,
+    UB_KEY_F9        = 0x78,
+    UB_KEY_F11       = 0x7A,
 };
 
 enum { UB_MOUSE_LEFT, UB_MOUSE_RIGHT, UB_MOUSE_MIDDLE, UB_MOUSE_BUTTONS };
@@ -89,7 +150,7 @@ typedef struct {
     /* State, persists across frames. */
     bool key_down[UB_KEY_COUNT];
     bool mouse_down[UB_MOUSE_BUTTONS];
-    int mouse_x, mouse_y;     /* framebuffer coordinates */
+    int mouse_x, mouse_y;     /* window client coordinates (same as ub_frame.width/height) */
     bool mouse_captured;      /* see plat_set_mouse_capture */
     bool has_focus;
     bool quit_requested;
@@ -131,6 +192,8 @@ typedef struct {
     u32 cpu_mhz;             /* measured, 0 if unknown */
     bool palette_display;    /* the display is palette-based (256 colours) */
     bool has_mouse_wheel;    /* the OS reports wheel events (NT 4.0+, or a driver) */
+    int screen_w, screen_h;  /* primary monitor size in pixels */
+    char gl_desc[96];        /* "vendor / renderer / version", empty without OpenGL */
 } ub_system_info;
 
 typedef struct {

@@ -4,7 +4,7 @@
 
 #include "core/ub_vec.h"
 #include "render/ub_palette.h"
-#include "render/ub_render.h"
+#include "render/ub_render_internal.h"
 #include "test.h"
 
 #define W 320
@@ -95,6 +95,7 @@ static ub_camera cam_at(vec3 pos, f32 yaw, f32 pitch, f32 fov_deg)
     c.pitch = pitch;
     c.fov_y = fov_deg * UB_PI / 180.0f;
     c.far_dist = 1000.0f;
+    c.focus = pos;
     return c;
 }
 
@@ -122,8 +123,8 @@ static ub_render_env flat_env(void)
 /* Render the sky alone into g_sky*, for "is this pixel covered" checks. */
 static void render_sky(ub_framebuffer *fb, const ub_camera *c, const ub_render_env *e)
 {
-    ub_render_begin(fb, c, e);
-    ub_render_end(NULL);
+    sw_begin(fb, c, e);
+    sw_end(NULL);
     memcpy(g_sky32, g_px32, sizeof g_sky32);
     memcpy(g_sky8, g_px8, sizeof g_sky8);
 }
@@ -144,7 +145,7 @@ static int count_uncovered(const ub_framebuffer *fb)
 
 void test_render(void)
 {
-    CHECK(ub_render_init());
+    CHECK(sw_init());
     ub_render_env env = flat_env();
 
     for (int pass = 0; pass < 2; ++pass) {
@@ -156,14 +157,15 @@ void test_render(void)
          * so pixel centres 117.5 .. 202.5 are inside: 86 pixels. */
         ub_camera cam = cam_at(v3(0, 0, -10), 0, 0, 70);
         render_sky(&fb, &cam, &env);
-        ub_render_begin(&fb, &cam, &env);
+        sw_begin(&fb, &cam, &env);
         ub_part_draw red = part(UB_SHAPE_BOX, v3(0, 0, 0), v3(4, 4, 4), 0xFF0000, UB_MAT_PLASTIC);
-        ub_render_part(&red);
+        sw_part(&red);
         ub_render_stats st;
-        ub_render_end(&st);
+        sw_end(&st);
         int row = 0, first = -1, last = -1;
         for (int x = 0; x < W; ++x)
             if (covered(&fb, x, H / 2)) { row++; if (first < 0) first = x; last = x; }
+        if (!(row == 86 && first == 117 && last == 202)) printf("    coverage: row %d first %d last %d polys %u back %u parts %u culled %u\n", row, first, last, st.polys_drawn, st.faces_backfacing, st.parts, st.parts_culled);
         CHECK(row == 86 && first == 117 && last == 202);
         CHECK(st.parts == 1 && st.polys_drawn == 1 && st.faces_backfacing == 5);
         /* flat light on a side face is 0.8 (quantised to 204/256): 255 -> 203 */
@@ -173,10 +175,10 @@ void test_render(void)
         /* Occlusion, in both draw orders: the nearer green box wins. */
         ub_part_draw green = part(UB_SHAPE_BOX, v3(0, 0, -4), v3(2, 2, 2), 0x00FF00, UB_MAT_PLASTIC);
         for (int order = 0; order < 2; ++order) {
-            ub_render_begin(&fb, &cam, &env);
-            ub_render_part(order ? &green : &red);
-            ub_render_part(order ? &red : &green);
-            ub_render_end(NULL);
+            sw_begin(&fb, &cam, &env);
+            sw_part(order ? &green : &red);
+            sw_part(order ? &red : &green);
+            sw_end(NULL);
             if (!pass) {
                 u32 c = g_px32[(H / 2) * W + W / 2];
                 CHECK((c >> 8 & 255) > 200 && (c >> 16 & 255) < 50);
@@ -190,10 +192,10 @@ void test_render(void)
         /* Two boxes sharing an edge: no gap and no sky between them. */
         ub_part_draw l = part(UB_SHAPE_BOX, v3(-2, 0, 0), v3(4, 4, 4), 0x2050C0, UB_MAT_PLASTIC);
         ub_part_draw r = part(UB_SHAPE_BOX, v3(2, 0, 0), v3(4, 4, 4), 0xC05020, UB_MAT_PLASTIC);
-        ub_render_begin(&fb, &cam, &env);
-        ub_render_part(&l);
-        ub_render_part(&r);
-        ub_render_end(NULL);
+        sw_begin(&fb, &cam, &env);
+        sw_part(&l);
+        sw_part(&r);
+        sw_end(NULL);
         int gaps = 0;
         for (int y = 90; y < 150; ++y)
             for (int x = 100; x < 220; ++x) gaps += !covered(&fb, x, y);
@@ -210,9 +212,9 @@ void test_render(void)
         for (int m = 0; m < 2; ++m) {
             ub_part_draw big = part(UB_SHAPE_BOX, v3(0, 0, 0), v3(10, 10, 10), 0xFF00FF,
                                     m ? UB_MAT_BRICK : UB_MAT_PLASTIC);
-            ub_render_begin(&fb, &cam, &env);
-            ub_render_part(&big);
-            ub_render_end(&st);
+            sw_begin(&fb, &cam, &env);
+            sw_part(&big);
+            sw_end(&st);
             CHECK(count_uncovered(&fb) == 0);
             CHECK(st.polys_drawn == 3);
         }
@@ -220,27 +222,27 @@ void test_render(void)
         /* Camera inside a box: everything back-facing, nothing drawn. */
         cam = cam_at(v3(0, 0, 0), 0.3f, 0.2f, 70);
         render_sky(&fb, &cam, &env);
-        ub_render_begin(&fb, &cam, &env);
-        ub_render_part(&red);
-        ub_render_end(&st);
+        sw_begin(&fb, &cam, &env);
+        sw_part(&red);
+        sw_end(&st);
         CHECK(count_uncovered(&fb) == W * H && st.faces_backfacing == 6);
 
         /* Behind the camera / beyond far: culled before any face work. */
         cam = cam_at(v3(0, 0, -10), UB_PI, 0, 70);
-        ub_render_begin(&fb, &cam, &env);
-        ub_render_part(&red);
+        sw_begin(&fb, &cam, &env);
+        sw_part(&red);
         ub_part_draw far = part(UB_SHAPE_BOX, v3(0, 0, 5000), v3(4, 4, 4), 0xFF0000, UB_MAT_PLASTIC);
-        ub_render_part(&far);
-        ub_render_end(&st);
+        sw_part(&far);
+        sw_end(&st);
         CHECK(st.parts_culled == 2 && st.faces == 0);
 
         /* Textured floor: covered, and the texture actually varies. */
         cam = cam_at(v3(0, 3, -20), 0, -0.3f, 70);
         render_sky(&fb, &cam, &env);
         ub_part_draw floor = part(UB_SHAPE_BOX, v3(0, -0.5f, 0), v3(400, 1, 400), 0xC06040, UB_MAT_GRID); /* unlike the green ground colour, even dithered */
-        ub_render_begin(&fb, &cam, &env);
-        ub_render_part(&floor);
-        ub_render_end(&st);
+        sw_begin(&fb, &cam, &env);
+        sw_part(&floor);
+        sw_end(&st);
         /* lower half is all floor; the grid texture gives at least panel,
          * line and highlight colours */
         int floor_gaps = 0, line_px = 0;
@@ -259,13 +261,72 @@ void test_render(void)
         for (int s = 0; s < UB_SHAPE_COUNT; ++s) {
             ub_part_draw sp = part((ub_shape)s, v3(0, 0, 0), v3(4, 4, 4), 0xFFFF00, UB_MAT_WOOD);
             sp.rot = mat3_from_euler(0.5f, 0.4f, 0.0f);
-            ub_render_begin(&fb, &cam, &env);
-            ub_render_part(&sp);
-            ub_render_end(&st);
+            sw_begin(&fb, &cam, &env);
+            sw_part(&sp);
+            sw_end(&st);
             CHECK(st.polys_drawn >= 1 && st.pixels_tested > 300);
         }
     }
-    ub_render_shutdown();
+    sw_shutdown();
+}
+
+/* Meshes: both detail levels are closed, outward-facing and within limits;
+ * smooth faces have unit vertex normals. HD textures match the 64x64 ones. */
+void test_meshes(void)
+{
+    ub_meshes_init();
+    for (int d = 0; d < UB_DETAIL_COUNT; ++d)
+        for (int s = 0; s < UB_SHAPE_COUNT; ++s) {
+            const ub_mesh *m = ub_mesh_get((ub_shape)s, (ub_detail)d);
+            CHECK(m->vert_count > 0 && m->vert_count <= UB_MESH_MAX_VERTS);
+            CHECK(m->face_count > 0 && m->face_count <= UB_MESH_MAX_FACES);
+            /* divergence theorem: sum of (area * normal) over a closed
+             * surface is zero; sum of area * (normal . centroid) / 3 is the
+             * volume, which must be positive and inside the unit cube */
+            vec3 sum = v3(0, 0, 0);
+            f32 volume = 0;
+            bool unit_normals = true;
+            for (int f = 0; f < m->face_count; ++f) {
+                const ub_face *fc = &m->faces[f];
+                vec3 a = m->verts[fc->v[0]];
+                vec3 area = v3(0, 0, 0);
+                for (int i = 1; i + 1 < fc->count; ++i)
+                    area = v3_add(area, v3_scale(v3_cross(v3_sub(m->verts[fc->v[i]], a),
+                                                          v3_sub(m->verts[fc->v[i + 1]], a)), 0.5f));
+                f32 ar = v3_length(area);
+                sum = v3_add(sum, v3_scale(fc->normal, ar));
+                volume += ar * v3_dot(fc->normal, a) / 3.0f;
+                if (fc->smooth)
+                    for (int i = 0; i < fc->count; ++i)
+                        if (fabsf(v3_length(m->vnormals[fc->v[i]]) - 1.0f) > 1e-3f) unit_normals = false;
+            }
+            if (v3_length(sum) >= 1e-3f) printf("    mesh d%d s%d: closure %.5f faces %d\n", d, s, v3_length(sum), m->face_count);
+            CHECK(v3_length(sum) < 1e-3f);
+            CHECK(volume > 0.1f && volume <= 1.0001f);
+            CHECK(unit_normals);
+        }
+    /* finer meshes approach the true volumes: cylinder pi/4, ball pi/6 */
+    const ub_mesh *cyl = ub_mesh_get(UB_SHAPE_CYLINDER, UB_DETAIL_HIGH);
+    CHECK(cyl->face_count == 34);
+    const ub_mesh *ball = ub_mesh_get(UB_SHAPE_BALL, UB_DETAIL_HIGH);
+    CHECK(ball->face_count == 512);
+
+    ub_textures_init();
+    for (int mat = 1; mat < UB_MAT_COUNT; ++mat) {
+        u8 *hd = ub_texture_hd((ub_material)mat, 256);
+        const u8 *lo = ub_texture((ub_material)mat);
+        CHECK(hd != NULL && lo != NULL);
+        if (!hd || !lo) continue;
+        /* same design: average brightness agrees within a few percent */
+        f32 a = 0, b = 0;
+        for (int i = 0; i < 256 * 256; ++i) a += hd[i] / 255.0f;
+        for (int i = 0; i < 64 * 64; ++i) b += lo[i] / 31.0f;
+        a /= 256 * 256;
+        b /= 64 * 64;
+        CHECK(fabsf(a - b) < 0.04f);
+        free(hd);
+    }
+    CHECK(ub_texture_hd(UB_MAT_PLASTIC, 256) == NULL);
 }
 
 /* Random scenes and cameras (including inside parts and grazing angles).
@@ -273,7 +334,7 @@ void test_render(void)
  * overflow, no NaN-to-int conversions. */
 void test_render_fuzz(void)
 {
-    CHECK(ub_render_init());
+    CHECK(sw_init());
     ub_render_env env = ub_render_default_env();
     srand(1234);
     u32 polys = 0;
@@ -283,7 +344,7 @@ void test_render_fuzz(void)
                                   (rand() % 2000 - 1000) / 40.0f),
                                (rand() % 6283) / 1000.0f, (rand() % 3000 - 1500) / 1000.0f,
                                (f32)(20 + rand() % 120));
-        ub_render_begin(&fb, &cam, &env);
+        sw_begin(&fb, &cam, &env);
         for (int i = 0; i < 40; ++i) {
             ub_part_draw p = part((ub_shape)(rand() % UB_SHAPE_COUNT),
                                   v3((rand() % 2000 - 1000) / 40.0f, (rand() % 2000 - 1000) / 40.0f,
@@ -292,13 +353,13 @@ void test_render_fuzz(void)
                                      (rand() % 4000) / 100.0f + 0.001f),
                                   (u32)rand() & 0xFFFFFF, (ub_material)(rand() % UB_MAT_COUNT));
             p.rot = mat3_from_euler((rand() % 6283) / 1000.0f, (rand() % 6283) / 1000.0f, (rand() % 6283) / 1000.0f);
-            ub_render_part(&p);
+            sw_part(&p);
         }
         ub_render_stats st;
-        ub_render_end(&st);
+        sw_end(&st);
         polys += st.polys_drawn;
     }
     printf("  400 random frames, %u polygons drawn\n", polys);
     CHECK(polys > 1000);
-    ub_render_shutdown();
+    sw_shutdown();
 }

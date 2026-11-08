@@ -1,21 +1,25 @@
-/* Uniblox - app entry points called by the platform backend. */
+/* Uniblox - app entry points called by the platform backend.
+ *
+ * Order: app_preinit (before any window exists) -> app_init -> app_frame
+ * every frame -> app_shutdown. */
 #ifndef UB_APP_H
 #define UB_APP_H
 
 #include "platform/platform.h"
 
-/* Internal render resolution. Kept small so the software renderer stays
- * fast on Pentium-class CPUs; the backend scales it to the window. */
-#define UB_FB_WIDTH  320
-#define UB_FB_HEIGHT 240
+/* Default window size before the screen size is known. */
+#define UB_DEFAULT_WINDOW_W 640
+#define UB_DEFAULT_WINDOW_H 480
 
 /* Minimum / recommended installed RAM (project requirement). */
 #define UB_RAM_MIN_MB 384u
 #define UB_RAM_REC_MB 512u
 
-bool app_init(const ub_system_info *sys);
+/* Fill in display settings (renderer, window size, fps cap...). */
+void app_preinit(ub_display_prefs *prefs);
+bool app_init(const ub_system_info *sys, const ub_frame *frame);
 /* dt_us: microseconds since the previous frame. */
-void app_frame(ub_framebuffer *fb, const ub_input *in, u32 dt_us, ub_overlay *ov);
+void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us);
 void app_shutdown(void);
 
 #endif

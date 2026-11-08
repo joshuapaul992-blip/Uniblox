@@ -23,5 +23,6 @@ void test_vec(void);
 void test_palette(void);
 void test_render(void);
 void test_render_fuzz(void);
+void test_meshes(void);
 
 #endif

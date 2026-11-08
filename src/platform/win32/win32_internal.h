@@ -25,4 +25,17 @@ bool win32_full_path(const char *game_path, WCHAR *out, int cap);
 bool win32_audio_open(ub_system_info *sys);
 void win32_audio_close(void);
 
+/* software renderer output (win32_display.c) */
+bool win32_sw_init(const ub_system_info *sys, int sw_height);
+ub_framebuffer *win32_sw_prepare(int client_w, int client_h);
+void win32_sw_present(HDC wdc, const ub_frame *frame);
+bool win32_sw_palette_message(HWND hwnd, UINT msg, WPARAM wp, LRESULT *result);
+void win32_sw_shutdown(void);
+
+/* OpenGL context (win32_gl.c). software_driver is set when the only
+ * OpenGL available is Microsoft's unaccelerated "GDI Generic". */
+bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver);
+void win32_gl_swap(void);
+void win32_gl_shutdown(void);
+
 #endif

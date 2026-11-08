@@ -1,27 +1,31 @@
 #include "render/ub_mesh.h"
 
-#define CYL_SIDES 12
-#define BALL_STACKS 6
-#define BALL_SLICES 10
+static const int k_cyl_sides[UB_DETAIL_COUNT] = { 12, 32 };
+static const int k_ball_stacks[UB_DETAIL_COUNT] = { 6, 16 };
+static const int k_ball_slices[UB_DETAIL_COUNT] = { 10, 32 };
 
-static ub_mesh g_meshes[UB_SHAPE_COUNT];
+static ub_mesh g_meshes[UB_DETAIL_COUNT][UB_SHAPE_COUNT];
 
 static int add_vert(ub_mesh *m, f32 x, f32 y, f32 z)
 {
     m->verts[m->vert_count] = v3(x, y, z);
+    m->vnormals[m->vert_count] = v3_normalize(v3(x, y, z));
     return m->vert_count++;
 }
 
 /* Adds a face and computes its outward normal (Newell's method, then
- * flipped if it points towards the centre: every shape is convex and
- * centred on the origin). */
-static void add_face(ub_mesh *m, int count, const int *idx)
+ * flipped if it points towards the inside). Every shape is convex, so the
+ * average of its vertices is strictly inside. (The origin is not enough:
+ * the wedge's slope passes right through it.) All vertices must be added
+ * before the faces. */
+static ub_face *add_face(ub_mesh *m, int count, const int *idx)
 {
     ub_face *f = &m->faces[m->face_count++];
     f->count = (u8)count;
+    f->smooth = false;
     vec3 n = v3(0, 0, 0), c = v3(0, 0, 0);
     for (int i = 0; i < count; ++i) {
-        f->v[i] = (u8)idx[i];
+        f->v[i] = (u16)idx[i];
         vec3 a = m->verts[idx[i]], b = m->verts[idx[(i + 1) % count]];
         n.x += (a.y - b.y) * (a.z + b.z);
         n.y += (a.z - b.z) * (a.x + b.x);
@@ -29,20 +33,25 @@ static void add_face(ub_mesh *m, int count, const int *idx)
         c = v3_add(c, a);
     }
     n = v3_normalize(n);
-    if (v3_dot(n, c) < 0) n = v3_scale(n, -1.0f);
+    vec3 inside = v3(0, 0, 0);
+    for (int i = 0; i < m->vert_count; ++i) inside = v3_add(inside, m->verts[i]);
+    inside = v3_scale(inside, 1.0f / (f32)m->vert_count);
+    c = v3_scale(c, 1.0f / (f32)count);
+    if (v3_dot(n, v3_sub(c, inside)) < 0) n = v3_scale(n, -1.0f);
     f->normal = n;
+    return f;
 }
 
-static void face4(ub_mesh *m, int a, int b, int c, int d)
+static ub_face *face4(ub_mesh *m, int a, int b, int c, int d)
 {
     int idx[4] = { a, b, c, d };
-    add_face(m, 4, idx);
+    return add_face(m, 4, idx);
 }
 
-static void face3(ub_mesh *m, int a, int b, int c)
+static ub_face *face3(ub_mesh *m, int a, int b, int c)
 {
     int idx[3] = { a, b, c };
-    add_face(m, 3, idx);
+    return add_face(m, 3, idx);
 }
 
 static void build_box(ub_mesh *m)
@@ -71,58 +80,63 @@ static void build_wedge(ub_mesh *m)
     face3(m, b1, b2, t1);     /* +X side */
 }
 
-static void build_cylinder(ub_mesh *m)
+static void build_cylinder(ub_mesh *m, int sides)
 {
-    int bot[CYL_SIDES], top[CYL_SIDES];
-    for (int i = 0; i < CYL_SIDES; ++i) {
-        f32 a = UB_TWO_PI * (f32)i / CYL_SIDES;
+    int bot[UB_FACE_MAX_VERTS], top[UB_FACE_MAX_VERTS];
+    for (int i = 0; i < sides; ++i) {
+        f32 a = UB_TWO_PI * (f32)i / (f32)sides;
         f32 x = 0.5f * ub_cosf(a), z = 0.5f * ub_sinf(a);
         bot[i] = add_vert(m, x, -0.5f, z);
         top[i] = add_vert(m, x, 0.5f, z);
+        /* side normals point straight out, not towards the corners */
+        m->vnormals[bot[i]] = m->vnormals[top[i]] = v3_normalize(v3(x, 0, z));
     }
-    for (int i = 0; i < CYL_SIDES; ++i) {
-        int j = (i + 1) % CYL_SIDES;
-        face4(m, bot[i], bot[j], top[j], top[i]);
+    for (int i = 0; i < sides; ++i) {
+        int j = (i + 1) % sides;
+        face4(m, bot[i], bot[j], top[j], top[i])->smooth = true;
     }
-    add_face(m, CYL_SIDES, top);
-    add_face(m, CYL_SIDES, bot);
+    add_face(m, sides, top);
+    add_face(m, sides, bot);
 }
 
-static void build_ball(ub_mesh *m)
+static void build_ball(ub_mesh *m, int stacks, int slices)
 {
-    int ring[BALL_STACKS - 1][BALL_SLICES];
+    int ring[16][32];
     int north = add_vert(m, 0, 0.5f, 0);
-    for (int s = 1; s < BALL_STACKS; ++s) {
-        f32 lat = UB_HALF_PI - UB_PI * (f32)s / BALL_STACKS;
+    for (int s = 1; s < stacks; ++s) {
+        f32 lat = UB_HALF_PI - UB_PI * (f32)s / (f32)stacks;
         f32 r = 0.5f * ub_cosf(lat), y = 0.5f * ub_sinf(lat);
-        for (int i = 0; i < BALL_SLICES; ++i) {
-            f32 a = UB_TWO_PI * (f32)i / BALL_SLICES;
+        for (int i = 0; i < slices; ++i) {
+            f32 a = UB_TWO_PI * (f32)i / (f32)slices;
             ring[s - 1][i] = add_vert(m, r * ub_cosf(a), y, r * ub_sinf(a));
         }
     }
     int south = add_vert(m, 0, -0.5f, 0);
-    for (int i = 0; i < BALL_SLICES; ++i) {
-        int j = (i + 1) % BALL_SLICES;
-        face3(m, ring[0][i], ring[0][j], north);
-        for (int s = 0; s < BALL_STACKS - 2; ++s)
-            face4(m, ring[s + 1][i], ring[s + 1][j], ring[s][j], ring[s][i]);
-        face3(m, ring[BALL_STACKS - 2][i], ring[BALL_STACKS - 2][j], south);
+    for (int i = 0; i < slices; ++i) {
+        int j = (i + 1) % slices;
+        face3(m, ring[0][i], ring[0][j], north)->smooth = true;
+        for (int s = 0; s < stacks - 2; ++s)
+            face4(m, ring[s + 1][i], ring[s + 1][j], ring[s][j], ring[s][i])->smooth = true;
+        face3(m, ring[stacks - 2][i], ring[stacks - 2][j], south)->smooth = true;
     }
 }
 
 void ub_meshes_init(void)
 {
-    for (int i = 0; i < UB_SHAPE_COUNT; ++i) {
-        g_meshes[i].vert_count = 0;
-        g_meshes[i].face_count = 0;
+    for (int d = 0; d < UB_DETAIL_COUNT; ++d) {
+        for (int i = 0; i < UB_SHAPE_COUNT; ++i) {
+            g_meshes[d][i].vert_count = 0;
+            g_meshes[d][i].face_count = 0;
+        }
+        build_box(&g_meshes[d][UB_SHAPE_BOX]);
+        build_wedge(&g_meshes[d][UB_SHAPE_WEDGE]);
+        build_cylinder(&g_meshes[d][UB_SHAPE_CYLINDER], k_cyl_sides[d]);
+        build_ball(&g_meshes[d][UB_SHAPE_BALL], k_ball_stacks[d], k_ball_slices[d]);
     }
-    build_box(&g_meshes[UB_SHAPE_BOX]);
-    build_wedge(&g_meshes[UB_SHAPE_WEDGE]);
-    build_cylinder(&g_meshes[UB_SHAPE_CYLINDER]);
-    build_ball(&g_meshes[UB_SHAPE_BALL]);
 }
 
-const ub_mesh *ub_mesh_get(ub_shape s)
+const ub_mesh *ub_mesh_get(ub_shape s, ub_detail d)
 {
-    return &g_meshes[(unsigned)s < UB_SHAPE_COUNT ? s : UB_SHAPE_BOX];
+    return &g_meshes[(unsigned)d < UB_DETAIL_COUNT ? d : UB_DETAIL_LOW]
+                    [(unsigned)s < UB_SHAPE_COUNT ? s : UB_SHAPE_BOX];
 }
