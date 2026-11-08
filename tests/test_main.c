@@ -334,7 +334,7 @@ int main(void)
         { "fmt", test_fmt }, { "utf", test_utf }, { "path", test_path },
         { "math", test_math }, { "wav", test_wav }, { "mixer", test_mixer },
         { "crt", test_crt }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render },
-        { "render fuzz", test_render_fuzz },
+        { "render fuzz", test_render_fuzz }, { "meshes", test_meshes },
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; ++i) {
         printf("%s\n", tests[i].name);

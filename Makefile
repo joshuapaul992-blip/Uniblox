@@ -33,7 +33,9 @@ CORE_SRCS := \
 	src/render/ub_palette.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \
-	src/render/ub_render.c
+	src/render/ub_render.c \
+	src/render/ub_render_sw.c \
+	src/render/ub_render_gl.c
 
 SRCS := \
 	src/crt/ub_crt.c \
@@ -41,7 +43,9 @@ SRCS := \
 	src/app/app_demo.c \
 	src/platform/win32/win32_main.c \
 	src/platform/win32/win32_file.c \
-	src/platform/win32/win32_audio.c
+	src/platform/win32/win32_audio.c \
+	src/platform/win32/win32_display.c \
+	src/platform/win32/win32_gl.c
 
 OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(SRCS))
 DEPS := $(OBJS:.o=.d)
@@ -55,7 +59,7 @@ else
 COMPILER_FLAGS := -mincoming-stack-boundary=2 -fno-tree-loop-distribute-patterns
 endif
 
-CFLAGS := -std=c99 -O2 -g0 -march=$(CPU) -mtune=pentiumpro \
+CFLAGS := -std=c99 -O2 -g0 -Werror -march=$(CPU) -mtune=pentiumpro \
 	-ffreestanding -fno-builtin -fno-math-errno $(COMPILER_FLAGS) \
 	-fno-stack-protector -fno-stack-check \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables \
@@ -86,7 +90,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/stub_platform.c $(CORE_SRCS)
-TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Wno-unused-parameter -Isrc \
+TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
 
 .PHONY: all check test clean

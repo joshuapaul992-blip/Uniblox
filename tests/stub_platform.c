@@ -33,4 +33,8 @@ bool plat_file_exists(const char *p) { (void)p; return false; }
 void plat_set_mouse_capture(bool on) { (void)on; }
 void plat_request_quit(void) {}
 void plat_set_pixel_format(ub_pixel_format f) { (void)f; }
-void plat_set_window_scale(int scale) { (void)scale; }
+void plat_set_sw_resolution(int height) { (void)height; }
+void plat_set_fullscreen(bool on) { (void)on; }
+void plat_set_fps_cap(u32 fps) { (void)fps; }
+void *plat_gl_proc(const char *name) { (void)name; return NULL; }
+bool plat_font_atlas(int px, ub_font_atlas *out) { (void)px; (void)out; return false; }

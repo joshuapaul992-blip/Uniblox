@@ -43,6 +43,9 @@ InitializeCriticalSection
 EnterCriticalSection
 LeaveCriticalSection
 DeleteCriticalSection
+# milestone 2.5: OpenGL is loaded at run time, never imported
+LoadLibraryA
+FreeLibrary
 
 [USER32.DLL]
 AdjustWindowRect
@@ -78,6 +81,9 @@ RegisterWindowMessageW
 # milestone 2
 InvalidateRect
 SetWindowPos
+# milestone 2.5: resizable / fullscreen window
+GetWindowRect
+SetWindowLongW
 
 [GDI32.DLL]
 BitBlt
@@ -97,6 +103,12 @@ CreatePalette
 SelectPalette
 RealizePalette
 GetSystemPaletteEntries
+# milestone 2.5: UI font
+CreateFontW
+GetTextMetricsW
+GetTextExtentPointW
+PatBlt
+GetDIBits
 
 [WINMM.DLL]
 timeBeginPeriod

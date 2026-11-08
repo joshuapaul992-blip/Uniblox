@@ -1,21 +1,17 @@
 /* Uniblox - Win32 window, input and main loop.
  *
- * Display path: the app renders top-down into either a 32-bit XRGB or an
- * 8-bit palette-index buffer. We copy that into a bottom-up DIB (24-bit,
- * or 8-bit with a colour table; formats every Windows version supports),
- * stretch it into an off-screen bitmap, draw overlay text with GDI, then
- * BitBlt to the window so there is no flicker.
- *
- * On 256-colour desktops we build a Windows palette from the app's colours
- * (keeping the 20 static system colours), realise it, and blit with
- * DIB_PAL_COLORS so pixels map straight to palette slots with no colour
- * matching per frame.
+ * Display: the window is resizable, can go borderless fullscreen, and is
+ * DPI-aware on Windows Vista and later (so 1440p/4K monitors get real
+ * pixels instead of a blurry upscale). Rendering goes through OpenGL when
+ * a driver is available, otherwise through the software renderer
+ * (win32_display.c). Frames are paced to a configurable cap, 120 fps by
+ * default.
  *
  * Input: keyboard via WM_KEYDOWN/WM_KEYUP/WM_CHAR, mouse via the button
- * and WM_MOUSEMOVE messages.
- * Mouse-look re-centres the cursor every frame and reports the offset, the
- * only relative-mouse method that works on NT 3.51 (Raw Input is XP+).
- * The wheel arrives as WM_MOUSEWHEEL (NT 4.0+) or the registered
+ * and WM_MOUSEMOVE messages, in window client pixels. Mouse-look
+ * re-centres the cursor every frame and reports the offset, the only
+ * relative-mouse method that works on NT 3.51 (Raw Input is XP+). The
+ * wheel arrives as WM_MOUSEWHEEL (NT 4.0+) or the registered
  * "MSWHEEL_ROLLMSG" message that older IntelliPoint drivers send. */
 #include "platform/win32/win32_internal.h"
 #include "app/app.h"
@@ -34,29 +30,21 @@
 #define SM_MOUSEWHEELPRESENT 75
 #endif
 
+#define WINDOWED_STYLE (WS_OVERLAPPEDWINDOW | WS_VISIBLE)
+#define FULLSCREEN_STYLE (WS_POPUP | WS_VISIBLE)
+
 static HWND g_hwnd;
+static HINSTANCE g_inst;
 static ub_input g_input;
-static ub_overlay g_overlay;
-static ub_framebuffer g_fb;
-static u8 *g_dib;            /* 24bpp bottom-up copy of g_fb (XRGB32 format) */
-static int g_dib_pitch;      /* bytes, DWORD aligned */
-static BITMAPINFO g_bmi;
-static u8 *g_dib8;           /* 8bpp bottom-up copy of g_fb (INDEX8 format) */
-static int g_dib8_pitch;
-static struct { BITMAPINFOHEADER h; RGBQUAD colors[256]; } g_bmi8rgb;
-static struct { BITMAPINFOHEADER h; WORD index[256]; } g_bmi8pal;
-static bool g_palette_device;   /* desktop is 256 colours with a hardware palette */
-static HPALETTE g_hpal;
-static u32 g_palette_serial_seen = 0xFFFFFFFFu;
-static ub_pixel_format g_pending_format;
-static HDC g_memdc;
-static HBITMAP g_membmp, g_oldbmp;
-static int g_mem_w, g_mem_h;
+static ub_frame g_frame;
 static UINT g_msh_wheel_msg; /* registered wheel message, 0 if unavailable */
 static int g_text_len;
 static u16 g_high_surrogate;
 static bool g_look;          /* mouse-look active */
 static POINT g_look_restore; /* cursor position to restore afterwards */
+static RECT g_windowed_rect; /* window position before going fullscreen */
+static bool g_want_fullscreen;
+static u64 g_next_frame_us;
 
 /* ---------------------------------------------------------- system info */
 
@@ -152,173 +140,6 @@ static void query_system(ub_system_info *sys)
     /* Unknown indexes return 0 on older systems, so this is safe on 3.51. */
     sys->has_mouse_wheel = GetSystemMetrics(SM_MOUSEWHEELPRESENT) != 0;
     query_cpu(sys);
-}
-
-/* ------------------------------------------------------------- display */
-
-void plat_set_pixel_format(ub_pixel_format f)
-{
-    g_pending_format = f;
-}
-
-static bool create_framebuffer(const ub_system_info *sys)
-{
-    g_fb.width = UB_FB_WIDTH;
-    g_fb.height = UB_FB_HEIGHT;
-    g_fb.pitch = UB_FB_WIDTH;
-    g_fb.pixels = (u32 *)plat_alloc((size_t)g_fb.pitch * g_fb.height * 4);
-    g_fb.pixels8 = (u8 *)plat_alloc((size_t)g_fb.pitch * g_fb.height);
-    g_dib_pitch = (g_fb.width * 3 + 3) & ~3;
-    g_dib = (u8 *)plat_alloc((size_t)g_dib_pitch * g_fb.height);
-    g_dib8_pitch = (g_fb.width + 3) & ~3;
-    g_dib8 = (u8 *)plat_alloc((size_t)g_dib8_pitch * g_fb.height);
-    if (!g_fb.pixels || !g_fb.pixels8 || !g_dib || !g_dib8) return false;
-
-    memset(&g_bmi, 0, sizeof g_bmi);
-    g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    g_bmi.bmiHeader.biWidth = g_fb.width;
-    g_bmi.bmiHeader.biHeight = g_fb.height; /* positive: bottom-up */
-    g_bmi.bmiHeader.biPlanes = 1;
-    g_bmi.bmiHeader.biBitCount = 24;
-    g_bmi.bmiHeader.biCompression = BI_RGB;
-
-    g_bmi8rgb.h = g_bmi.bmiHeader;
-    g_bmi8rgb.h.biBitCount = 8;
-    g_bmi8rgb.h.biClrUsed = 256;
-    g_bmi8pal.h = g_bmi8rgb.h;
-    for (int i = 0; i < 256; ++i) g_bmi8pal.index[i] = (WORD)i; /* identity */
-
-    g_palette_device = sys->palette_display;
-    g_fb.format = sys->display_bpp <= 8 ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32;
-    g_pending_format = g_fb.format;
-    return true;
-}
-
-/* Copy the app's top-down frame into the bottom-up DIB for its format. */
-static void convert_framebuffer(void)
-{
-    if (g_fb.format == UB_PIXEL_INDEX8) {
-        for (int y = 0; y < g_fb.height; ++y)
-            memcpy(g_dib8 + (size_t)(g_fb.height - 1 - y) * g_dib8_pitch,
-                   g_fb.pixels8 + y * g_fb.pitch, (size_t)g_fb.width);
-        return;
-    }
-    for (int y = 0; y < g_fb.height; ++y) {
-        const u32 *src = g_fb.pixels + y * g_fb.pitch;
-        u8 *dst = g_dib + (size_t)(g_fb.height - 1 - y) * g_dib_pitch;
-        for (int x = 0; x < g_fb.width; ++x) {
-            u32 c = src[x];
-            dst[0] = (u8)c;         /* B */
-            dst[1] = (u8)(c >> 8);  /* G */
-            dst[2] = (u8)(c >> 16); /* R */
-            dst += 3;
-        }
-    }
-}
-
-/* Rebuild the DIB colour table and, on palette displays, the Windows
- * palette whenever the app's palette changes (normally once). */
-static void update_palette(HDC wdc)
-{
-    if (!g_fb.palette || g_fb.palette_serial == g_palette_serial_seen) return;
-    g_palette_serial_seen = g_fb.palette_serial;
-
-    PALETTEENTRY sys_colors[256];
-    memset(sys_colors, 0, sizeof sys_colors);
-    if (g_palette_device) GetSystemPaletteEntries(wdc, 0, 256, sys_colors);
-
-    struct { WORD version, count; PALETTEENTRY e[256]; } lp;
-    lp.version = 0x300;
-    lp.count = 256;
-    for (int i = 0; i < 256; ++i) {
-        u32 c = g_fb.palette[i];
-        bool reserved = i < 10 || i >= 246; /* Windows' 20 static colours */
-        PALETTEENTRY e;
-        if (reserved && g_palette_device) {
-            e = sys_colors[i];
-            e.peFlags = 0;
-        } else {
-            e.peRed = (BYTE)(c >> 16);
-            e.peGreen = (BYTE)(c >> 8);
-            e.peBlue = (BYTE)c;
-            e.peFlags = reserved ? 0 : PC_NOCOLLAPSE;
-        }
-        lp.e[i] = e;
-        g_bmi8rgb.colors[i].rgbRed = e.peRed;
-        g_bmi8rgb.colors[i].rgbGreen = e.peGreen;
-        g_bmi8rgb.colors[i].rgbBlue = e.peBlue;
-        g_bmi8rgb.colors[i].rgbReserved = 0;
-    }
-    if (!g_palette_device) return;
-
-    HPALETTE np = CreatePalette((LOGPALETTE *)&lp);
-    if (!np) {
-        ub_warn("CreatePalette failed; 256-colour output will use GDI colour matching");
-        return;
-    }
-    /* select the new palette everywhere before deleting the old one */
-    SelectPalette(wdc, np, FALSE);
-    if (g_memdc) SelectPalette(g_memdc, np, FALSE);
-    if (g_hpal) DeleteObject(g_hpal);
-    g_hpal = np;
-    ub_info("display: created 256-colour palette");
-}
-
-static void ensure_backbuffer(HDC wdc, int w, int h)
-{
-    if (g_memdc && w == g_mem_w && h == g_mem_h) return;
-    if (g_memdc) {
-        SelectObject(g_memdc, g_oldbmp);
-        DeleteObject(g_membmp);
-        DeleteDC(g_memdc);
-    }
-    g_memdc = CreateCompatibleDC(wdc);
-    g_membmp = CreateCompatibleBitmap(wdc, w, h);
-    g_oldbmp = (HBITMAP)SelectObject(g_memdc, g_membmp);
-    g_mem_w = w;
-    g_mem_h = h;
-}
-
-static void present(HDC wdc)
-{
-    RECT rc;
-    GetClientRect(g_hwnd, &rc);
-    int w = rc.right - rc.left, h = rc.bottom - rc.top;
-    if (w <= 0 || h <= 0) return;
-
-    ensure_backbuffer(wdc, w, h);
-    update_palette(wdc);
-    if (g_hpal) {
-        SelectPalette(wdc, g_hpal, FALSE);
-        RealizePalette(wdc);
-        SelectPalette(g_memdc, g_hpal, FALSE);
-        RealizePalette(g_memdc);
-    }
-    SetStretchBltMode(g_memdc, COLORONCOLOR);
-    if (g_fb.format == UB_PIXEL_INDEX8) {
-        if (g_hpal)
-            StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
-                          g_dib8, (BITMAPINFO *)&g_bmi8pal, DIB_PAL_COLORS, SRCCOPY);
-        else
-            StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
-                          g_dib8, (BITMAPINFO *)&g_bmi8rgb, DIB_RGB_COLORS, SRCCOPY);
-    } else {
-        StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
-                      g_dib, &g_bmi, DIB_RGB_COLORS, SRCCOPY);
-    }
-
-    SetBkMode(g_memdc, TRANSPARENT);
-    for (int i = 0; i < g_overlay.count; ++i) {
-        u16 wide[UB_OVERLAY_LINE_LEN];
-        int n = ub_utf8_to_utf16(g_overlay.lines[i], wide, UB_OVERLAY_LINE_LEN);
-        int y = 4 + i * 16;
-        SetTextColor(g_memdc, RGB(0, 0, 0));
-        TextOutW(g_memdc, 7, y + 1, (LPCWSTR)wide, n);   /* drop shadow */
-        SetTextColor(g_memdc, RGB(255, 255, 255));
-        TextOutW(g_memdc, 6, y, (LPCWSTR)wide, n);
-    }
-
-    BitBlt(wdc, 0, 0, w, h, g_memdc, 0, 0, SRCCOPY);
 }
 
 /* ---------------------------------------------------------------- input */
@@ -457,19 +278,70 @@ static void on_mouse_button(int button, bool down, LPARAM lp)
 static void update_mouse_pos(LPARAM lp)
 {
     if (g_look) return; /* the pointer is pinned to the centre */
-    RECT rc;
-    GetClientRect(g_hwnd, &rc);
-    int mx = (short)LOWORD(lp), my = (short)HIWORD(lp);
-    if (rc.right > 0 && rc.bottom > 0) {
-        g_input.mouse_x = mx * g_fb.width / rc.right;
-        g_input.mouse_y = my * g_fb.height / rc.bottom;
-    }
+    g_input.mouse_x = (short)LOWORD(lp);
+    g_input.mouse_y = (short)HIWORD(lp);
 }
 
-/* --------------------------------------------------------------- window */
+/* ------------------------------------------------------------ window */
+
+void plat_set_fps_cap(u32 fps)
+{
+    g_frame.fps_cap = fps > 1000 ? 1000 : fps;
+    g_next_frame_us = 0;
+    ub_info("display: frame rate cap %u%s", g_frame.fps_cap, g_frame.fps_cap ? " fps" : " (unlimited)");
+}
+
+typedef HMONITOR(WINAPI *pfn_MonitorFromWindow)(HWND, DWORD);
+typedef BOOL(WINAPI *pfn_GetMonitorInfoW)(HMONITOR, MONITORINFO *);
+
+/* The monitor the window is on (Windows 98/2000+), or the primary screen. */
+static RECT monitor_rect(HWND hwnd)
+{
+    RECT r = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
+    HMODULE user = GetModuleHandleA("USER32.DLL");
+    pfn_MonitorFromWindow from_window =
+        user ? (pfn_MonitorFromWindow)(void *)GetProcAddress(user, "MonitorFromWindow") : NULL;
+    pfn_GetMonitorInfoW get_info =
+        user ? (pfn_GetMonitorInfoW)(void *)GetProcAddress(user, "GetMonitorInfoW") : NULL;
+    if (from_window && get_info) {
+        MONITORINFO mi;
+        memset(&mi, 0, sizeof mi);
+        mi.cbSize = sizeof mi;
+        if (get_info(from_window(hwnd, 2 /* MONITOR_DEFAULTTONEAREST */), &mi)) r = mi.rcMonitor;
+    }
+    return r;
+}
+
+static void apply_fullscreen(bool on)
+{
+    if (!g_hwnd || on == g_frame.fullscreen) return;
+    plat_set_mouse_capture(false);
+    if (on) {
+        GetWindowRect(g_hwnd, &g_windowed_rect);
+        RECT m = monitor_rect(g_hwnd);
+        SetWindowLongW(g_hwnd, GWL_STYLE, FULLSCREEN_STYLE);
+        SetWindowPos(g_hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    } else {
+        SetWindowLongW(g_hwnd, GWL_STYLE, WINDOWED_STYLE);
+        RECT r = g_windowed_rect;
+        SetWindowPos(g_hwnd, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
+                     SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+    }
+    g_frame.fullscreen = on;
+    ub_info("display: %s", on ? "fullscreen" : "windowed");
+}
+
+void plat_set_fullscreen(bool on)
+{
+    g_want_fullscreen = on; /* applied between frames */
+}
 
 static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
 {
+    LRESULT pal_result;
+    if (g_frame.backend == UB_BACKEND_SOFTWARE && win32_sw_palette_message(hwnd, msg, wp, &pal_result))
+        return pal_result;
     if (g_msh_wheel_msg && msg == g_msh_wheel_msg) {
         g_input.wheel += (int)wp;
         return 0;
@@ -479,7 +351,6 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         g_input.quit_requested = true;
         return 0;
     case WM_DESTROY:
-        PostQuitMessage(0);
         return 0;
     case WM_SETFOCUS:
         g_input.has_focus = true;
@@ -523,31 +394,12 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEWHEEL:
         g_input.wheel += (short)HIWORD(wp);
         return 0;
-    case WM_QUERYNEWPALETTE: /* we are becoming active: claim the palette */
-        if (g_hpal) {
-            HDC dc = GetDC(hwnd);
-            SelectPalette(dc, g_hpal, FALSE);
-            UINT changed = RealizePalette(dc);
-            ReleaseDC(hwnd, dc);
-            if (changed) InvalidateRect(hwnd, NULL, FALSE);
-            return TRUE;
-        }
-        break;
-    case WM_PALETTECHANGED: /* another window changed the system palette */
-        if (g_hpal && (HWND)wp != hwnd) {
-            HDC dc = GetDC(hwnd);
-            SelectPalette(dc, g_hpal, FALSE);
-            RealizePalette(dc);
-            ReleaseDC(hwnd, dc);
-            InvalidateRect(hwnd, NULL, FALSE);
-        }
-        return 0;
     case WM_ERASEBKGND:
         return 1; /* we paint every pixel */
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
-        if (g_fb.pixels) present(dc);
+        if (g_frame.backend == UB_BACKEND_SOFTWARE && g_frame.fb) win32_sw_present(dc, &g_frame);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -555,45 +407,85 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     return DefWindowProcW(hwnd, msg, wp, lp);
 }
 
-#define WINDOW_STYLE WS_OVERLAPPEDWINDOW
-
-void plat_set_window_scale(int scale)
-{
-    scale = UB_CLAMP(scale, 1, 3);
-    g_fb.window_scale = scale;
-    if (!g_hwnd) return;
-    RECT r = { 0, 0, UB_FB_WIDTH * scale, UB_FB_HEIGHT * scale };
-    AdjustWindowRect(&r, WINDOW_STYLE, FALSE);
-    SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
-                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    ub_info("display: window scale %dx", scale);
-}
-
-static bool create_window(HINSTANCE inst)
+static bool register_class(void)
 {
     WNDCLASSW wc;
     memset(&wc, 0, sizeof wc);
+    /* CS_OWNDC: OpenGL needs a DC that lives as long as the window */
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
     wc.lpfnWndProc = wnd_proc;
-    wc.hInstance = inst;
+    wc.hInstance = g_inst;
     wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.lpszClassName = L"UnibloxWindow";
-    if (!RegisterClassW(&wc)) return false;
+    return RegisterClassW(&wc) != 0;
+}
 
-    DWORD style = WINDOW_STYLE;
-    g_fb.window_scale = 2;
-    RECT r = { 0, 0, UB_FB_WIDTH * 2, UB_FB_HEIGHT * 2 };
-    AdjustWindowRect(&r, style, FALSE);
-    g_hwnd = CreateWindowW(L"UnibloxWindow", L"Uniblox", style,
-                           CW_USEDEFAULT, CW_USEDEFAULT,
-                           r.right - r.left, r.bottom - r.top,
-                           NULL, NULL, inst, NULL);
+/* Window size: from the prefs, or the largest 16:9 area that fits in
+ * three quarters of the screen (but at least 640x480). */
+static void initial_size(const ub_display_prefs *prefs, const ub_system_info *sys, int *w, int *h)
+{
+    if (prefs->window_w >= 320 && prefs->window_h >= 240) {
+        *w = prefs->window_w;
+        *h = prefs->window_h;
+    } else {
+        int sw = sys->screen_w > 0 ? sys->screen_w : 800, sh = sys->screen_h > 0 ? sys->screen_h : 600;
+        *w = sw * 3 / 4;
+        *h = *w * 9 / 16;
+        if (*h > sh * 3 / 4) {
+            *h = sh * 3 / 4;
+            *w = *h * 16 / 9;
+        }
+        if (*w < UB_DEFAULT_WINDOW_W) *w = UB_DEFAULT_WINDOW_W;
+        if (*h < UB_DEFAULT_WINDOW_H) *h = UB_DEFAULT_WINDOW_H;
+    }
+    if (sys->screen_w > 0 && *w > sys->screen_w) *w = sys->screen_w;
+    if (sys->screen_h > 0 && *h > sys->screen_h) *h = sys->screen_h;
+}
+
+static bool create_window(int client_w, int client_h)
+{
+    RECT r = { 0, 0, client_w, client_h };
+    AdjustWindowRect(&r, WINDOWED_STYLE, FALSE);
+    g_hwnd = CreateWindowW(L"UnibloxWindow", L"Uniblox", WINDOWED_STYLE,
+                           CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
+                           NULL, NULL, g_inst, NULL);
     if (!g_hwnd) return false;
     ShowWindow(g_hwnd, SW_SHOWNORMAL);
     UpdateWindow(g_hwnd);
     g_input.has_focus = GetFocus() == g_hwnd;
+    g_frame.fullscreen = false;
     return true;
+}
+
+/* OpenGL if wanted and usable; otherwise software. A window's pixel
+ * format can be set only once, so a failed OpenGL attempt gets a fresh
+ * window for the software renderer. */
+static void choose_backend(const ub_display_prefs *prefs, ub_system_info *sys, int w, int h)
+{
+    g_frame.backend = UB_BACKEND_SOFTWARE;
+    if (prefs->backend == UB_BACKEND_PREF_SOFTWARE) {
+        ub_info("display: software renderer chosen in settings");
+        return;
+    }
+    if (sys->display_bpp <= 8) {
+        ub_info("display: 256-colour desktop; using the software renderer");
+        return;
+    }
+    bool generic = false;
+    if (win32_gl_init(g_hwnd, prefs->vsync, &generic)) {
+        if (generic && prefs->backend == UB_BACKEND_PREF_AUTO) {
+            ub_info("display: only Microsoft's unaccelerated OpenGL is available; "
+                    "the software renderer is faster");
+            win32_gl_shutdown();
+        } else {
+            g_frame.backend = UB_BACKEND_OPENGL;
+            return;
+        }
+    }
+    DestroyWindow(g_hwnd);
+    g_hwnd = NULL;
+    create_window(w, h);
 }
 
 /* ----------------------------------------------------------------- main */
@@ -608,9 +500,45 @@ static int fatal(const WCHAR *what)
     return 1;
 }
 
+typedef BOOL(WINAPI *pfn_SetProcessDPIAware)(void);
+
+/* Wait until the next frame is due. Sleep() covers most of the wait; the
+ * last ~1.5 ms is spun on Sleep(0) because Sleep's 1 ms granularity alone
+ * cannot hold 120 fps (8.33 ms) steady. */
+static void pace_frame(void)
+{
+    if (!g_frame.fps_cap) {
+        g_frame.sleep_us = 0;
+        return;
+    }
+    u64 period = 1000000u / g_frame.fps_cap;
+    u64 now = plat_time_us(), start = now;
+    if (!g_next_frame_us) g_next_frame_us = now;
+    g_next_frame_us += period;
+    if (g_next_frame_us <= now) {
+        /* running slower than the cap: never wait; if a whole period
+         * behind, restart the schedule rather than racing to catch up */
+        if (now - g_next_frame_us > period) g_next_frame_us = now;
+        g_frame.sleep_us = 0;
+        return;
+    }
+    while ((now = plat_time_us()) < g_next_frame_us) {
+        u64 left = g_next_frame_us - now;
+        Sleep(left > 2000 ? (DWORD)((left - 1500) / 1000u) : 0);
+    }
+    g_frame.sleep_us = (u32)(now - start);
+}
+
 static int win32_main(void)
 {
-    HINSTANCE inst = GetModuleHandleW(NULL);
+    g_inst = GetModuleHandleW(NULL);
+    /* Real pixels on high-DPI monitors (Vista+); without this Windows
+     * renders us small and upscales the result, which looks blurry. */
+    HMODULE user = GetModuleHandleA("USER32.DLL");
+    pfn_SetProcessDPIAware dpi_aware =
+        user ? (pfn_SetProcessDPIAware)(void *)GetProcAddress(user, "SetProcessDPIAware") : NULL;
+    if (dpi_aware) dpi_aware();
+
     timeBeginPeriod(1); /* 1 ms Sleep() granularity for the frame limiter */
     win32_init_base_dir();
     ub_log_open("uniblox.log", "uniblox.old.log");
@@ -618,26 +546,48 @@ static int win32_main(void)
     ub_system_info sys;
     memset(&sys, 0, sizeof sys);
     query_system(&sys);
+    sys.screen_w = GetSystemMetrics(SM_CXSCREEN);
+    sys.screen_h = GetSystemMetrics(SM_CYSCREEN);
     {
         char base[MAX_PATH * 3];
         ub_utf16_to_utf8((const u16 *)win32_base_dir(), base, sizeof base);
         ub_info("running from %s", base[0] ? base : "(current directory)");
     }
-    ub_info("%s, %u MB RAM, %d bpp display, mouse wheel %s", sys.os_name,
-            (u32)(sys.total_phys_bytes >> 20), sys.display_bpp,
-            sys.has_mouse_wheel ? "reported" : "not reported");
-
+    ub_info("%s, %u MB RAM, %dx%d %d bpp screen%s, mouse wheel %s", sys.os_name,
+            (u32)(sys.total_phys_bytes >> 20), sys.screen_w, sys.screen_h, sys.display_bpp,
+            dpi_aware ? " (DPI-aware)" : "", sys.has_mouse_wheel ? "reported" : "not reported");
+    ub_info("CPU: %s", sys.cpu_desc);
     g_msh_wheel_msg = RegisterWindowMessageW(L"MSWHEEL_ROLLMSG");
 
-    ub_info("CPU: %s", sys.cpu_desc);
-    if (!create_framebuffer(&sys)) return fatal(L"Out of memory allocating the framebuffer.");
-    ub_info("display: %s%s", g_fb.format == UB_PIXEL_INDEX8 ? "8-bit palette output" : "32-bit colour output",
-            g_palette_device ? " (palette device)" : "");
-    if (!create_window(inst)) return fatal(L"Could not create the main window.");
-    win32_audio_open(&sys);
-    if (!app_init(&sys)) return fatal(L"Uniblox failed to initialise. See uniblox.log.");
+    ub_display_prefs prefs;
+    memset(&prefs, 0, sizeof prefs);
+    prefs.fps_cap = 120;
+    prefs.sw_height = 480;
+    app_preinit(&prefs);
 
-    const u64 frame_us = 1000000u / 60u;
+    int w, h;
+    initial_size(&prefs, &sys, &w, &h);
+    if (!register_class() || !create_window(w, h)) return fatal(L"Could not create the main window.");
+    choose_backend(&prefs, &sys, w, h);
+    if (!g_hwnd) return fatal(L"Could not create the main window.");
+    if (g_frame.backend == UB_BACKEND_SOFTWARE) win32_sw_init(&sys, prefs.sw_height);
+    g_frame.fps_cap = prefs.fps_cap;
+    ub_info("display: %s renderer, %dx%d window, frame rate cap %u%s",
+            g_frame.backend == UB_BACKEND_OPENGL ? "OpenGL" : "software", w, h, g_frame.fps_cap,
+            g_frame.fps_cap ? " fps" : " (unlimited)");
+    if (prefs.fullscreen) apply_fullscreen(true);
+    g_want_fullscreen = g_frame.fullscreen;
+
+    win32_audio_open(&sys);
+    {
+        RECT rc;
+        GetClientRect(g_hwnd, &rc);
+        g_frame.width = rc.right;
+        g_frame.height = rc.bottom;
+        if (g_frame.backend == UB_BACKEND_SOFTWARE) g_frame.fb = win32_sw_prepare(rc.right, rc.bottom);
+    }
+    if (!app_init(&sys, &g_frame)) return fatal(L"Uniblox failed to initialise. See uniblox.log.");
+
     u64 last = plat_time_us();
     MSG msg;
     while (!g_input.quit_requested) {
@@ -648,27 +598,37 @@ static int win32_main(void)
             DispatchMessageW(&msg);
         }
         poll_mouse_look();
+        if (g_want_fullscreen != g_frame.fullscreen) apply_fullscreen(g_want_fullscreen);
 
+        RECT rc;
+        GetClientRect(g_hwnd, &rc);
         u64 now = plat_time_us();
         u32 dt = (u32)(now - last);
         last = now;
-        if (g_pending_format != g_fb.format) {
-            g_fb.format = g_pending_format;
-            ub_info("display: switched to %s output",
-                    g_fb.format == UB_PIXEL_INDEX8 ? "8-bit palette" : "32-bit colour");
+        if (rc.right <= 0 || rc.bottom <= 0) { /* minimised: idle */
+            Sleep(20);
+            continue;
+        }
+        g_frame.width = rc.right;
+        g_frame.height = rc.bottom;
+        if (g_frame.backend == UB_BACKEND_SOFTWARE) {
+            g_frame.fb = win32_sw_prepare(rc.right, rc.bottom);
+            if (!g_frame.fb) return fatal(L"Out of memory for the frame buffer.");
         }
 
-        app_frame(&g_fb, &g_input, dt, &g_overlay);
+        app_frame(&g_frame, &g_input, dt);
         if (g_input.quit_requested) break;
-        u64 t_present = plat_time_us();
-        convert_framebuffer();
-        HDC dc = GetDC(g_hwnd);
-        present(dc);
-        ReleaseDC(g_hwnd, dc);
-        g_fb.present_us = (u32)(plat_time_us() - t_present);
 
-        u64 spent = plat_time_us() - now;
-        if (spent < frame_us) Sleep((DWORD)((frame_us - spent) / 1000u));
+        u64 t_present = plat_time_us();
+        if (g_frame.backend == UB_BACKEND_OPENGL) {
+            win32_gl_swap();
+        } else {
+            HDC dc = GetDC(g_hwnd);
+            win32_sw_present(dc, &g_frame);
+            ReleaseDC(g_hwnd, dc);
+        }
+        g_frame.present_us = (u32)(plat_time_us() - t_present);
+        pace_frame();
     }
 
     ub_info("shutting down");
@@ -676,9 +636,10 @@ static int win32_main(void)
     app_shutdown();
     win32_audio_close();
     ub_mixer_shutdown();
+    if (g_frame.backend == UB_BACKEND_OPENGL) win32_gl_shutdown();
+    else win32_sw_shutdown();
     timeEndPeriod(1);
     DestroyWindow(g_hwnd);
-    if (g_hpal) DeleteObject(g_hpal);
     ub_info("shutdown complete");
     ub_log_close();
     return 0;

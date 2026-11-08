@@ -71,11 +71,12 @@ tests/          host unit tests (make test)
 | 0 | Toolchain + hello window | One .exe runs on NT 3.51, 4.0, 2000, XP | **Done.** Confirmed running on a real install |
 | 1 | Platform layer | Input, timing, audio (waveOut), file I/O, a log file | **Done.** Confirmed working on a real install |
 | 2 | Software renderer | Textured, lit room of parts at 15+ fps, 320x240, on a Pentium-class VM, in 8-bit and 16-bit display modes | **Built.** Passes unit tests and the Wine smoke test. Needs: F5 benchmark on a Pentium-class VM, and a run on a real 256-colour desktop |
+| 2.5 | High-quality OpenGL renderer | Native 1080p/1440p, resizable and fullscreen, shadows, specular, anti-aliasing; 120 fps cap by default | **Built.** Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real GPU |
 | 3 | World model + place files | Save/load round-trips byte for byte | |
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | |
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | |
 | 6 | In-game editor | Build an obstacle course without writing code | |
-| 7 | OpenGL renderer + settings | Hardware path on 2000/XP | |
+| 7 | Renderer polish + settings menu | In-game settings UI; more effects | Hardware OpenGL path moved forward into milestone 2.5 |
 | 8 | Loopback networking | Single-player runs entirely through replication | |
 | 9 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 10 | Platform services | Server browser, accounts, publish/download places | |
@@ -134,6 +135,54 @@ tests/          host unit tests (make test)
   and display time, CPU (from CPUID, with a clock measured from the TSC),
   OS and colour depth. F6 drops the window to 1x to skip GDI's stretch.
 
+## Milestone 2.5 notes
+
+- **Two backends behind one interface** (`ub_render_*`). Parts are queued
+  per frame, so the OpenGL path can draw the scene twice (shadow map, then
+  the screen).
+- **OpenGL is loaded at run time** (`LoadLibraryA("opengl32.dll")`, the
+  pixel-format calls looked up in gdi32), so nothing GL-related is
+  imported and NT 3.51 still starts. With `renderer=auto`, Microsoft's
+  unaccelerated "GDI Generic" driver is skipped, because the software
+  renderer is faster. 256-colour desktops always use software.
+- **Shader path (GL 2.0 + framebuffer objects):**
+  - per-pixel Lambert sun plus hemisphere sky/ground ambient
+  - Blinn-Phong highlights tuned per material, and a soft Fresnel rim
+  - 2048x2048 shadow map around the camera focus, snapped to texels so
+    edges don't shimmer, with 3x3 PCF and a normal-offset bias
+  - per-pixel sky with a sun disc and glow, and exponential fog towards the
+    horizon colour
+  - 4x MSAA through a multisampled framebuffer resolved by a blit
+- **Fixed-function path (GL 1.1, or `gl_shaders=0`):** per-vertex lighting
+  with specular, fog and gradient sky. Big quads are split into ~6-unit
+  cells so per-vertex fog and lighting stay correct.
+- **Textures:** the same procedural designs regenerated at 256x256 from
+  continuous coordinates, box-filtered mipmaps, up to 16x anisotropic
+  filtering.
+- **Shapes:** high-detail meshes (32-sided cylinders, 16x32 balls) with
+  smooth vertex normals and seam-free wrapped texture coordinates. The
+  software renderer keeps the low-detail meshes.
+- **Text:** a GDI-rasterised font atlas for OpenGL, with padded cells and
+  glyph-sized quads. The software renderer draws its text with GDI at
+  window resolution after stretching, so it stays sharp.
+- **Window:**
+  - resizable; borderless fullscreen on the window's monitor (F11 or
+    Alt+Enter)
+  - `SetProcessDPIAware` on Vista and later, so high-DPI monitors aren't
+    blurry
+  - default size is 75% of the screen at 16:9
+- **Frame pacing:** an absolute schedule, with Sleep for the bulk of the
+  wait and a short spin at the end. It never waits when running below the
+  cap. Measured under Wine at exactly 120.0, 144.0 and 59.9 fps for caps of
+  120, 144 and 60. Vsync is off by default so the cap governs.
+- **Bugs found while testing:**
+  - The wedge's slope normal pointed inward, because the slope passes
+    through the shape's centre, so the old "away from the centre"
+    orientation test was undecided. It now compares against the vertex
+    average.
+  - The 2D pass left the depth test off, so the shadow pass wrote no depth.
+    All 3D state is now reset at the start of each frame.
+
 ## Open items
 
 - Milestone 2 speed on a Pentium-class machine: run F5 in 86Box or PCem
@@ -143,6 +192,9 @@ tests/          host unit tests (make test)
 - The 256-colour palette path can't be tested in Wine: its 8-bit display
   mode shows almost nothing in colour even for the milestone 1 build, which
   has no palette code. It needs a run on a real 256-colour NT desktop.
+- Milestone 2.5 on real hardware: check the OpenGL path on an actual GPU
+  (expected well above 120 fps at 1440p for this scene) and send the F5
+  `benchmark:` line. Under Wine it was only tested on Mesa's software GPU.
 - `.eh_frame` from libgcc ends up in the image (shown truncated as
   `.eh_fram`). The loader ignores it; drop it later with a linker script.
 - The name "Uniblox" is close to an existing trademark in the same genre.
