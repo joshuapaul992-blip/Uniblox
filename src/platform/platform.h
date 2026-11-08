@@ -11,14 +11,35 @@
 
 /* ------------------------------------------------------------ display */
 
-/* Software framebuffer the app renders into: 0x00RRGGBB, top-down rows.
- * The backend converts it to whatever the display needs. */
+typedef enum {
+    UB_PIXEL_XRGB32, /* 0x00RRGGBB per pixel; used on 15/16/24/32-bit displays */
+    UB_PIXEL_INDEX8, /* palette index per pixel; used on 256-colour displays */
+} ub_pixel_format;
+
+/* Software framebuffer the app renders into, top-down rows. Both buffers
+ * always exist; `format` says which one is shown this frame. The backend
+ * converts to whatever the display needs. */
 typedef struct {
-    u32 *pixels;
+    ub_pixel_format format;
+    u32 *pixels;            /* XRGB32 buffer */
+    u8 *pixels8;            /* INDEX8 buffer */
     int width;
     int height;
-    int pitch; /* in pixels */
+    int pitch;              /* in pixels, same for both buffers */
+    const u32 *palette;     /* 256 x 0x00RRGGBB for INDEX8, set by the app */
+    u32 palette_serial;     /* app increments this when palette contents change */
+    u32 present_us;         /* backend: time to convert + show the previous frame */
+    int window_scale;       /* backend: current window size as a multiple of width/height */
 } ub_framebuffer;
+
+/* Choose the pixel format from the next frame on. The backend picks a
+ * default from the desktop colour depth (INDEX8 at 256 colours or fewer). */
+void plat_set_pixel_format(ub_pixel_format f);
+
+/* Resize the window to scale x the framebuffer (1..3). At 1 the image is
+ * copied to the screen without stretching, which is much cheaper on slow
+ * machines. */
+void plat_set_window_scale(int scale);
 
 #define UB_OVERLAY_MAX_LINES 10
 #define UB_OVERLAY_LINE_LEN 96
@@ -52,6 +73,9 @@ enum {
     UB_KEY_F1        = 0x70,
     UB_KEY_F2        = 0x71,
     UB_KEY_F3        = 0x72,
+    UB_KEY_F5        = 0x74,
+    UB_KEY_F6        = 0x75,
+    UB_KEY_F8        = 0x77,
 };
 
 enum { UB_MOUSE_LEFT, UB_MOUSE_RIGHT, UB_MOUSE_MIDDLE, UB_MOUSE_BUTTONS };
@@ -79,7 +103,11 @@ typedef struct {
     bool mouse_released[UB_MOUSE_BUTTONS];
     int mouse_dx, mouse_dy;   /* relative motion in screen pixels, only while captured */
     int wheel;                /* multiples of UB_WHEEL_NOTCH; positive = away from user */
-    char text[UB_TEXT_INPUT_MAX]; /* printable characters typed, UTF-8, NUL-terminated */
+    /* Characters typed, in order, UTF-8, NUL-terminated. Besides printable
+     * text it contains '\b' (Backspace), '\r' (Enter) and '\x1b' (Esc), so
+     * a text box sees exactly the order the keys were pressed even when
+     * several arrive within one frame. */
+    char text[UB_TEXT_INPUT_MAX];
 } ub_input;
 
 /* Mouse-look mode: hides the cursor, keeps it inside the window, and
@@ -99,6 +127,9 @@ typedef struct {
     u64 total_phys_bytes;    /* installed RAM as reported by the OS */
     int display_bpp;         /* desktop colour depth */
     char audio_desc[64];     /* e.g. "22050 Hz 16-bit stereo" or "no audio device" */
+    char cpu_desc[64];       /* e.g. "GenuineIntel family 5 model 2, MMX, ~133 MHz" */
+    u32 cpu_mhz;             /* measured, 0 if unknown */
+    bool palette_display;    /* the display is palette-based (256 colours) */
     bool has_mouse_wheel;    /* the OS reports wheel events (NT 4.0+, or a driver) */
 } ub_system_info;
 

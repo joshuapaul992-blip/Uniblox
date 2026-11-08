@@ -1,9 +1,15 @@
 /* Uniblox - Win32 window, input and main loop.
  *
- * Display path: the app renders 32-bit XRGB top-down; we convert to a
- * bottom-up 24-bit DIB (the format every Windows version supports), stretch
- * it into an off-screen bitmap, draw overlay text with GDI, then BitBlt to
- * the window so there is no flicker.
+ * Display path: the app renders top-down into either a 32-bit XRGB or an
+ * 8-bit palette-index buffer. We copy that into a bottom-up DIB (24-bit,
+ * or 8-bit with a colour table; formats every Windows version supports),
+ * stretch it into an off-screen bitmap, draw overlay text with GDI, then
+ * BitBlt to the window so there is no flicker.
+ *
+ * On 256-colour desktops we build a Windows palette from the app's colours
+ * (keeping the 20 static system colours), realise it, and blit with
+ * DIB_PAL_COLORS so pixels map straight to palette slots with no colour
+ * matching per frame.
  *
  * Input: keyboard via WM_KEYDOWN/WM_KEYUP/WM_CHAR, mouse via the button
  * and WM_MOUSEMOVE messages.
@@ -19,6 +25,8 @@
 #include "core/ub_utf.h"
 #include "crt/ub_crt.h"
 
+#include <cpuid.h>
+
 #ifndef WM_MOUSEWHEEL
 #define WM_MOUSEWHEEL 0x020A
 #endif
@@ -30,9 +38,17 @@ static HWND g_hwnd;
 static ub_input g_input;
 static ub_overlay g_overlay;
 static ub_framebuffer g_fb;
-static u8 *g_dib;            /* 24bpp bottom-up copy of g_fb */
+static u8 *g_dib;            /* 24bpp bottom-up copy of g_fb (XRGB32 format) */
 static int g_dib_pitch;      /* bytes, DWORD aligned */
 static BITMAPINFO g_bmi;
+static u8 *g_dib8;           /* 8bpp bottom-up copy of g_fb (INDEX8 format) */
+static int g_dib8_pitch;
+static struct { BITMAPINFOHEADER h; RGBQUAD colors[256]; } g_bmi8rgb;
+static struct { BITMAPINFOHEADER h; WORD index[256]; } g_bmi8pal;
+static bool g_palette_device;   /* desktop is 256 colours with a hardware palette */
+static HPALETTE g_hpal;
+static u32 g_palette_serial_seen = 0xFFFFFFFFu;
+static ub_pixel_format g_pending_format;
 static HDC g_memdc;
 static HBITMAP g_membmp, g_oldbmp;
 static int g_mem_w, g_mem_h;
@@ -43,6 +59,50 @@ static bool g_look;          /* mouse-look active */
 static POINT g_look_restore; /* cursor position to restore afterwards */
 
 /* ---------------------------------------------------------- system info */
+
+static u64 read_tsc(void)
+{
+    u32 lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((u64)hi << 32) | lo;
+}
+
+/* CPUID (Pentium and later; __get_cpuid checks the instruction exists) and
+ * a rough clock speed from the time-stamp counter over 50 ms. In a VM or
+ * emulator the speed is what the guest sees, which is what matters for
+ * judging benchmark results. */
+static void query_cpu(ub_system_info *sys)
+{
+    unsigned a, b, c, d;
+    if (!__get_cpuid(0, &a, &b, &c, &d)) {
+        ub_fmt(sys->cpu_desc, sizeof sys->cpu_desc, "386/486 class (no CPUID)");
+        return;
+    }
+    char vendor[13];
+    memcpy(vendor, &b, 4);
+    memcpy(vendor + 4, &d, 4);
+    memcpy(vendor + 8, &c, 4);
+    vendor[12] = 0;
+    unsigned family = 0, model = 0;
+    bool mmx = false, sse = false, tsc = false;
+    if (__get_cpuid(1, &a, &b, &c, &d)) {
+        family = (a >> 8) & 15;
+        model = (a >> 4) & 15;
+        if (family == 15) family += (a >> 20) & 255;
+        if (family == 6 || family >= 15) model |= ((a >> 16) & 15) << 4;
+        tsc = (d >> 4) & 1;
+        mmx = (d >> 23) & 1;
+        sse = (d >> 25) & 1;
+    }
+    if (tsc) {
+        u64 t0 = plat_time_us(), c0 = read_tsc();
+        while (plat_time_us() - t0 < 50000) { }
+        u64 t1 = plat_time_us(), c1 = read_tsc();
+        if (t1 > t0) sys->cpu_mhz = (u32)((c1 - c0) / (t1 - t0));
+    }
+    ub_fmt(sys->cpu_desc, sizeof sys->cpu_desc, "%s family %u model %u%s%s, ~%u MHz",
+           vendor, family, model, mmx ? ", MMX" : "", sse ? ", SSE" : "", sys->cpu_mhz);
+}
 
 typedef struct {
     DWORD dwLength, dwMemoryLoad;
@@ -86,23 +146,33 @@ static void query_system(ub_system_info *sys)
 
     HDC dc = GetDC(NULL);
     sys->display_bpp = GetDeviceCaps(dc, BITSPIXEL) * GetDeviceCaps(dc, PLANES);
+    sys->palette_display = (GetDeviceCaps(dc, RASTERCAPS) & RC_PALETTE) != 0;
     ReleaseDC(NULL, dc);
 
     /* Unknown indexes return 0 on older systems, so this is safe on 3.51. */
     sys->has_mouse_wheel = GetSystemMetrics(SM_MOUSEWHEELPRESENT) != 0;
+    query_cpu(sys);
 }
 
 /* ------------------------------------------------------------- display */
 
-static bool create_framebuffer(void)
+void plat_set_pixel_format(ub_pixel_format f)
+{
+    g_pending_format = f;
+}
+
+static bool create_framebuffer(const ub_system_info *sys)
 {
     g_fb.width = UB_FB_WIDTH;
     g_fb.height = UB_FB_HEIGHT;
     g_fb.pitch = UB_FB_WIDTH;
     g_fb.pixels = (u32 *)plat_alloc((size_t)g_fb.pitch * g_fb.height * 4);
+    g_fb.pixels8 = (u8 *)plat_alloc((size_t)g_fb.pitch * g_fb.height);
     g_dib_pitch = (g_fb.width * 3 + 3) & ~3;
     g_dib = (u8 *)plat_alloc((size_t)g_dib_pitch * g_fb.height);
-    if (!g_fb.pixels || !g_dib) return false;
+    g_dib8_pitch = (g_fb.width + 3) & ~3;
+    g_dib8 = (u8 *)plat_alloc((size_t)g_dib8_pitch * g_fb.height);
+    if (!g_fb.pixels || !g_fb.pixels8 || !g_dib || !g_dib8) return false;
 
     memset(&g_bmi, 0, sizeof g_bmi);
     g_bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -111,11 +181,28 @@ static bool create_framebuffer(void)
     g_bmi.bmiHeader.biPlanes = 1;
     g_bmi.bmiHeader.biBitCount = 24;
     g_bmi.bmiHeader.biCompression = BI_RGB;
+
+    g_bmi8rgb.h = g_bmi.bmiHeader;
+    g_bmi8rgb.h.biBitCount = 8;
+    g_bmi8rgb.h.biClrUsed = 256;
+    g_bmi8pal.h = g_bmi8rgb.h;
+    for (int i = 0; i < 256; ++i) g_bmi8pal.index[i] = (WORD)i; /* identity */
+
+    g_palette_device = sys->palette_display;
+    g_fb.format = sys->display_bpp <= 8 ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32;
+    g_pending_format = g_fb.format;
     return true;
 }
 
+/* Copy the app's top-down frame into the bottom-up DIB for its format. */
 static void convert_framebuffer(void)
 {
+    if (g_fb.format == UB_PIXEL_INDEX8) {
+        for (int y = 0; y < g_fb.height; ++y)
+            memcpy(g_dib8 + (size_t)(g_fb.height - 1 - y) * g_dib8_pitch,
+                   g_fb.pixels8 + y * g_fb.pitch, (size_t)g_fb.width);
+        return;
+    }
     for (int y = 0; y < g_fb.height; ++y) {
         const u32 *src = g_fb.pixels + y * g_fb.pitch;
         u8 *dst = g_dib + (size_t)(g_fb.height - 1 - y) * g_dib_pitch;
@@ -127,6 +214,54 @@ static void convert_framebuffer(void)
             dst += 3;
         }
     }
+}
+
+/* Rebuild the DIB colour table and, on palette displays, the Windows
+ * palette whenever the app's palette changes (normally once). */
+static void update_palette(HDC wdc)
+{
+    if (!g_fb.palette || g_fb.palette_serial == g_palette_serial_seen) return;
+    g_palette_serial_seen = g_fb.palette_serial;
+
+    PALETTEENTRY sys_colors[256];
+    memset(sys_colors, 0, sizeof sys_colors);
+    if (g_palette_device) GetSystemPaletteEntries(wdc, 0, 256, sys_colors);
+
+    struct { WORD version, count; PALETTEENTRY e[256]; } lp;
+    lp.version = 0x300;
+    lp.count = 256;
+    for (int i = 0; i < 256; ++i) {
+        u32 c = g_fb.palette[i];
+        bool reserved = i < 10 || i >= 246; /* Windows' 20 static colours */
+        PALETTEENTRY e;
+        if (reserved && g_palette_device) {
+            e = sys_colors[i];
+            e.peFlags = 0;
+        } else {
+            e.peRed = (BYTE)(c >> 16);
+            e.peGreen = (BYTE)(c >> 8);
+            e.peBlue = (BYTE)c;
+            e.peFlags = reserved ? 0 : PC_NOCOLLAPSE;
+        }
+        lp.e[i] = e;
+        g_bmi8rgb.colors[i].rgbRed = e.peRed;
+        g_bmi8rgb.colors[i].rgbGreen = e.peGreen;
+        g_bmi8rgb.colors[i].rgbBlue = e.peBlue;
+        g_bmi8rgb.colors[i].rgbReserved = 0;
+    }
+    if (!g_palette_device) return;
+
+    HPALETTE np = CreatePalette((LOGPALETTE *)&lp);
+    if (!np) {
+        ub_warn("CreatePalette failed; 256-colour output will use GDI colour matching");
+        return;
+    }
+    /* select the new palette everywhere before deleting the old one */
+    SelectPalette(wdc, np, FALSE);
+    if (g_memdc) SelectPalette(g_memdc, np, FALSE);
+    if (g_hpal) DeleteObject(g_hpal);
+    g_hpal = np;
+    ub_info("display: created 256-colour palette");
 }
 
 static void ensure_backbuffer(HDC wdc, int w, int h)
@@ -152,9 +287,25 @@ static void present(HDC wdc)
     if (w <= 0 || h <= 0) return;
 
     ensure_backbuffer(wdc, w, h);
+    update_palette(wdc);
+    if (g_hpal) {
+        SelectPalette(wdc, g_hpal, FALSE);
+        RealizePalette(wdc);
+        SelectPalette(g_memdc, g_hpal, FALSE);
+        RealizePalette(g_memdc);
+    }
     SetStretchBltMode(g_memdc, COLORONCOLOR);
-    StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
-                  g_dib, &g_bmi, DIB_RGB_COLORS, SRCCOPY);
+    if (g_fb.format == UB_PIXEL_INDEX8) {
+        if (g_hpal)
+            StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
+                          g_dib8, (BITMAPINFO *)&g_bmi8pal, DIB_PAL_COLORS, SRCCOPY);
+        else
+            StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
+                          g_dib8, (BITMAPINFO *)&g_bmi8rgb, DIB_RGB_COLORS, SRCCOPY);
+    } else {
+        StretchDIBits(g_memdc, 0, 0, w, h, 0, 0, g_fb.width, g_fb.height,
+                      g_dib, &g_bmi, DIB_RGB_COLORS, SRCCOPY);
+    }
 
     SetBkMode(g_memdc, TRANSPARENT);
     for (int i = 0; i < g_overlay.count; ++i) {
@@ -285,7 +436,8 @@ static void on_char(WPARAM wp)
         c = 0x10000 + (((u32)g_high_surrogate - 0xD800) << 10) + (c - 0xDC00);
     }
     g_high_surrogate = 0;
-    if (c < 32 || c == 127) return; /* control keys come through key_pressed */
+    /* keep the editing keys in the stream so their order is preserved */
+    if ((c < 32 && c != '\b' && c != '\r' && c != 0x1B) || c == 127) return;
     add_text_char(c);
 }
 
@@ -371,6 +523,25 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEWHEEL:
         g_input.wheel += (short)HIWORD(wp);
         return 0;
+    case WM_QUERYNEWPALETTE: /* we are becoming active: claim the palette */
+        if (g_hpal) {
+            HDC dc = GetDC(hwnd);
+            SelectPalette(dc, g_hpal, FALSE);
+            UINT changed = RealizePalette(dc);
+            ReleaseDC(hwnd, dc);
+            if (changed) InvalidateRect(hwnd, NULL, FALSE);
+            return TRUE;
+        }
+        break;
+    case WM_PALETTECHANGED: /* another window changed the system palette */
+        if (g_hpal && (HWND)wp != hwnd) {
+            HDC dc = GetDC(hwnd);
+            SelectPalette(dc, g_hpal, FALSE);
+            RealizePalette(dc);
+            ReleaseDC(hwnd, dc);
+            InvalidateRect(hwnd, NULL, FALSE);
+        }
+        return 0;
     case WM_ERASEBKGND:
         return 1; /* we paint every pixel */
     case WM_PAINT: {
@@ -382,6 +553,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     }
     }
     return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+#define WINDOW_STYLE WS_OVERLAPPEDWINDOW
+
+void plat_set_window_scale(int scale)
+{
+    scale = UB_CLAMP(scale, 1, 3);
+    g_fb.window_scale = scale;
+    if (!g_hwnd) return;
+    RECT r = { 0, 0, UB_FB_WIDTH * scale, UB_FB_HEIGHT * scale };
+    AdjustWindowRect(&r, WINDOW_STYLE, FALSE);
+    SetWindowPos(g_hwnd, NULL, 0, 0, r.right - r.left, r.bottom - r.top,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    ub_info("display: window scale %dx", scale);
 }
 
 static bool create_window(HINSTANCE inst)
@@ -396,7 +581,8 @@ static bool create_window(HINSTANCE inst)
     wc.lpszClassName = L"UnibloxWindow";
     if (!RegisterClassW(&wc)) return false;
 
-    DWORD style = WS_OVERLAPPEDWINDOW;
+    DWORD style = WINDOW_STYLE;
+    g_fb.window_scale = 2;
     RECT r = { 0, 0, UB_FB_WIDTH * 2, UB_FB_HEIGHT * 2 };
     AdjustWindowRect(&r, style, FALSE);
     g_hwnd = CreateWindowW(L"UnibloxWindow", L"Uniblox", style,
@@ -443,7 +629,10 @@ static int win32_main(void)
 
     g_msh_wheel_msg = RegisterWindowMessageW(L"MSWHEEL_ROLLMSG");
 
-    if (!create_framebuffer()) return fatal(L"Out of memory allocating the framebuffer.");
+    ub_info("CPU: %s", sys.cpu_desc);
+    if (!create_framebuffer(&sys)) return fatal(L"Out of memory allocating the framebuffer.");
+    ub_info("display: %s%s", g_fb.format == UB_PIXEL_INDEX8 ? "8-bit palette output" : "32-bit colour output",
+            g_palette_device ? " (palette device)" : "");
     if (!create_window(inst)) return fatal(L"Could not create the main window.");
     win32_audio_open(&sys);
     if (!app_init(&sys)) return fatal(L"Uniblox failed to initialise. See uniblox.log.");
@@ -463,13 +652,20 @@ static int win32_main(void)
         u64 now = plat_time_us();
         u32 dt = (u32)(now - last);
         last = now;
+        if (g_pending_format != g_fb.format) {
+            g_fb.format = g_pending_format;
+            ub_info("display: switched to %s output",
+                    g_fb.format == UB_PIXEL_INDEX8 ? "8-bit palette" : "32-bit colour");
+        }
 
         app_frame(&g_fb, &g_input, dt, &g_overlay);
         if (g_input.quit_requested) break;
+        u64 t_present = plat_time_us();
         convert_framebuffer();
         HDC dc = GetDC(g_hwnd);
         present(dc);
         ReleaseDC(g_hwnd, dc);
+        g_fb.present_us = (u32)(plat_time_us() - t_present);
 
         u64 spent = plat_time_us() - now;
         if (spent < frame_us) Sleep((DWORD)((frame_us - spent) / 1000u));
@@ -482,6 +678,7 @@ static int win32_main(void)
     ub_mixer_shutdown();
     timeEndPeriod(1);
     DestroyWindow(g_hwnd);
+    if (g_hpal) DeleteObject(g_hpal);
     ub_info("shutdown complete");
     ub_log_close();
     return 0;

@@ -29,7 +29,11 @@ CORE_SRCS := \
 	src/core/ub_path.c \
 	src/core/ub_log.c \
 	src/audio/ub_mixer.c \
-	src/audio/ub_wav.c
+	src/audio/ub_wav.c \
+	src/render/ub_palette.c \
+	src/render/ub_texture.c \
+	src/render/ub_mesh.c \
+	src/render/ub_render.c
 
 SRCS := \
 	src/crt/ub_crt.c \
@@ -52,7 +56,7 @@ COMPILER_FLAGS := -mincoming-stack-boundary=2 -fno-tree-loop-distribute-patterns
 endif
 
 CFLAGS := -std=c99 -O2 -g0 -march=$(CPU) -mtune=pentiumpro \
-	-ffreestanding -fno-builtin $(COMPILER_FLAGS) \
+	-ffreestanding -fno-builtin -fno-math-errno $(COMPILER_FLAGS) \
 	-fno-stack-protector -fno-stack-check \
 	-fno-asynchronous-unwind-tables -fno-unwind-tables \
 	-Wall -Wextra -Werror=implicit-function-declaration -Wno-unused-parameter -Wshadow -Wstrict-prototypes \
@@ -81,7 +85,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 # AddressSanitizer and UBSan, against a stub platform layer.
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
-TEST_SRCS  := tests/test_main.c tests/stub_platform.c $(CORE_SRCS)
+TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/stub_platform.c $(CORE_SRCS)
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
 
@@ -97,13 +101,22 @@ $(OUT)/obj/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Instructions newer than the original Pentium (P6 cmov/fcomi/fcmov, MMX
+# and SSE registers). The toolchain's own libgcc is built for Pentium Pro,
+# so this also catches anything pulled in from there.
+OBJDUMP ?= $(CROSS)objdump
+P6_PATTERN := [[:space:]](cmov[a-z]*|fcmov[a-z]*|f(u)?comip?|sysenter|sysexit)[[:space:]]|%(x|y)?mm[0-9]
+
 check: $(EXE)
 	$(PYTHON) tools/checkpe.py --allow tools/nt351_imports.txt $(EXE)
+	@if $(OBJDUMP) -d $(EXE) | grep -E '$(P6_PATTERN)' | head -5 | grep .; then \
+		echo "  FAIL: instructions newer than the Pentium (see above)"; exit 1; \
+	else echo "  OK: only Pentium (P5) instructions"; fi
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
-$(TEST_BIN): $(TEST_SRCS) $(wildcard src/*/*.h src/*/*/*.h)
+$(TEST_BIN): $(TEST_SRCS) src/crt/ub_crt.c $(wildcard src/*/*.h src/*/*/*.h tests/*.h)
 	@mkdir -p $(dir $@)
 	$(HOSTCC) $(TEST_FLAGS) -o $@ $(TEST_SRCS) -lm
 

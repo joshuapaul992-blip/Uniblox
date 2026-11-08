@@ -12,12 +12,17 @@
 
 f32 ub_sinf(f32 x);
 f32 ub_cosf(f32 x);
+/* Angle of the vector (x, y) from the +x axis, in [-pi, pi]; error < 2e-5. */
+f32 ub_atan2f(f32 y, f32 x);
 
 /* Wrap an angle into [-pi, pi]. */
 f32 ub_wrap_angle(f32 x);
 
 static inline f32 ub_absf(f32 x) { return x < 0 ? -x : x; }
 static inline f32 ub_clampf(f32 x, f32 lo, f32 hi) { return x < lo ? lo : x > hi ? hi : x; }
+
+static inline i32 ub_floorf(f32 x) { i32 i = (i32)x; return (x < (f32)i) ? i - 1 : i; }
+static inline i32 ub_ceilf(f32 x) { i32 i = (i32)x; return (x > (f32)i) ? i + 1 : i; }
 
 /* Round to nearest integer, halves away from zero. */
 static inline i32 ub_roundf(f32 x) { return (i32)(x < 0 ? x - 0.5f : x + 0.5f); }

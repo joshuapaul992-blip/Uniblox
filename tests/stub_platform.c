@@ -32,3 +32,5 @@ bool plat_file_rename(const char *a, const char *b) { (void)a; (void)b; return f
 bool plat_file_exists(const char *p) { (void)p; return false; }
 void plat_set_mouse_capture(bool on) { (void)on; }
 void plat_request_quit(void) {}
+void plat_set_pixel_format(ub_pixel_format f) { (void)f; }
+void plat_set_window_scale(int scale) { (void)scale; }
