@@ -52,7 +52,11 @@ converts a Roblox file into a `.ubx`.
   position, rotation, size, colour (`Color3uint8` or `BrickColor`),
   material, shape (block, ball, cylinder), transparency, `Anchored` and
   `CanCollide`. Fully transparent parts are kept but not drawn.
-- Models and folders, so the tree keeps its structure.
+- Models and folders, so the tree keeps its structure. A model file's
+  contents go into the Workspace, so they show up like a place.
+- Joints (`Weld`, `ManualWeld`, `Snap`, `Glue`, `Motor`, `Motor6D`,
+  `WeldConstraint`) become welds. Motors are held still for now.
+- `Workspace.Gravity` and `FallenPartsDestroyHeight`.
 - Lighting: `ClockTime`/`TimeOfDay`, `GeographicLatitude`, `Brightness`,
   `Ambient`, `OutdoorAmbient`, `FogEnd` and `FogColor`. The sun's position
   follows the clock time.
@@ -64,6 +68,8 @@ converts a Roblox file into a `.ubx`.
   their shapes are stored online, not in the file. Uniblox never downloads
   anything.
 - Terrain is counted but skipped.
+- Hinges, springs, ropes and other constraints are ignored, so parts that
+  rely on them fall loose.
 - Textures, decals, scripts and GUIs are ignored.
 - Partly see-through parts are drawn solid.
 - The old XML format (`.rbxlx`) isn't supported. Studio can save the
@@ -72,9 +78,42 @@ converts a Roblox file into a `.ubx`.
 The importer is for places you made or have the right to use. Files are
 read only from disk.
 
-You stand on the tops of parts, so stairs and floors work. Walls aren't
-solid until milestone 4. If you fall off the world, you go back to the
+## Physics
+
+Unanchored parts fall, slide, tumble, stack and come to rest, as in
+Roblox:
+
+- **Assemblies:** parts joined by welds move as one rigid body. If any
+  part of an assembly is anchored, the whole assembly stays put.
+- **Shapes:** blocks, wedges, corner wedges and cylinders collide as their
+  real shapes. Balls are true spheres. Mesh and union placeholders collide
+  as boxes. Parts with `CanCollide` off pass through everything, but still
+  fall if they're loose.
+- **Materials** set the weight, friction and bounce. Metal is heavy and
+  slippery, wood is light, and grass and stone grip.
+- **Gravity** is the place's own (Roblox's default is 196.2 studs/s²).
+  Loose parts that fall below the place's `FallenPartsDestroyHeight` (-500
+  by default) are removed.
+- **Sleeping:** things that have come to rest stop costing CPU time until
+  something touches them. A city of 18,000 anchored parts with 500 loose
+  boxes dropped on it settles in about 3 seconds. After that, physics
+  takes 0.03 ms per step on a modern PC.
+- Stacks of about 20 parts stand. Balls roll and slowly come to a stop.
+
+Physics runs at a fixed 120 steps per second, whatever the frame rate, and
+moving parts are drawn blended between steps, so motion stays smooth at
+60, 144 or 240 fps. Below about 10 fps the game slows down instead of
+stalling.
+
+**The character** works like a Roblox humanoid. It walks at 16 studs/s
+and jumps 7.2 studs high (Roblox's defaults). It walks up anything up to
+2.2 studs high without jumping, so stairs and kerbs just work. Walls and
+ceilings stop it. It pushes loose parts, presses on what it stands on, and
+rides moving platforms. If you fall off the world, you go back to the
 spawn point.
+
+The demo place has a tower of loose blocks, a pyramid of crates, three
+balls in the house, a welded cart and a spinning block to try it on.
 
 ## Building (Linux)
 
@@ -117,8 +156,8 @@ fallback.
 
 - **Unit tests** for the OS-independent code (strings, UTF-8, paths, maths,
   WAV loading, audio mixer, palette, the renderer, the C runtime, the LZ4
-  and Zstandard decoders, `.ubx` files and the Roblox importer), compiled
-  natively with AddressSanitizer and UBSan:
+  and Zstandard decoders, `.ubx` files, the Roblox importer, physics and
+  the character), compiled natively with AddressSanitizer and UBSan:
 
   ```bash
   make test
@@ -133,6 +172,15 @@ fallback.
   place, which uses all three chunk encodings. Both the loader and the
   decoders are also fuzzed with random and cut-off data.
 
+  The physics tests drop single parts and towers of 5 to 20 parts and
+  check that they come to rest upright, asleep, at the right height. They
+  also cover a pyramid, every shape, friction on a ramp, welded
+  assemblies, waking up, kinematic pushers, and 300 random parts thrown
+  into a pit (nothing escapes or goes wrong numerically). The character
+  tests check its walking speed, jump height, walls, steps, high ledges,
+  ceilings, pushing a crate, standing on a loose slab and riding a moving
+  platform.
+
 - **Wine smoke test.** This drives the real `.exe` with keyboard and mouse
   events under Xvfb, then checks the log and settings file. It needs
   `wine` (32-bit), `xvfb-run`, `xdotool` and `imagemagick`, plus 32-bit
@@ -146,8 +194,9 @@ fallback.
   tools/wine_smoke.sh winxp opengl
   ```
 
-  It also opens a Roblox place from the command line, saves it with F7,
-  and opens the result through `place=`.
+  It also checks that the demo's loose parts settle and fall asleep, opens
+  a Roblox place from the command line, saves it with F7, and opens the
+  result through `place=`.
 
   The first argument is the Windows version Wine pretends to be: `nt351`,
   `nt40`, `win2k` or `winxp`. The second picks the renderer. Wine is
@@ -177,7 +226,7 @@ can't write the log or settings.
 | Left/Right arrows | Turn the camera |
 | Hold right mouse button | Orbit the camera (left/right and up/down) |
 | Mouse wheel | Zoom (NT 4.0 and later, or NT 3.51 with a wheel driver) |
-| Space | Jump |
+| Space | Jump (hold to keep jumping) |
 | Left click | Beep, panned left/right and pitched by where you click |
 | Enter or `/` | Type a message (Enter sends, Esc cancels) |
 | F11 or Alt+Enter | Fullscreen on/off |
@@ -190,10 +239,9 @@ can't write the log or settings.
 | M | Mute / unmute |
 | Esc | Quit |
 
-You can stand on parts, but walls aren't solid yet (that's milestone 4).
-
-The text overlay shows the place's name and the result of the last load
-or save.
+The text overlay shows the place's name, the result of the last load or
+save, and what physics is doing: loose parts, how many are awake,
+contacts, and the time physics took that frame.
 
 ## License
 

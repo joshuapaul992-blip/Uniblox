@@ -2,6 +2,7 @@
 #include <math.h>
 #include <stdlib.h>
 
+#include "physics/ub_physics.h"
 #include "render/ub_mesh.h"
 #include "render/ub_texture.h"
 #include "world/ub_query.h"
@@ -96,6 +97,10 @@ static void build_sample(ub_world *w)
     ub_world_add_part(w, ws, UB_CLASS_SPAWN, NULL, "SpawnLocation", &spawn);
     w->lighting.clock_time = 9.5f;
     w->lighting.fog_end = 500.0f;
+    w->gravity = 100.0f;
+    w->fallen_height = -250.0f;
+    CHECK(ub_world_add_weld(w, ub_world_find_child(w, model, "Wall0"), ub_world_find_child(w, model, "Wall1")));
+    CHECK(!ub_world_add_weld(w, model, ub_world_find_child(w, model, "Wall1"))); /* a model is not a part */
 }
 
 static void test_ubx(void)
@@ -122,6 +127,11 @@ static void test_ubx(void)
     }
     i32 script = ub_world_find_child(&b, ub_world_find_child(&b, house, "Bits"), "Door script");
     CHECK(script >= 0 && strcmp(ub_world_str(&b, b.inst[script].class_name), "Script") == 0);
+    CHECK(b.gravity == 100.0f && b.fallen_height == -250.0f && b.weld_count == 1);
+    if (b.weld_count == 1) {
+        CHECK(b.welds[0].a == ub_world_find_child(&b, house, "Wall0"));
+        CHECK(b.welds[0].b == ub_world_find_child(&b, house, "Wall1"));
+    }
     CHECK(ub_world_is_descendant(&b, script, b.workspace) && !ub_world_is_descendant(&b, b.workspace, script));
 
     /* every truncation fails cleanly; random corruption never crashes */
@@ -144,6 +154,8 @@ static void test_ubx(void)
         if (ub_ubx_load(&c, bad, n1) == UB_LOAD_OK) {
             /* whatever loads must be a consistent tree */
             for (i32 i = 0; i < c.count; ++i) CHECK(c.inst[i].parent < i);
+            for (i32 i = 0; i < c.weld_count; ++i)
+                CHECK(c.inst[c.welds[i].a].part >= 0 && c.inst[c.welds[i].b].part >= 0);
         }
         ub_world_free(&c);
     }
@@ -348,6 +360,9 @@ static void test_rbxl(void)
         }
         CHECK(wedges == 1 && corners == 1 && placeholders >= 2 && spawns == 1);
         CHECK(w.workspace >= 0);
+        /* its joints are all unattached (Part0/Part1 empty) */
+        CHECK(st.welds == 0 && st.joints_skipped >= 6 && w.weld_count == 0);
+        CHECK(fabsf(w.gravity - 196.2f) < 1e-3f && w.fallen_height == -500.0f);
         /* round trip the imported world through .ubx */
         u8 *a, *b;
         u32 na, nb;
@@ -359,6 +374,32 @@ static void test_rbxl(void)
         free(a);
         free(b);
         ub_world_free(&w2);
+        ub_world_free(&w);
+        free(data);
+    }
+
+    /* a WeldConstraint joining parts A and B */
+    data = load_file("tests/data/rbx/weldconstraint.rbxm", &n);
+    CHECK(data != NULL);
+    if (data) {
+        ub_world w;
+        ub_world_init(&w);
+        ub_import_stats st;
+        CHECK(ub_rbxl_load(&w, data, n, &st) == UB_LOAD_OK);
+        CHECK(st.welds == 1 && w.weld_count == 1);
+        if (w.weld_count == 1) {
+            const char *a = ub_world_str(&w, w.inst[w.welds[0].a].name), *b = ub_world_str(&w, w.inst[w.welds[0].b].name);
+            CHECK(strcmp(a, "A") == 0 && strcmp(b, "B") == 0);
+            CHECK(!(w.parts[w.inst[w.welds[0].a].part].flags & UB_PART_ANCHORED));
+        }
+        /* physics makes the welded pair one loose body */
+        ub_physics ph;
+        CHECK(ub_phys_init(&ph, &w, NULL, 0));
+        if (w.weld_count == 1) {
+            i32 ba = ub_phys_part_body(&ph, w.inst[w.welds[0].a].part), bb = ub_phys_part_body(&ph, w.inst[w.welds[0].b].part);
+            CHECK(ba > 0 && ba == bb && ph.bodies[ba].type == UB_BODY_DYNAMIC && ph.stats.welds == 1);
+        }
+        ub_phys_free(&ph);
         ub_world_free(&w);
         free(data);
     }

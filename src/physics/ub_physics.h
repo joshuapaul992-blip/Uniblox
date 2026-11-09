@@ -1,0 +1,166 @@
+/* Uniblox - rigid body physics.
+ *
+ * Every assembly of welded parts under the Workspace becomes one body.
+ * Assemblies with an anchored part never move (they are "static" and live
+ * in a bounding-volume tree built once). Unanchored assemblies fall,
+ * tumble, stack and come to rest; resting groups go to sleep and wake when
+ * something touches them. Kinematic bodies are moved by the game (like
+ * the demo's spinning block) and push things. The character is a special
+ * body that the character controller steers.
+ *
+ * Collisions are found 120 times a second; each step is solved in six
+ * substeps (720 a second) with soft contacts, the "soft step" scheme of
+ * Box2D 3, which keeps stacks about 20 parts tall steady under Roblox's
+ * strong gravity (196.2 studs/s^2). Contacts are kept from step to step and their impulses
+ * reused (warm starting); friction and bounce come from the material.
+ * Loose parts that fall below the world's fallen-parts height are removed.
+ *
+ * The world's parts are updated after each step, so the renderer and
+ * place saving see where things are. */
+#ifndef UB_PHYSICS_H
+#define UB_PHYSICS_H
+
+#include "physics/ub_collide.h"
+#include "physics/ub_pmath.h"
+#include "world/ub_world.h"
+
+#define UB_PHYS_HZ 120
+#define UB_PHYS_DT (1.0f / (f32)UB_PHYS_HZ)
+
+typedef enum {
+    UB_BODY_STATIC,       /* body 0 holds every anchored part */
+    UB_BODY_DYNAMIC,
+    UB_BODY_KINEMATIC,    /* moved by the game, infinite mass */
+    UB_BODY_CHARACTER,    /* moved by the character controller; never rotates */
+} ub_body_type;
+
+typedef struct {
+    vec3 pos;             /* centre of mass */
+    quat q;
+    mat3 rot;             /* from q */
+    vec3 v, w;            /* linear and angular velocity (world) */
+    f32 mass, inv_mass;
+    mat3 inv_inertia_local, inv_inertia;  /* body space; world space */
+    vec3 prev_pos;        /* pose before the last step, for smooth drawing */
+    quat prev_q;
+    vec3 target_pos;      /* kinematic: where the game wants it next step */
+    quat target_q;
+    i32 first_shape, shape_count;
+    u8 type;              /* ub_body_type */
+    u8 awake, fallen, has_target;
+    f32 sleep_time;
+    i32 sleep_next, sleep_head;   /* the group it went to sleep with */
+} ub_body;
+
+enum { UB_SHAPE_COLLIDES = 1 };
+
+typedef struct {
+    i32 body;
+    i32 part;             /* world part index, -1 for none (the character) */
+    u8 shape;             /* ub_shape (UB_SHAPE_BALL = sphere) */
+    u8 flags;             /* UB_SHAPE_COLLIDES */
+    vec3 size;
+    f32 radius;           /* spheres */
+    f32 bound;            /* radius of a sphere around the shape */
+    vec3 lpos;            /* in body space */
+    mat3 lrot;
+    vec3 wpos;            /* in the world, after the last step */
+    mat3 wrot;
+    vec3 lo, hi;          /* world bounding box */
+    f32 friction, restitution;
+} ub_pshape;
+
+typedef struct ub_manifold ub_manifold;
+typedef struct ub_bvh_node ub_bvh_node;
+
+typedef struct {
+    i32 bodies, awake, kinematic, fallen;
+    i32 static_shapes, moving_shapes;
+    i32 pairs, manifolds, contacts;
+    i32 welds;
+    u32 steps;
+} ub_phys_stats;
+
+typedef struct {
+    ub_world *world;
+    vec3 gravity;
+    vec3 up;              /* against gravity */
+    f32 fallen_height;
+
+    ub_body *bodies;
+    i32 body_count, body_cap;
+    ub_pshape *shapes;
+    i32 shape_count, shape_cap;
+    i32 *part_shape;      /* world part -> shape, -1 if not simulated */
+    i32 part_count;
+
+    /* static bounding-volume tree */
+    ub_bvh_node *nodes;
+    i32 node_count;
+    i32 *static_ids;      /* static shape indices, in tree leaf order */
+    i32 static_count;
+
+    /* moving shapes, kept sorted by the low x of their boxes */
+    i32 *dyn;
+    i32 dyn_count, dyn_cap;
+
+    u64 *pairs, *pairs_tmp;
+    i32 pair_count, pair_cap, pairs_tmp_cap;
+    ub_manifold *man, *man_prev;   /* this step's contacts, and last step's */
+    i32 man_count, man_cap, man_prev_count, man_prev_cap;
+
+    i32 *scratch;         /* per-body scratch (islands) */
+    f32 *scratch_f;
+    i32 scratch_cap, scratch_f_cap;
+
+    ub_phys_stats stats;
+    bool all_asleep_logged;
+} ub_physics;
+
+typedef struct {
+    f32 t;
+    vec3 point, normal;
+    i32 body, shape, part;
+} ub_phys_hit;
+
+/* Builds bodies from the world's parts. Parts listed in `kinematic_parts`
+ * (with the parts welded to them) become kinematic. Returns false if out
+ * of memory. The world must outlive the physics. */
+bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int kinematic_count);
+void ub_phys_free(ub_physics *ph);
+
+/* One fixed step of UB_PHYS_DT. */
+void ub_phys_step(ub_physics *ph);
+
+/* A character body: spheres at `offsets` from `pos`. Returns its index. */
+i32 ub_phys_add_character(ub_physics *ph, vec3 pos, const vec3 *offsets, int count, f32 radius, f32 mass);
+void ub_phys_teleport(ub_physics *ph, i32 body, vec3 pos);
+/* Moves a body without touching its velocity (and so keeps smooth drawing). */
+void ub_phys_set_position(ub_physics *ph, i32 body, vec3 pos);
+
+/* Kinematic bodies: where to be at the end of the next step. */
+void ub_phys_set_target(ub_physics *ph, i32 body, vec3 pos, const mat3 *rot);
+
+void ub_phys_wake(ub_physics *ph, i32 body);
+void ub_phys_apply_impulse(ub_physics *ph, i32 body, vec3 impulse, vec3 point);
+vec3 ub_phys_point_velocity(const ub_physics *ph, i32 body, vec3 point);
+
+/* Nearest collidable shape along the ray (dir normalised), skipping one
+ * body (-1 = none). */
+bool ub_phys_raycast(const ub_physics *ph, vec3 origin, vec3 dir, f32 max_dist, i32 ignore_body, ub_phys_hit *hit);
+
+/* The body a part belongs to (0 = static), or -1 if it is not simulated. */
+i32 ub_phys_part_body(const ub_physics *ph, i32 part);
+/* Where a moving part is, blended between the last two steps by alpha
+ * (0..1) for smooth drawing. False if the part is not moving or has
+ * fallen out of the world. */
+bool ub_phys_part_pose(const ub_physics *ph, i32 part, f32 alpha, vec3 *pos, mat3 *rot);
+/* The same for a body's centre. */
+void ub_phys_body_pose(const ub_physics *ph, i32 body, f32 alpha, vec3 *pos, mat3 *rot);
+
+void ub_phys_get_stats(const ub_physics *ph, ub_phys_stats *out);
+
+/* Material properties: density (mass per cubic stud), friction, bounce. */
+void ub_material_physics(u8 material, f32 *density, f32 *friction, f32 *restitution);
+
+#endif
