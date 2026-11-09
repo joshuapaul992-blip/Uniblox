@@ -21,6 +21,18 @@ CPU     ?= pentium
 OUT     := build/win32
 EXE     := $(OUT)/uniblox.exe
 
+# Lua 5.1.5 (src/script/lua, MIT licence) and the C library it is built on.
+LUA_SRCS := $(addprefix src/script/lua/,lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c \
+	lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c \
+	lauxlib.c lbaselib.c lstrlib.c ltablib.c lmathlib.c)
+SCRIPT_SRCS := src/script/ub_libc.c $(LUA_SRCS)
+
+# Lua is third-party code: build it against our libc headers, without the
+# warnings our own code is held to.
+SCRIPT_CFLAGS := -Isrc/script/libc
+LUA_CFLAGS := -Wno-shadow -Wno-strict-prototypes -Wno-implicit-fallthrough -Wno-sign-compare \
+	-Wno-cast-function-type -Wno-clobbered -Wno-address -Wno-misleading-indentation -Wno-unknown-warning-option
+
 # Engine sources shared by every build (no OS calls).
 CORE_SRCS := \
 	src/core/ub_string.c \
@@ -43,7 +55,8 @@ CORE_SRCS := \
 	src/render/ub_mesh.c \
 	src/render/ub_render.c \
 	src/render/ub_render_sw.c \
-	src/render/ub_render_gl.c
+	src/render/ub_render_gl.c \
+	$(SCRIPT_SRCS)
 
 SRCS := \
 	src/crt/ub_crt.c \
@@ -97,9 +110,11 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 # AddressSanitizer and UBSan, against a stub platform layer.
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
-TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c tests/test_physics.c tests/stub_platform.c $(CORE_SRCS)
+TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/stub_platform.c $(CORE_SRCS)
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
+TEST_OBJS  := $(patsubst %.c,build/host/obj/%.o,$(TEST_SRCS))
 
 .PHONY: all check test clean
 
@@ -112,6 +127,9 @@ $(EXE): $(OBJS)
 $(OUT)/obj/%.o: src/%.c
 	@mkdir -p $(dir $@)
 	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUT)/obj/script/%.o: CFLAGS += $(SCRIPT_CFLAGS)
+$(OUT)/obj/script/lua/%.o: CFLAGS += $(LUA_CFLAGS)
 
 # Instructions newer than the original Pentium (P6 cmov/fcomi/fcmov, MMX
 # and SSE registers). The toolchain's own libgcc is built for Pentium Pro,
@@ -128,9 +146,16 @@ check: $(EXE)
 test: $(TEST_BIN)
 	./$(TEST_BIN)
 
-$(TEST_BIN): $(TEST_SRCS) src/crt/ub_crt.c $(wildcard src/*/*.h src/*/*/*.h tests/*.h)
+$(TEST_BIN): $(TEST_OBJS)
 	@mkdir -p $(dir $@)
-	$(HOSTCC) $(TEST_FLAGS) -o $@ $(TEST_SRCS) -lm
+	$(HOSTCC) $(TEST_FLAGS) -o $@ $(TEST_OBJS) -lm
+
+build/host/obj/%.o: %.c $(wildcard src/*/*.h src/*/*/*.h tests/*.h)
+	@mkdir -p $(dir $@)
+	$(HOSTCC) $(TEST_FLAGS) -c $< -o $@
+
+build/host/obj/src/script/%.o: TEST_FLAGS += $(SCRIPT_CFLAGS)
+build/host/obj/src/script/lua/%.o: TEST_FLAGS += $(LUA_CFLAGS)
 
 clean:
 	rm -rf build

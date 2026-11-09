@@ -22,6 +22,8 @@ void test_crt(void);
 void test_compress(void);
 void test_world(void);
 void test_physics(void);
+void test_libc(void);
+void test_script(void);
 void test_vec(void);
 void test_palette(void);
 void test_render(void);
