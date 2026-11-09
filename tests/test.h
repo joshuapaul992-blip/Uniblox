@@ -19,6 +19,8 @@ extern int g_failures, g_checks;
 } while (0)
 
 void test_crt(void);
+void test_compress(void);
+void test_world(void);
 void test_vec(void);
 void test_palette(void);
 void test_render(void);

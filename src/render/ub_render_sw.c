@@ -522,6 +522,7 @@ void sw_part(const ub_part_draw *p)
 
         f32 sun = v3_dot(nw, R.env.sun_dir);
         f32 light = R.env.ambient * (0.8f + 0.2f * nw.y) + R.env.sun_strength * (sun > 0 ? sun : 0);
+        if (p->flags & UB_DRAW_GLOW) light = 1.25f;
         select_shading(p->color, mat, light);
 
         /* Planar texture mapping in the part's scaled space: u along the

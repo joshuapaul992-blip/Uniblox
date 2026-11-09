@@ -1,0 +1,47 @@
+/* Uniblox - importer for Roblox binary place/model files (.rbxl / .rbxm).
+ *
+ * Reads the documented binary format (see rbx-dom's binary.md): chunks
+ * compressed with LZ4 or Zstandard, INST/PROP/PRNT/SSTR/META/END. Every
+ * instance is kept (class name and Name), and these become real Uniblox
+ * objects:
+ *   Workspace, Lighting, Folder, Model
+ *   Part (block / ball / cylinder / wedge / corner wedge), WedgePart,
+ *   CornerWedgePart, TrussPart, SpawnLocation, Seat, VehicleSeat
+ *   MeshPart / UnionOperation: a box of the right size and colour, since
+ *     their geometry lives on Roblox's servers or in CSG data we do not
+ *     read
+ * Read part properties: CFrame, Size, Color (Color3uint8 or BrickColor),
+ * Material, Shape, Transparency, Anchored, CanCollide. Lighting: ClockTime
+ * or TimeOfDay, GeographicLatitude, Brightness, Ambient, OutdoorAmbient,
+ * FogEnd, FogColor. Terrain voxels, decals, textures and scripts are not
+ * imported (scripts are kept as plain instances).
+ *
+ * Positions and rotations are converted from Roblox's right-handed axes
+ * (+Z towards the viewer) to Uniblox's left-handed ones (+Z forward).
+ * The input is untrusted. Nothing is ever downloaded. */
+#ifndef UB_RBXL_H
+#define UB_RBXL_H
+
+#include "world/ub_world.h"
+
+typedef struct {
+    u32 instances;        /* in the file */
+    u32 parts;            /* imported as visible parts */
+    u32 placeholders;     /* meshes/unions shown as boxes */
+    u32 invisible;        /* parts with Transparency ~1, kept but not drawn */
+    u32 terrain;          /* Terrain instances (voxels not imported) */
+    u32 classes;          /* distinct classes */
+    char compression[32]; /* e.g. "zstd+lz4" */
+} ub_import_stats;
+
+/* True if the data starts with the Roblox binary signature. */
+bool ub_rbxl_detect(const u8 *data, u32 size);
+
+/* Import into `w` (freshly initialised). */
+ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_stats *stats);
+
+/* The rotation matrix (row-major R00..R22) for a CFrame special-case ID
+ * (0x02..0x23), as stored in Roblox files. False for invalid IDs. */
+bool ub_rbxl_special_rotation(u32 id, f32 out[9]);
+
+#endif

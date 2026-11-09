@@ -49,6 +49,9 @@ FreeLibrary
 SetErrorMode
 GetLastError
 GetSystemDirectoryA
+# milestone 3: places
+GetCommandLineW
+CreateDirectoryW
 
 [USER32.DLL]
 AdjustWindowRect
@@ -87,6 +90,7 @@ SetWindowPos
 # milestone 2.5: resizable / fullscreen window
 GetWindowRect
 SetWindowLongW
+SetWindowTextW
 
 [GDI32.DLL]
 BitBlt

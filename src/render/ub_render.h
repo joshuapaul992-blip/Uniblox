@@ -48,7 +48,10 @@ typedef struct {
     u32 color;           /* 0x00RRGGBB */
     u8 shape;            /* ub_shape */
     u8 material;         /* ub_material */
+    u8 flags;            /* UB_DRAW_* */
 } ub_part_draw;
+
+enum { UB_DRAW_GLOW = 1 }; /* lit at full brightness (neon) */
 
 typedef enum {
     UB_QUALITY_LOW,      /* OpenGL: no shadows, no anti-aliasing */
@@ -80,6 +83,11 @@ void ub_render_force_fixed_function(bool on);
 void ub_render_set_quality(ub_quality q);
 ub_quality ub_render_quality(void);
 const char *ub_render_quality_name(ub_quality q);
+
+/* Parts that do not move, drawn every frame without being passed again.
+ * The OpenGL renderer builds their geometry once (in GPU memory when the
+ * driver has vertex buffers). Call again whenever they change; 0 clears. */
+void ub_render_set_static(const ub_part_draw *parts, int count);
 
 void ub_render_begin(ub_frame *frame, const ub_camera *cam, const ub_render_env *env);
 void ub_render_part(const ub_part_draw *p);

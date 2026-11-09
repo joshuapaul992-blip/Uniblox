@@ -266,3 +266,87 @@ bool plat_file_exists(const char *path)
     DWORD attr = GetFileAttributesW(full);
     return attr != 0xFFFFFFFFu && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
+
+bool plat_make_dir(const char *path)
+{
+    WCHAR full[MAX_PATH];
+    if (!win32_full_path(path, full, MAX_PATH)) return false;
+    CreateDirectoryW(full, NULL);
+    DWORD attr = GetFileAttributesW(full);
+    return attr != 0xFFFFFFFFu && (attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+bool plat_file_read_user(const char *path, u32 max_bytes, void **data, u32 *size)
+{
+    *data = NULL;
+    *size = 0;
+    u16 wide[MAX_PATH];
+    if (ub_utf8_to_utf16(path, wide, MAX_PATH) <= 0) return false;
+    HANDLE h = CreateFileW((LPCWSTR)wide, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL);
+    bool relative = !(wide[0] == '\\' || wide[0] == '/' || (wide[0] && wide[1] == ':'));
+    if (h == INVALID_HANDLE_VALUE && relative && g_base_len > 0) {
+        /* not in the current directory: try next to uniblox.exe */
+        WCHAR full[MAX_PATH];
+        int n = 0;
+        while (wide[n]) ++n;
+        if (g_base_len + n + 1 <= MAX_PATH) {
+            memcpy(full, g_base, (size_t)g_base_len * sizeof(WCHAR));
+            memcpy(full + g_base_len, wide, (size_t)(n + 1) * sizeof(WCHAR));
+            h = CreateFileW(full, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        }
+    }
+    if (h == INVALID_HANDLE_VALUE) return false;
+    ub_file f = { h };
+    u32 len = plat_file_size(&f);
+    bool ok = false;
+    if (len <= max_bytes && len < 0x7FFFFFFFu) {
+        u8 *buf = (u8 *)plat_alloc((size_t)len + 1);
+        if (buf) {
+            u32 done = 0;
+            while (done < len) {
+                i32 got = plat_file_read(&f, buf + done, len - done);
+                if (got <= 0) break;
+                done += (u32)got;
+            }
+            if (done == len) {
+                buf[len] = 0;
+                *data = buf;
+                *size = len;
+                ok = true;
+            } else {
+                plat_free(buf);
+            }
+        }
+    } else {
+        ub_warn("%s is %u bytes, over the %u byte limit", path, len, max_bytes);
+    }
+    CloseHandle(h);
+    return ok;
+}
+
+bool plat_command_line_arg(char *out, int cap)
+{
+    const WCHAR *c = GetCommandLineW();
+    if (!c || cap <= 0) return false;
+    /* skip the program name, quoted or not */
+    if (*c == L'"') {
+        ++c;
+        while (*c && *c != L'"') ++c;
+        if (*c) ++c;
+    } else {
+        while (*c && *c != L' ' && *c != L'\t') ++c;
+    }
+    while (*c == L' ' || *c == L'\t') ++c;
+    if (!*c) return false;
+    u16 arg[MAX_PATH];
+    int n = 0;
+    bool quoted = *c == L'"';
+    if (quoted) ++c;
+    while (*c && n < MAX_PATH - 1) {
+        if (quoted ? *c == L'"' : (*c == L' ' || *c == L'\t')) break;
+        arg[n++] = (u16)*c++;
+    }
+    arg[n] = 0;
+    return ub_utf16_to_utf8(arg, out, cap) > 0;
+}

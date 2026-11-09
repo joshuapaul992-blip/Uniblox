@@ -60,6 +60,9 @@ bool ub_gl_load(void)
     ok = true;
     UBGL_MSAA(LOAD)
     ubgl.has_msaa = ok && ubgl.has_fbo;
+    ok = true;
+    UBGL_VBO(LOAD)
+    ubgl.has_vbo = ok;
 #undef LOAD
     return ubgl.has_core;
 }
@@ -109,7 +112,10 @@ static struct {
     GLuint msaa_fbo, msaa_color, msaa_depth;
     int msaa_w, msaa_h, msaa_samples;
 
-    batch batches[UB_MAT_COUNT];
+    batch batches[UB_MAT_COUNT];          /* dynamic parts, rebuilt every frame */
+    batch statics[UB_MAT_COUNT];          /* static parts (CPU copy when there are no VBOs) */
+    GLuint static_vbo[UB_MAT_COUNT];
+    int static_verts[UB_MAT_COUNT];
     int width, height;
 } G;
 
@@ -197,13 +203,13 @@ static const char *k_lit_vs =
     "varying vec3 v_pos;\n"
     "varying vec3 v_nrm;\n"
     "varying vec2 v_uv;\n"
-    "varying vec3 v_col;\n"
+    "varying vec4 v_col;\n"
     "varying vec4 v_shadow;\n"
     "void main() {\n"
     "  v_pos = gl_Vertex.xyz;\n"
     "  v_nrm = gl_Normal;\n"
     "  v_uv = gl_MultiTexCoord0.xy;\n"
-    "  v_col = gl_Color.rgb;\n"
+    "  v_col = gl_Color;\n"
     /* normal offset: look up the shadow a little off the surface (no acne) */
     "  v_shadow = u_shadowmat * vec4(gl_Vertex.xyz + gl_Normal * 0.06, 1.0);\n"
     "  gl_Position = u_viewproj * gl_Vertex;\n"
@@ -218,7 +224,7 @@ static const char *k_lit_fs =
     "varying vec3 v_pos;\n"
     "varying vec3 v_nrm;\n"
     "varying vec2 v_uv;\n"
-    "varying vec3 v_col;\n"
+    "varying vec4 v_col;\n"
     "varying vec4 v_shadow;\n"
     "float shadow_at(vec4 sc) {\n"
     "  vec3 p = sc.xyz / sc.w;\n"
@@ -234,7 +240,7 @@ static const char *k_lit_fs =
     "void main() {\n"
     "  vec3 n = normalize(v_nrm);\n"
     "  float t = texture2D(u_tex, v_uv).r;\n"
-    "  vec3 albedo = v_col * mix(1.0, t * 1.15, u_texmix);\n"
+    "  vec3 albedo = v_col.rgb * mix(1.0, t * 1.15, u_texmix);\n"
     "  float ndl = max(dot(n, u_sun_dir), 0.0);\n"
     "  float sh = 1.0;\n"
     "  if (u_shadow_on > 0.5 && ndl > 0.0) sh = shadow_at(v_shadow);\n"
@@ -244,6 +250,7 @@ static const char *k_lit_fs =
     "  float spec = u_spec * pow(max(dot(n, h), 0.0), u_shine) * ndl * sh;\n"
     "  float rim = pow(1.0 - max(dot(n, v), 0.0), 4.0) * 0.25 * u_spec;\n"
     "  vec3 col = albedo * (amb + u_sun_col * ndl * sh) + u_sun_col * spec + u_sky_col * rim;\n"
+    "  if (v_col.a < 0.5) col = albedo * 1.25;\n" /* alpha 0 marks glowing (neon) parts */
     "  float dist = length(u_cam - v_pos);\n"
     "  float fog = 1.0 - exp(-u_fog_density * dist);\n"
     "  col = mix(col, u_fog_col, clamp(fog, 0.0, 1.0));\n"
@@ -498,6 +505,8 @@ static bool ensure_msaa(int w, int h, int samples)
     return true;
 }
 
+static void free_statics(void);
+
 /* ---------------------------------------------------------------- init */
 
 bool gl_init(char *desc, int desc_len, bool fixed_function)
@@ -557,6 +566,7 @@ void gl_shutdown(void)
     if (G.prog_lit) ubgl.glDeleteProgram(G.prog_lit);
     if (G.prog_sky) ubgl.glDeleteProgram(G.prog_sky);
     for (int m = 0; m < UB_MAT_COUNT; ++m) plat_free(G.batches[m].v);
+    free_statics();
     memset(&G, 0, sizeof G);
 }
 
@@ -588,11 +598,12 @@ static f32 arc_u(vec3 l, f32 radius)
     return ub_atan2f(l.z, l.x) * radius;
 }
 
-static void emit_part(const ub_part_draw *p)
+static void emit_part(const ub_part_draw *p, batch *set)
 {
     const ub_mesh *mesh = ub_mesh_get((ub_shape)p->shape, UB_DETAIL_HIGH);
     ub_material mat = (ub_material)(p->material < UB_MAT_COUNT ? p->material : UB_MAT_PLASTIC);
-    batch *b = &G.batches[mat];
+    batch *b = &set[mat];
+    u8 ca = (p->flags & UB_DRAW_GLOW) ? 0 : 255;
     vec3 size = v3(UB_MAX(p->size.x, 0.01f), UB_MAX(p->size.y, 0.01f), UB_MAX(p->size.z, 0.01f));
     f32 repeat = 1.0f / ub_materials[mat].world_size;
     f32 radius = 0.25f * (size.x + size.z); /* for wrapping textures round curves */
@@ -669,7 +680,7 @@ static void emit_part(const ub_part_draw *p)
                             o->nx = nn.x; o->ny = nn.y; o->nz = nn.z;
                             o->u = tu[0] * w0 + tu[1] * w1 + tu[2] * w2 + tu[3] * w3;
                             o->v = tv[0] * w0 + tv[1] * w1 + tv[2] * w2 + tv[3] * w3;
-                            o->r = cr; o->g = cg; o->b = cb; o->a = 255;
+                            o->r = cr; o->g = cg; o->b = cb; o->a = ca;
                         }
                     }
                 continue;
@@ -686,19 +697,76 @@ static void emit_part(const ub_part_draw *p)
                 o->x = wp[i].x; o->y = wp[i].y; o->z = wp[i].z;
                 o->nx = wn[i].x; o->ny = wn[i].y; o->nz = wn[i].z;
                 o->u = tu[i]; o->v = tv[i];
-                o->r = cr; o->g = cg; o->b = cb; o->a = 255;
+                o->r = cr; o->g = cg; o->b = cb; o->a = ca;
             }
         }
     }
 }
 
-static void bind_arrays(const batch *b, bool full)
+/* Point the vertex arrays at `base`: client memory, or an offset into
+ * the bound vertex buffer when base is NULL-relative. */
+static void bind_pointers(const gvert *base, bool full)
 {
-    ubgl.glVertexPointer(3, GL_FLOAT, sizeof(gvert), &b->v[0].x);
+    ubgl.glVertexPointer(3, GL_FLOAT, sizeof(gvert), &base->x);
     if (full) {
-        ubgl.glNormalPointer(GL_FLOAT, sizeof(gvert), &b->v[0].nx);
-        ubgl.glTexCoordPointer(2, GL_FLOAT, sizeof(gvert), &b->v[0].u);
-        ubgl.glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(gvert), &b->v[0].r);
+        ubgl.glNormalPointer(GL_FLOAT, sizeof(gvert), &base->nx);
+        ubgl.glTexCoordPointer(2, GL_FLOAT, sizeof(gvert), &base->u);
+        ubgl.glColorPointer(4, GL_UNSIGNED_BYTE, sizeof(gvert), &base->r);
+    }
+}
+
+static void free_statics(void)
+{
+    for (int m = 0; m < UB_MAT_COUNT; ++m) {
+        if (G.static_vbo[m]) ubgl.glDeleteBuffers(1, &G.static_vbo[m]);
+        G.static_vbo[m] = 0;
+        plat_free(G.statics[m].v);
+        G.statics[m].v = NULL;
+        G.statics[m].count = G.statics[m].cap = 0;
+        G.static_verts[m] = 0;
+    }
+}
+
+void gl_set_static(const ub_part_draw *parts, int count)
+{
+    if (!G.ready) return;
+    free_statics();
+    for (int i = 0; i < count; ++i) emit_part(&parts[i], G.statics);
+    u32 bytes = 0;
+    for (int m = 0; m < UB_MAT_COUNT; ++m) {
+        G.static_verts[m] = G.statics[m].count;
+        bytes += (u32)G.statics[m].count * (u32)sizeof(gvert);
+        if (ubgl.has_vbo && G.statics[m].count) { /* move it to GPU memory */
+            ubgl.glGenBuffers(1, &G.static_vbo[m]);
+            ubgl.glBindBuffer(GL_ARRAY_BUFFER, G.static_vbo[m]);
+            ubgl.glBufferData(GL_ARRAY_BUFFER, (ptrdiff_t)(G.statics[m].count * (int)sizeof(gvert)),
+                              G.statics[m].v, GL_STATIC_DRAW);
+            plat_free(G.statics[m].v);
+            G.statics[m].v = NULL;
+            G.statics[m].cap = 0;
+        }
+    }
+    if (ubgl.has_vbo) ubgl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+    ub_info("gl: %d static parts, %u KB of geometry%s", count, bytes / 1024,
+            ubgl.has_vbo ? " in vertex buffers" : " in system memory");
+}
+
+/* Draw one material: static geometry, then this frame's dynamic parts. */
+static void draw_material(int m, bool full)
+{
+    if (G.static_verts[m]) {
+        if (G.static_vbo[m]) {
+            ubgl.glBindBuffer(GL_ARRAY_BUFFER, G.static_vbo[m]);
+            bind_pointers((const gvert *)0, full);
+        } else {
+            bind_pointers(G.statics[m].v, full);
+        }
+        ubgl.glDrawArrays(GL_TRIANGLES, 0, G.static_verts[m]);
+        if (G.static_vbo[m]) ubgl.glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    if (G.batches[m].count) {
+        bind_pointers(G.batches[m].v, full);
+        ubgl.glDrawArrays(GL_TRIANGLES, 0, G.batches[m].count);
     }
 }
 
@@ -816,11 +884,7 @@ static mat4 shadow_pass(const ub_camera *cam, const ub_render_env *env)
     ubgl.glMatrixMode(GL_MODELVIEW);
     ubgl.glLoadMatrixf(lv.m);
     set_client_state(false);
-    for (int m = 0; m < UB_MAT_COUNT; ++m) {
-        if (!G.batches[m].count) continue;
-        bind_arrays(&G.batches[m], false);
-        ubgl.glDrawArrays(GL_TRIANGLES, 0, G.batches[m].count);
-    }
+    for (int m = 0; m < UB_MAT_COUNT; ++m) draw_material(m, false);
     ubgl.glDisable(GL_POLYGON_OFFSET_FILL);
     ubgl.glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
     ubgl.glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -861,9 +925,9 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
 
     /* geometry */
     for (int m = 0; m < UB_MAT_COUNT; ++m) G.batches[m].count = 0;
-    for (int i = 0; i < count; ++i) emit_part(&parts[i]);
+    for (int i = 0; i < count; ++i) emit_part(&parts[i], G.batches);
     u32 tris = 0;
-    for (int m = 0; m < UB_MAT_COUNT; ++m) tris += (u32)G.batches[m].count / 3;
+    for (int m = 0; m < UB_MAT_COUNT; ++m) tris += (u32)(G.batches[m].count + G.static_verts[m]) / 3;
     stats->parts = (u32)count;
     stats->triangles = tris;
     stats->polys_drawn = tris;
@@ -942,7 +1006,7 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
 
     set_client_state(true);
     for (int m = 0; m < UB_MAT_COUNT; ++m) {
-        if (!G.batches[m].count) continue;
+        if (!G.batches[m].count && !G.static_verts[m]) continue;
         const ub_material_info *mi = &ub_materials[m];
         ubgl.glBindTexture(GL_TEXTURE_2D, G.tex[m]);
         if (G.shaders) {
@@ -954,8 +1018,7 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
             ubgl.glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, s);
             ubgl.glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, mi->shininess > 128 ? 128 : mi->shininess);
         }
-        bind_arrays(&G.batches[m], true);
-        ubgl.glDrawArrays(GL_TRIANGLES, 0, G.batches[m].count);
+        draw_material(m, true);
     }
     ubgl.glDisableClientState(GL_COLOR_ARRAY);
     ubgl.glDisableClientState(GL_NORMAL_ARRAY);

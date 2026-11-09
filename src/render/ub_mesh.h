@@ -15,6 +15,7 @@ typedef enum {
     UB_SHAPE_WEDGE,     /* ramp rising towards +Z */
     UB_SHAPE_CYLINDER,  /* axis along Y */
     UB_SHAPE_BALL,
+    UB_SHAPE_CORNER_WEDGE, /* pyramid with its apex above the (-X, +Z) corner */
     UB_SHAPE_COUNT
 } ub_shape;
 

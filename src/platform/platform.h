@@ -250,5 +250,18 @@ bool plat_file_write_all(const char *path, const void *data, u32 size);
 /* Rename, replacing new_path if it exists. */
 bool plat_file_rename(const char *old_path, const char *new_path);
 bool plat_file_exists(const char *path);
+/* Create a folder (game path); true if it exists afterwards. */
+bool plat_make_dir(const char *path);
+
+/* Read a file the *user* chose (command line, later a file dialog): any
+ * absolute or relative path, UTF-8. Never use this for paths that come
+ * from game content; those must go through the checked game-path API. */
+bool plat_file_read_user(const char *path, u32 max_bytes, void **data, u32 *size);
+
+/* The first command-line argument (quotes removed), UTF-8; false if none. */
+bool plat_command_line_arg(char *out, int cap);
+
+/* Window title, UTF-8. */
+void plat_set_title(const char *title);
 
 #endif
