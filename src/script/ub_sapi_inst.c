@@ -40,6 +40,10 @@ static const struct {
     { VIRT_PHYSICSSERVICE, "PhysicsService" }, { VIRT_COLLECTION, "CollectionService" },
     { VIRT_TEXTSERVICE, "TextService" }, { VIRT_GUISERVICE, "GuiService" },
     { VIRT_CONTENTPROVIDER, "ContentProvider" }, { VIRT_MOUSE, "Mouse" }, { VIRT_CAMERA, "Camera" },
+    { VIRT_PROMPTSERVICE, "ProximityPromptService" }, { VIRT_POLICY, "PolicyService" },
+    { VIRT_BADGE, "BadgeService" }, { VIRT_LOCALIZATION, "LocalizationService" },
+    { VIRT_PATHFINDING, "PathfindingService" }, { VIRT_GROUP, "GroupService" }, { VIRT_SOCIAL, "SocialService" },
+    { VIRT_ANALYTICS, "AnalyticsService" },
 };
 
 static const char *virt_class(i32 idx)
@@ -631,7 +635,7 @@ static int m_isancestorof(lua_State *L)
 
 /* An instance and everything below it (destroyed ones keep their links),
  * in a plat_alloc'd array; NULL when out of memory. */
-static i32 *subtree(i32 root, i32 *count)
+i32 *sapi_subtree(i32 root, i32 *count)
 {
     i32 cap = 64, n = 0, done = 0;
     i32 *list = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap);
@@ -730,7 +734,7 @@ void reclaim_instances(lua_State *L)
             /* never parented (or taken out) and forgotten: gone, unless a
              * script still holds something inside it */
             i32 n;
-            i32 *sub = subtree(i, &n);
+            i32 *sub = sapi_subtree(i, &n);
             if (!sub) continue;
             bool held = false;
             for (i32 j = 1; j < n && !held; ++j) held = has_userdata(L, instances, sub[j]) || protected_inst(sub[j]);
@@ -778,7 +782,7 @@ static void do_destroy(lua_State *L, i32 i)
     if (i < 0 || is_service(i) || protected_inst(i)) return;
     if (!ub_world_alive(W, i)) return;
     i32 n;
-    i32 *sub = subtree(i, &n);
+    i32 *sub = sapi_subtree(i, &n);
     if (!sub) return;
     for (i32 j = 0; j < n; ++j)
         if (protected_inst(sub[j])) { /* the character is never destroyed with something else */
@@ -787,6 +791,11 @@ static void do_destroy(lua_State *L, i32 i)
         }
     fire_signal(L, i, EV_DESTROYING, NULL, 0);
     if (!ub_world_alive(W, i)) { /* a Destroying handler destroyed it already */
+        plat_free(sub);
+        return;
+    }
+    tags_moved(L, i, sapi_in_game(i), false);
+    if (!ub_world_alive(W, i)) { /* a handler destroyed it already */
         plat_free(sub);
         return;
     }
@@ -841,7 +850,7 @@ static int m_clone(lua_State *L)
         return 1;
     }
     i32 n;
-    i32 *sub = subtree(i, &n);
+    i32 *sub = sapi_subtree(i, &n);
     if (!sub) return luaL_error(L, "out of memory");
     plat_free(sub);
     check_room(L, n);
@@ -872,56 +881,6 @@ static int m_getfullname(lua_State *L)
     if (i < 0) snprintf(b, sizeof b, "%s", i == VIRT_GAME ? "Game" : virt_class(i));
     else full_name(i, b, sizeof b);
     lua_pushstring(L, b);
-    return 1;
-}
-
-static int m_getattribute(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    lua_pushfstring(L, "@%s", luaL_checkstring(L, 2));
-    get_extra(L, i, lua_tostring(L, -1));
-    return 1;
-}
-
-static int m_setattribute(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    const char *n = luaL_checkstring(L, 2);
-    lua_pushfstring(L, "@%s", n);
-    set_extra(L, i, lua_tostring(L, -1), 3);
-    char key[64];
-    snprintf(key, sizeof key, "@%s", n);
-    fire_signal(L, i, EV_PROPCHANGED, key, 0);
-    return 0;
-}
-
-static int m_getattributes(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    lua_newtable(L);
-    push_props(L, i, false);
-    if (lua_istable(L, -1)) {
-        lua_pushnil(L);
-        while (lua_next(L, -2)) {
-            const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
-            if (k && k[0] == '@') {
-                lua_pushstring(L, k + 1);
-                lua_pushvalue(L, -2);
-                lua_rawset(L, -6);
-            }
-            lua_pop(L, 1);
-        }
-    }
-    lua_pop(L, 1);
-    return 1;
-}
-
-static int m_attrsignal(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    char key[64];
-    snprintf(key, sizeof key, "@%s", luaL_checkstring(L, 2));
-    push_signal(L, i, EV_PROPCHANGED, key);
     return 1;
 }
 
@@ -1077,7 +1036,7 @@ static int m_takedamage(lua_State *L)
 
 static int m_getstate(lua_State *L)
 {
-    push_enum(L, EN_HUMANOIDSTATE, S.g->dead ? 15 : (S.g->phys_ok && !S.g->chr.grounded) ? 5 : 8);
+    push_enum(L, EN_HUMANOIDSTATE, S.g->dead ? 15 : humanoid_state());
     return 1;
 }
 
@@ -1313,6 +1272,167 @@ static int m_findpartonray(lua_State *L)
     return 4;
 }
 
+/* ------------------------------------------------ overlap queries
+ * GetPartBoundsInBox/InRadius compare part bounding boxes, GetPartsInPart
+ * and the Region3 finders the parts' boxes, all in Uniblox space. */
+
+typedef struct { vec3 c; mat3 r; vec3 h; } sobb;
+
+static f32 absf(f32 x) { return x < 0 ? -x : x; }
+
+static bool obb_overlap(const sobb *a, const sobb *b)
+{
+    const vec3 *ax = &a->r.x, *bx = &b->r.x;
+    vec3 d = v3_sub(b->c, a->c);
+    vec3 axes[15];
+    int n = 0;
+    for (int i = 0; i < 3; ++i) axes[n++] = ax[i];
+    for (int i = 0; i < 3; ++i) axes[n++] = bx[i];
+    for (int i = 0; i < 3; ++i)
+        for (int j = 0; j < 3; ++j) axes[n++] = v3_cross(ax[i], bx[j]);
+    for (int k = 0; k < n; ++k) {
+        vec3 l = axes[k];
+        if (v3_dot(l, l) < 1e-10f) continue;
+        f32 ra = 0, rb = 0;
+        const f32 *ha = &a->h.x, *hb = &b->h.x;
+        for (int i = 0; i < 3; ++i) {
+            ra += ha[i] * absf(v3_dot(l, ax[i]));
+            rb += hb[i] * absf(v3_dot(l, bx[i]));
+        }
+        if (absf(v3_dot(l, d)) > ra + rb) return false;
+    }
+    return true;
+}
+
+static sobb part_box(const ub_part *p, bool bounds)
+{
+    sobb o;
+    o.c = p->pos;
+    o.h = v3_scale(p->size, 0.5f);
+    o.r = p->rot;
+    if (bounds) { /* the axis-aligned box around it */
+        vec3 h = o.h;
+        o.h = v3(absf(p->rot.x.x) * h.x + absf(p->rot.y.x) * h.y + absf(p->rot.z.x) * h.z,
+                 absf(p->rot.x.y) * h.x + absf(p->rot.y.y) * h.y + absf(p->rot.z.y) * h.z,
+                 absf(p->rot.x.z) * h.x + absf(p->rot.y.z) * h.y + absf(p->rot.z.z) * h.z);
+        o.r = mat3_identity();
+    }
+    return o;
+}
+
+enum { Q_BOX, Q_SPHERE };
+
+/* Pushes a list of the parts in the Workspace overlapping the query. */
+static int overlap(lua_State *L, int kind, const sobb *q, vec3 sc, f32 sr, bool bounds, int params, i32 ignore,
+                   bool white, int list, int max, i32 self)
+{
+    bool respect = false;
+    if (params) {
+        lua_getfield(L, params, "MaxParts");
+        if (lua_isnumber(L, -1) && lua_tointeger(L, -1) > 0) max = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        lua_getfield(L, params, "RespectCanCollide");
+        respect = lua_toboolean(L, -1);
+        lua_pop(L, 1);
+    }
+    i32 ws = ub_world_workspace(W);
+    lua_newtable(L);
+    int n = 0;
+    for (i32 pi = 0; pi < W->part_count && (max <= 0 || n < max); ++pi) {
+        const ub_part *p = &W->parts[pi];
+        if (p->flags & UB_PART_REMOVED) continue;
+        if (respect && !(p->flags & UB_PART_CAN_COLLIDE)) continue;
+        i32 inst = ub_world_part_inst(W, pi);
+        if (inst < 0 || inst == self || !ub_world_alive(W, inst) || !ub_world_is_descendant(W, inst, ws)) continue;
+        if (ignore >= 0 && ub_world_is_descendant(W, inst, ignore)) continue;
+        if (list) { /* an ignore list or a white list of instances */
+            bool in = false;
+            for (int k = 1, m = (int)lua_objlen(L, list); k <= m && !in; ++k) {
+                lua_rawgeti(L, list, k);
+                if (is_inst(L, -1)) {
+                    i32 f = ((sinst *)lua_touserdata(L, -1))->idx;
+                    in = f >= 0 && ub_world_is_descendant(W, inst, f);
+                }
+                lua_pop(L, 1);
+            }
+            if (in != white) continue;
+        }
+        if (filtered(L, params, inst)) continue;
+        sobb b = part_box(p, bounds);
+        bool hit;
+        if (kind == Q_SPHERE) { /* closest point of the box to the centre */
+            vec3 d = v3_sub(sc, b.c);
+            f32 dist2 = 0;
+            const vec3 *ax = &b.r.x;
+            const f32 *h = &b.h.x;
+            for (int i = 0; i < 3; ++i) {
+                f32 t = v3_dot(d, ax[i]), e = absf(t) - h[i];
+                if (e > 0) dist2 += e * e;
+            }
+            hit = dist2 <= sr * sr;
+        } else hit = obb_overlap(q, &b);
+        if (!hit) continue;
+        push_inst(L, inst);
+        lua_rawseti(L, -2, ++n);
+    }
+    return 1;
+}
+
+static sobb query_box(lua_State *L, int cfi, int sizei)
+{
+    scf *c = check_cf(L, cfi);
+    vec3 size = check_v3(L, sizei);
+    sobb q;
+    q.c = rbx_vec(c->p);
+    q.r = rbx_rot(&c->r);
+    q.h = v3_scale(v3(absf(size.x), absf(size.y), absf(size.z)), 0.5f);
+    return q;
+}
+
+static int opt_params(lua_State *L, int i) { return lua_istable(L, i) ? i : 0; }
+
+static int m_boundsinbox(lua_State *L)
+{
+    sobb q = query_box(L, 2, 3);
+    return overlap(L, Q_BOX, &q, v3(0, 0, 0), 0, true, opt_params(L, 4), -1, false, 0, 0, -1);
+}
+
+static int m_boundsinradius(lua_State *L)
+{
+    vec3 c = rbx_vec(check_v3(L, 2));
+    f32 r = (f32)luaL_checknumber(L, 3);
+    return overlap(L, Q_SPHERE, NULL, c, r, true, opt_params(L, 4), -1, false, 0, 0, -1);
+}
+
+static int m_partsinpart(lua_State *L)
+{
+    i32 i = check_inst(L, 2);
+    if (!is_part(i)) return sapi_error(L, "GetPartsInPart: expected a BasePart");
+    sobb q = part_box(part_of(i), false);
+    return overlap(L, Q_BOX, &q, v3(0, 0, 0), 0, false, opt_params(L, 3), -1, false, 0, 0, i);
+}
+
+/* FindPartsInRegion3(region, ignore, max), ...WithIgnoreList(region, list,
+ * max), ...WithWhiteList(region, list, max): at most 20 by default */
+static int find_in_region(lua_State *L, int mode) /* 0 one ignore, 1 ignore list, 2 white list */
+{
+    vec3 lo, hi;
+    if (!get_region3(L, 2, &lo, &hi)) return luaL_typerror(L, 2, "Region3");
+    sobb q;
+    vec3 a = rbx_vec(lo), b = rbx_vec(hi);
+    q.c = v3_scale(v3_add(a, b), 0.5f);
+    q.h = v3_scale(v3(absf(b.x - a.x), absf(b.y - a.y), absf(b.z - a.z)), 0.5f);
+    q.r = mat3_identity();
+    i32 ignore = mode == 0 ? opt_inst(L, 3) : -1;
+    int list = mode != 0 && lua_istable(L, 3) ? 3 : 0;
+    int max = (int)luaL_optinteger(L, 4, 20);
+    return overlap(L, Q_BOX, &q, v3(0, 0, 0), 0, false, 0, ignore, mode == 2, list, max, -1);
+}
+
+static int m_findinregion(lua_State *L) { return find_in_region(L, 0); }
+static int m_findinregion_ignore(lua_State *L) { return find_in_region(L, 1); }
+static int m_findinregion_white(lua_State *L) { return find_in_region(L, 2); }
+
 static int m_servertime(lua_State *L)
 {
     lua_pushnumber(L, script_time());
@@ -1429,11 +1549,11 @@ static const method k_inst_methods[] = {
     { "IsA", m_isa }, { "isA", m_isa }, { "IsDescendantOf", m_isdescendantof }, { "IsAncestorOf", m_isancestorof },
     { "Destroy", m_destroy }, { "destroy", m_destroy }, { "Remove", m_destroy }, { "remove", m_destroy },
     { "ClearAllChildren", m_clearallchildren }, { "Clone", m_clone }, { "clone", m_clone },
-    { "GetFullName", m_getfullname }, { "GetAttribute", m_getattribute }, { "SetAttribute", m_setattribute },
-    { "GetAttributes", m_getattributes }, { "GetAttributeChangedSignal", m_attrsignal },
+    { "GetFullName", m_getfullname }, { "GetAttribute", attr_get }, { "SetAttribute", attr_set },
+    { "GetAttributes", attr_getall }, { "GetAttributeChangedSignal", attr_signal },
     { "GetPropertyChangedSignal", m_propsignal }, { "GetPivot", m_getpivot }, { "PivotTo", m_pivotto },
-    { "BreakJoints", m_noop }, { "MakeJoints", m_noop }, { "GetTags", m_emptytable }, { "HasTag", m_false },
-    { "AddTag", m_noop }, { "RemoveTag", m_noop }, { NULL, NULL },
+    { "BreakJoints", m_noop }, { "MakeJoints", m_noop }, { "GetTags", tag_list_of }, { "HasTag", tag_has },
+    { "AddTag", tag_add }, { "RemoveTag", tag_remove }, { NULL, NULL },
 };
 
 static const method k_part_methods[] = {
@@ -1473,7 +1593,10 @@ static const method k_lighting_methods[] = {
 };
 
 static const method k_workspace_methods[] = {
-    { "Raycast", m_raycast }, { "FindPartOnRay", m_findpartonray },
+    { "Raycast", m_raycast }, { "FindPartOnRay", m_findpartonray }, { "GetPartBoundsInBox", m_boundsinbox },
+    { "GetPartBoundsInRadius", m_boundsinradius }, { "GetPartsInPart", m_partsinpart },
+    { "FindPartsInRegion3", m_findinregion }, { "FindPartsInRegion3WithIgnoreList", m_findinregion_ignore },
+    { "FindPartsInRegion3WithWhiteList", m_findinregion_white },
     { "FindPartOnRayWithIgnoreList", m_findpartonray }, { "FindPartOnRayWithWhitelist", m_findpartonray },
     { "GetServerTimeNow", m_servertime }, { NULL, NULL },
 };
@@ -1498,9 +1621,12 @@ static int find_event(i32 idx, const char *k)
         if (streq(k, "DescendantRemoving")) return EV_DESCENDANTREMOVING;
         if (streq(k, "Destroying")) return EV_DESTROYING;
         if (streq(k, "AncestryChanged")) return EV_ANCESTRYCHANGED;
+        if (streq(k, "AttributeChanged")) return EV_ATTRCHANGED;
     }
     if (is_part(idx) && (streq(k, "Touched") || streq(k, "touched"))) return EV_TOUCHED;
     if (is_part(idx) && streq(k, "TouchEnded")) return EV_TOUCHENDED;
+    int iev = interact_event(idx, k);
+    if (iev >= 0) return iev;
     if (idx == S.g->humanoid) {
         if (streq(k, "Died")) return EV_DIED;
         if (streq(k, "HealthChanged")) return EV_HEALTHCHANGED;
@@ -1570,8 +1696,13 @@ static int inst_index(lua_State *L)
         }
         if (idx == VIRT_HTTP) {
             if (streq(k, "GenerateGUID")) { lua_pushcfunction(L, m_guid); return 1; }
+            if (streq(k, "JSONEncode")) { lua_pushcfunction(L, json_encode); return 1; }
+            if (streq(k, "JSONDecode")) { lua_pushcfunction(L, json_decode); return 1; }
+            if (streq(k, "UrlEncode")) { lua_pushcfunction(L, url_encode); return 1; }
             if (streq(k, "HttpEnabled")) { lua_pushboolean(L, 0); return 1; }
         }
+        if (idx == VIRT_COLLECTION && collection_index(L, k)) return 1;
+        if (offline_index(L, idx, k)) return 1;
         if (idx == VIRT_DATASTORE && (streq(k, "GetDataStore") || streq(k, "GetGlobalDataStore") ||
                                       streq(k, "GetOrderedDataStore"))) {
             lua_pushcfunction(L, m_getdatastore);
@@ -1610,6 +1741,7 @@ static int inst_index(lua_State *L)
     if (gui_get(L, idx, k)) return 1;
     lua_CFunction m = find_method(k_inst_methods, k);
     if (!m) m = gui_method(idx, k);
+    if (!m) m = interact_method(idx, k);
     if (!m && is_part(idx)) m = find_method(k_part_methods, k);
     if (!m && is_a(cls_of(idx), "Model")) m = find_method(k_model_methods, k);
     if (!m && idx == S.g->humanoid) m = find_method(k_humanoid_methods, k);
@@ -1841,6 +1973,7 @@ static int set_parent(lua_State *L, i32 idx, int v)
     if (!ub_world_alive(W, idx)) return sapi_error(L, "The Parent property of %s is locked, current parent: NULL", name_of(idx));
     i32 old = W->inst[idx].parent;
     if (old == np) return 0;
+    bool was_in = sapi_in_game(idx);
     if (!ub_world_set_parent(W, idx, np)) return sapi_error(L, "Attempt to set parent of %s to %s would result in circular reference", name_of(idx), np >= 0 ? name_of(np) : "nil");
     ub_game_subtree_changed(S.g, idx);
     if (old >= 0) {
@@ -1856,6 +1989,7 @@ static int set_parent(lua_State *L, i32 idx, int v)
         }
         start_scripts_in(idx);
     }
+    tags_moved(L, idx, was_in, sapi_in_game(idx));
     fire_signal(L, idx, EV_ANCESTRYCHANGED, NULL, 0);
     return 0;
 }

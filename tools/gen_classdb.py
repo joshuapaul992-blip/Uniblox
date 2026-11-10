@@ -30,6 +30,13 @@ CLASSES = [
     "IntValue", "NumberValue", "StringValue", "BoolValue", "ObjectValue", "Color3Value", "Vector3Value",
     "BrickColorValue", "CFrameValue", "RayValue",
     "RemoteEvent", "RemoteFunction", "BindableEvent", "BindableFunction", "Folder", "Configuration",
+    # milestone 8B: what 2022 games' scripts read and set
+    "UnreliableRemoteEvent", "Sound", "SoundGroup", "Attachment", "ClickDetector", "ProximityPrompt", "Highlight",
+    "Decal", "Texture", "PointLight", "SpotLight", "SurfaceLight", "ParticleEmitter", "Fire", "Smoke", "Sparkles",
+    "Trail", "Beam", "Tool", "Team", "Sky", "Atmosphere", "Clouds", "BloomEffect", "BlurEffect",
+    "ColorCorrectionEffect", "SunRaysEffect", "DepthOfFieldEffect", "Animation", "SelectionBox", "Dialog",
+    "SpecialMesh", "BlockMesh", "CylinderMesh", "Explosion", "ForceField", "Accessory", "Hat", "Shirt", "Pants",
+    "ShirtGraphic", "BodyColors", "HumanoidDescription", "StarterGear",
 ]
 
 EXTRA_ENUMS = [
@@ -37,6 +44,8 @@ EXTRA_ENUMS = [
     "FontStyle", "Font", "ThumbnailType", "ThumbnailSize", "EasingStyle", "EasingDirection", "PlaybackState",
     "TextInputType", "SelectionBehavior", "CameraType", "ModifierKey", "ScreenOrientation", "FillDirection",
     "HorizontalAlignment", "VerticalAlignment", "SortOrder", "FontSize", "TweenStatus", "Platform",
+    "HumanoidStateType", "HumanoidRigType", "ProximityPromptStyle", "ProximityPromptInputType", "Material",
+    "PartType", "SurfaceType", "AnimationPriority", "RaycastFilterType", "PathStatus", "Limb", "AssetType", "Axis", "PathWaypointAction", "ProximityPromptExclusivity",
 ]
 
 # properties never stored as data (Uniblox handles them itself or they mean nothing here)

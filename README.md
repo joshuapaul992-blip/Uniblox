@@ -194,9 +194,17 @@ door.Touched:Connect(function(hit)
 end)
 ```
 
-- **Language:** Lua 5.1, plus the Luau additions scripts use most:
-  `+= -= *= /= %= ^= ..=`, `continue`, `typeof`, `table.find`/`clear`/`pack`,
-  `string.split`, `math.clamp`/`sign`/`round`, and `pcall` that can wait.
+- **Language:** Luau as Roblox had it in 2022, on a Lua 5.1 core: type
+  annotations (`local x: number`, typed parameters and returns, generics,
+  `type` and `export type`, `::` casts) are read and ignored as Roblox
+  does; if-then-else expressions; `for k, v in t do` without `pairs`;
+  `+= -= *= /= %= ^= ..=` and `continue`; `0b1010`, `1_000_000`, and the
+  `\x`, `\z` and `\u{...}` escapes.
+- **Luau's library:** `bit32`, `utf8`, `table.move`/`freeze`/`clone`/`find`/
+  `create`, `string.split`/`pack`/`unpack`, `math.noise` (Perlin),
+  `math.clamp`/`sign`/`round`, `os.date`/`time`, `debug.traceback`/`info`,
+  `coroutine.close`/`isyieldable`, `Random`, `DateTime`, `newproxy`, and a
+  `pcall` that can wait. `HttpService` encodes and decodes JSON.
 - **Scripts that run:** every `Script` in the Workspace,
   ServerScriptService or under Players that isn't disabled; every
   `LocalScript` in the player's PlayerGui, Backpack, PlayerScripts or
@@ -205,26 +213,38 @@ end)
   script straight away. ModuleScripts load with `require`.
 - **The API:** instances with their properties, methods and events
   (`Touched`, `Changed`, `ChildAdded`, `GetPropertyChangedSignal`...),
-  `Instance.new`, `Clone`, `Destroy`, attributes, `game:GetService`,
+  `Instance.new`, `Clone`, `Destroy`, attributes and tags (read from place
+  files and saved; `CollectionService` with its added and removed
+  signals), `game:GetService`,
   `Players` and the player's character with its `Humanoid` (health, walk
-  speed, jump power, `Died`), `RunService` events, `TweenService`, `Debris`,
-  `workspace:Raycast`, `Lighting`, the GUI (below), `UserInputService`,
+  speed, jump power, `Died`, `StateChanged`, `Running`, `Jumping`,
+  `FreeFalling`), `RunService` events, `TweenService`, `Debris`,
+  `workspace:Raycast`, `GetPartBoundsInBox`/`InRadius`, `GetPartsInPart`,
+  `FindPartsInRegion3`, `Lighting`, `ClickDetector`s (click and hover),
+  `ProximityPrompt`s (shown near your character, triggered by their key or
+  by holding it; drawn in Uniblox's own style), the GUI (below), `UserInputService`,
   `Player:GetMouse()`, `workspace.CurrentCamera` (its CFrame, ViewportSize,
   FieldOfView, WorldToViewportPoint and rays), `GuiService`,
   `TextService:GetTextSize`, remotes and bindables. The types are
   `Vector3`, `Vector2`, `CFrame`, `Color3`, `BrickColor`, `UDim`, `UDim2`,
   `Rect`, `NumberRange`, `NumberSequence`, `ColorSequence`, `Font`,
-  `InputObject`, `TweenInfo`, `Ray` and `RaycastParams`, and every one of
-  Roblox's enums (`Enum.KeyCode`, `Enum.Font`...).
+  `InputObject`, `TweenInfo`, `Ray`, `RaycastParams`, `OverlapParams`,
+  `Region3`, `Vector3int16`, `PhysicalProperties`, `Faces`, `Axes`,
+  `Random` and `DateTime`, and Roblox's enums (`Enum.KeyCode`,
+  `Enum.Font`...). 118 classes (Sound, lights, effects, Tool, Team,
+  Attachment, Highlight...) have Roblox's properties and defaults.
   Scheduling uses `wait`, `task.wait`/`spawn`/`defer`/`delay`/`cancel`,
   `spawn` and `delay`. Positions use Roblox's axes, so coordinates copied
   from Studio mean the same thing.
 - **Things Uniblox doesn't do yet don't crash scripts.** Properties it
   doesn't simulate are kept and read back. Services that need the internet
   (HTTP, marketplace, teleport) raise an error, as they do when they're
-  offline in Roblox. DataStores keep their data until you quit.
+  offline in Roblox. DataStores keep their data until you quit. Policy,
+  badge, group and localization questions get offline answers (no badges,
+  no groups, English), and PathfindingService gives straight paths.
 - **Hostile scripts can't hurt the game.** There are no files, no OS
-  access, no `loadstring`, no bytecode and no debug library, and
+  access, no `loadstring`, no bytecode and only the harmless part of the
+  debug library, and
   metatables are locked. A script that runs for 250 ms without waiting is
   stopped, even if it catches the error with `pcall`. All scripts share
   64 MB of memory, and the one that uses it up is stopped. String patterns
@@ -235,8 +255,9 @@ end)
   `HumanoidRootPart` and a `Humanoid`. When its health reaches 0 it falls
   over and comes back at the spawn point 3 seconds later.
 
-The demo place's door, spinning block, glowing lava strip and green button
-(which rains balls) are scripts. Type `fast`, `slow`, `night` or `day` in
+The demo place's door, spinning block (click it to turn it the other way),
+glowing lava strip, green button (which rains balls) and lamp (press E
+beside it) are scripts. Type `fast`, `slow`, `night` or `day` in
 the chat line to try one more. Parts with a `Transparency` between 0 and 1
 are drawn see-through, with a dither pattern that works in both renderers
 and in 256 colours.
@@ -445,14 +466,21 @@ fallback.
   The script tests run whole games without a window. The character walks
   into a scripted door, which opens and lets it through, then closes and
   blocks it again. The API test (`tests/data/scripts/api.lua`) makes over
-  100 checks. Then 28 hostile scripts run one after another, including
+  100 checks. `luau.lua` checks every piece of Luau's 2022 syntax (and
+  that broken forms are still refused); `luaulib.lua` the library (bit32,
+  utf8, frozen tables, Perlin noise, dates against a fixed clock, Random,
+  DateTime, coroutine.close, string.pack, JSON), attributes and tags;
+  `api2022.lua` the classes, new types and overlap queries, while the test
+  clicks a ClickDetector, taps one ProximityPrompt's key, holds another's
+  and jumps (StateChanged, Jumping, FreeFalling). Attributes and tags are
+  also read from rbx-test-files models and must survive `.ubx`. Then 28 hostile scripts run one after another, including
   busy loops (also inside `pcall`, coroutines and events), memory, table,
   pattern and `string.rep` bombs, sandbox escapes, and destroying the
   services and the character. Each must be stopped or fail within 3
   seconds, and the game, its door and an innocent script must carry on.
   Another test makes and destroys 300,000 instances and checks that the
   world and physics stay small. A last one plays the demo place: the door,
-  the button, the lava, the chat commands, and its GUI. The panel must
+  the button, the lava, the lamp's prompt, the chat commands, and its GUI. The panel must
   count the door, survive a death, and be drawn, along with the sign and
   the door's label. The door's label is also drawn by the software
   renderer over the real scene, to check it sits in front of the wall.

@@ -167,6 +167,7 @@ struct ub_gui {
     const ub_world *kw;         /* the world the keys belong to */
     i32 kcount;
     i32 root;                   /* PlayerGui */
+    i32 core_root;              /* the engine's own GUIs (CoreGui), -1 none */
     int sw, sh;                 /* screen */
     u32 epoch;                  /* the world's epoch at the last layout */
     bool need_layout;
@@ -381,6 +382,7 @@ ub_gui *ub_gui_new(void)
     if (!g) return NULL;
     memset(g, 0, sizeof *g);
     g->root = -1;
+    g->core_root = -1;
     g->focus = -1;
     g->drag_scroll = -1;
     g->pressed[0] = g->pressed[1] = g->pressed[2] = -1;
@@ -412,6 +414,12 @@ void ub_gui_free(ub_gui *g)
     plat_free(g->ev);
     plat_free(g->quads);
     plat_free(g);
+}
+
+void ub_gui_set_core_root(ub_gui *g, i32 core_gui)
+{
+    if (g->core_root != core_gui) g->need_layout = true;
+    g->core_root = core_gui;
 }
 
 void ub_gui_set_root(ub_gui *g, i32 player_gui)
@@ -486,6 +494,7 @@ static void collect_layers(ub_gui *g, ub_world *w)
 {
     for (int i = 0; i < g->nlayers; ++i) g->layers[i].live = false;
     find_layers(g, w, g->root, true);
+    find_layers(g, w, g->core_root, true);
     if (w->workspace >= 0) find_layers(g, w, w->workspace, false);
     /* drop the ones that went */
     for (int i = 0; i < g->nlayers;) {

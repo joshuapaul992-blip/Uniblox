@@ -252,6 +252,7 @@ typedef struct {
 
 typedef struct {
     u16 year, month, day, hour, minute, second;
+    u16 millisecond;
 } ub_datetime;
 
 /* ------------------------------------------------------- time, memory */
@@ -259,6 +260,7 @@ typedef struct {
 /* Monotonic time in microseconds. */
 u64 plat_time_us(void);
 void plat_local_time(ub_datetime *out);
+void plat_utc_time(ub_datetime *out);      /* Coordinated Universal Time */
 
 void *plat_alloc(size_t bytes);  /* zeroed; NULL on failure */
 void plat_free(void *p);

@@ -1681,6 +1681,9 @@ static i32 mouse_target(vec3 *hit)
     return part;
 }
 
+i32 gui_mouse_target(vec3 *hit) { return mouse_target(hit); }
+int gui_vk_of(int keycode) { return vk_of(keycode); }
+
 static mat3 look_rot(vec3 dir)
 {
     vec3 back = v3_scale(v3_normalize(dir), -1);
@@ -2149,6 +2152,11 @@ void gui_pump(lua_State *L)
         fire_signal(L, VIRT_USERINPUT, EV_INPUTCHANGED, NULL, 2);
         fire_signal(L, VIRT_MOUSE, in->wheel > 0 ? EV_WHEELFORWARD : EV_WHEELBACKWARD, NULL, 0);
     }
+    /* click detectors, proximity prompts, the humanoid's state */
+    static f64 last = -1;
+    f64 now = script_time();
+    interact_pump(L, last < 0 || now < last ? 0 : (f32)(now - last));
+    last = now;
 }
 
 /* ------------------------------------------------------------- respawn */
@@ -2237,6 +2245,7 @@ static int l_getcb(lua_State *L)
 void open_gui(lua_State *L)
 {
     extern char REG_BASE;
+    interact_reset();
     E_UIT = enum_type_named("UserInputType");
     E_UIS = enum_type_named("UserInputState");
     E_KC = enum_type_named("KeyCode");

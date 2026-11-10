@@ -56,6 +56,24 @@ static int v3_new(lua_State *L)
     return 1;
 }
 
+/* Vector3.fromNormalId(Enum.NormalId.Top) / fromAxis(Enum.Axis.X): enum
+ * values Right 0, Top 1, Back 2, Left 3, Bottom 4, Front 5; X 0, Y 1, Z 2 */
+static int v3_fromnormal(lua_State *L)
+{
+    static const f32 d[6][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { -1, 0, 0 }, { 0, -1, 0 }, { 0, 0, -1 } };
+    int v = -1;
+    if (lua_isnumber(L, 1)) v = (int)lua_tointeger(L, 1);
+    else {
+        luaL_checkany(L, 1);
+        lua_getfield(L, 1, "Value");
+        v = lua_isnumber(L, -1) ? (int)lua_tointeger(L, -1) : -1;
+        lua_pop(L, 1);
+    }
+    if (v < 0 || v > 5) return luaL_argerror(L, 1, "NormalId or Axis expected");
+    push_v3(L, v3(d[v][0], d[v][1], d[v][2]));
+    return 1;
+}
+
 static int v3_dot_l(lua_State *L)
 {
     lua_pushnumber(L, v3_dot(check_v3(L, 1), check_v3(L, 2)));
@@ -91,6 +109,43 @@ static int v3_abs_l(lua_State *L)
     return 1;
 }
 
+/* 2022 additions: Min, Max, Floor, Ceil, Sign, Angle */
+static f32 fsign(f32 x) { return x > 0 ? 1.0f : x < 0 ? -1.0f : 0.0f; }
+
+static int v3_minmax_l(lua_State *L)
+{
+    bool max = lua_toboolean(L, lua_upvalueindex(1));
+    vec3 r = check_v3(L, 1);
+    for (int i = 2, n = lua_gettop(L); i <= n; ++i) {
+        vec3 b = check_v3(L, i);
+        r.x = max ? (b.x > r.x ? b.x : r.x) : (b.x < r.x ? b.x : r.x);
+        r.y = max ? (b.y > r.y ? b.y : r.y) : (b.y < r.y ? b.y : r.y);
+        r.z = max ? (b.z > r.z ? b.z : r.z) : (b.z < r.z ? b.z : r.z);
+    }
+    push_v3(L, r);
+    return 1;
+}
+
+static int v3_round_l(lua_State *L) /* upvalue: 0 floor, 1 ceil, 2 sign */
+{
+    vec3 a = check_v3(L, 1);
+    int m = (int)lua_tointeger(L, lua_upvalueindex(1));
+    if (m == 0) push_v3(L, v3((f32)floor(a.x), (f32)floor(a.y), (f32)floor(a.z)));
+    else if (m == 1) push_v3(L, v3((f32)ceil(a.x), (f32)ceil(a.y), (f32)ceil(a.z)));
+    else push_v3(L, v3(fsign(a.x), fsign(a.y), fsign(a.z)));
+    return 1;
+}
+
+static int v3_angle_l(lua_State *L)
+{
+    vec3 a = check_v3(L, 1), b = check_v3(L, 2);
+    vec3 c = v3_cross(a, b);
+    f64 ang = atan2(v3_length(c), v3_dot(a, b));
+    if (lua_gettop(L) >= 3 && v3_dot(c, check_v3(L, 3)) < 0) ang = -ang;
+    lua_pushnumber(L, ang);
+    return 1;
+}
+
 static int v3_index(lua_State *L)
 {
     vec3 v = check_v3(L, 1);
@@ -105,6 +160,13 @@ static int v3_index(lua_State *L)
     else if (!strcmp(k, "Lerp") || !strcmp(k, "lerp")) lua_pushcfunction(L, v3_lerp_l);
     else if (!strcmp(k, "FuzzyEq")) lua_pushcfunction(L, v3_fuzzy_l);
     else if (!strcmp(k, "Abs")) lua_pushcfunction(L, v3_abs_l);
+    else if (!strcmp(k, "Min") || !strcmp(k, "Max")) {
+        lua_pushboolean(L, k[1] == 'a');
+        lua_pushcclosure(L, v3_minmax_l, 1);
+    } else if (!strcmp(k, "Floor") || !strcmp(k, "Ceil") || !strcmp(k, "Sign")) {
+        lua_pushinteger(L, k[0] == 'F' ? 0 : k[0] == 'C' ? 1 : 2);
+        lua_pushcclosure(L, v3_round_l, 1);
+    } else if (!strcmp(k, "Angle")) lua_pushcfunction(L, v3_angle_l);
     else return sapi_error(L, "%s is not a valid member of Vector3", k);
     return 1;
 }
@@ -597,6 +659,43 @@ static int cf_toyxz_l(lua_State *L)
     return 3;
 }
 
+static int cf_toaxisangle_l(lua_State *L)
+{
+    scf *c = check_cf(L, 1);
+    quat q = quat_normalize(quat_from_mat3(&c->r));
+    if (q.w < 0) { q.x = -q.x; q.y = -q.y; q.z = -q.z; q.w = -q.w; }
+    f64 s = sqrt(q.x * q.x + q.y * q.y + q.z * q.z);
+    f64 ang = 2 * atan2(s, q.w);
+    if (s < 1e-9) push_v3(L, v3(1, 0, 0));
+    else push_v3(L, v3((f32)(q.x / s), (f32)(q.y / s), (f32)(q.z / s)));
+    lua_pushnumber(L, ang);
+    return 2;
+}
+
+static int cf_fuzzy_l(lua_State *L)
+{
+    scf *a = check_cf(L, 1), *b = check_cf(L, 2);
+    f32 eps = (f32)luaL_optnumber(L, 3, 1e-5);
+    const f32 *x = (const f32 *)&a->r, *y = (const f32 *)&b->r;
+    bool same = v3_length(v3_sub(a->p, b->p)) <= eps;
+    for (int i = 0; i < 9 && same; ++i) same = fabs(x[i] - y[i]) <= eps;
+    lua_pushboolean(L, same);
+    return 1;
+}
+
+static int cf_ortho_l(lua_State *L)
+{
+    scf *c = check_cf(L, 1);
+    vec3 x = v3_normalize(c->r.x);
+    vec3 y = v3_normalize(v3_sub(c->r.y, v3_scale(x, v3_dot(x, c->r.y))));
+    mat3 r;
+    r.x = x;
+    r.y = y;
+    r.z = v3_cross(x, y);
+    push_cf(L, c->p, &r);
+    return 1;
+}
+
 static int cf_index(lua_State *L)
 {
     scf *c = check_cf(L, 1);
@@ -621,6 +720,9 @@ static int cf_index(lua_State *L)
     else if (!strcmp(k, "GetComponents") || !strcmp(k, "components")) lua_pushcfunction(L, cf_components_l);
     else if (!strcmp(k, "ToEulerAnglesXYZ") || !strcmp(k, "toEulerAnglesXYZ")) lua_pushcfunction(L, cf_toxyz_l);
     else if (!strcmp(k, "ToEulerAnglesYXZ") || !strcmp(k, "ToOrientation")) lua_pushcfunction(L, cf_toyxz_l);
+    else if (!strcmp(k, "ToAxisAngle") || !strcmp(k, "toAxisAngle")) lua_pushcfunction(L, cf_toaxisangle_l);
+    else if (!strcmp(k, "FuzzyEq")) lua_pushcfunction(L, cf_fuzzy_l);
+    else if (!strcmp(k, "Orthonormalize")) lua_pushcfunction(L, cf_ortho_l);
     else return sapi_error(L, "%s is not a valid member of CFrame", k);
     return 1;
 }
@@ -1221,6 +1323,14 @@ const char *ub_typeof(lua_State *L, int i)
     int t = lua_type(L, i);
     if (t != LUA_TUSERDATA && t != LUA_TTABLE) return lua_typename(L, t);
     if (!lua_getmetatable(L, i)) return lua_typename(L, t);
+    lua_pushliteral(L, "__type"); /* types that name themselves (Random, DateTime, ...) */
+    lua_rawget(L, -2);
+    if (lua_type(L, -1) == LUA_TSTRING) {
+        const char *name = lua_tostring(L, -1); /* kept alive by the metatable */
+        lua_pop(L, 2);
+        return name;
+    }
+    lua_pop(L, 1);
     for (int k = 0; names[k]; ++k) {
         luaL_getmetatable(L, names[k]);
         bool same = lua_rawequal(L, -1, -2);
@@ -1322,7 +1432,8 @@ void open_types(lua_State *L)
     lua_pushlightuserdata(L, &REG_BASE);
     lua_rawget(L, LUA_REGISTRYINDEX);
     int base = lua_gettop(L);
-    static const luaL_Reg v3fns[] = { { "new", v3_new }, { NULL, NULL } };
+    static const luaL_Reg v3fns[] = { { "new", v3_new }, { "fromNormalId", v3_fromnormal }, { "fromAxis", v3_fromnormal },
+                                      { NULL, NULL } };
     lib(L, base, "Vector3", v3fns);
     lua_getfield(L, base, "Vector3"); /* constants on the real table */
     lua_getmetatable(L, -1);
@@ -1381,6 +1492,7 @@ void open_types(lua_State *L)
     lua_newuserdata(L, 1);
     set_meta(L, "Enums");
     lua_setfield(L, base, "Enum");
+    open_types2(L, base);
     lua_pop(L, 1);
 }
 

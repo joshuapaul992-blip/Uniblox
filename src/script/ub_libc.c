@@ -42,6 +42,15 @@ int ubc_strcmp(const char *a, const char *b)
     return (int)(unsigned char)*a - (int)(unsigned char)*b;
 }
 
+int ubc_strncmp(const char *a, const char *b, size_t n)
+{
+    for (; n; --n, ++a, ++b) {
+        if (*a != *b) return (unsigned char)*a - (unsigned char)*b;
+        if (!*a) return 0;
+    }
+    return 0;
+}
+
 int ubc_strcoll(const char *a, const char *b) { return ubc_strcmp(a, b); }
 
 char *ubc_strchr(const char *s, int c)

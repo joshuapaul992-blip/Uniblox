@@ -31,6 +31,8 @@ enum RESERVED {
   TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE,
   /* UNIBLOX: Luau's compound assignments */
   TK_PLUSEQ, TK_MINUSEQ, TK_MULEQ, TK_DIVEQ, TK_MODEQ, TK_POWEQ, TK_CONCATEQ,
+  /* UNIBLOX: Luau's type syntax: `::' casts and `->' function types */
+  TK_DBCOLON, TK_ARROW,
   TK_NUMBER,
   TK_NAME, TK_STRING, TK_EOS
 };

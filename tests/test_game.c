@@ -198,6 +198,38 @@ static void test_api(void)
     ub_game_stop(&g_g);
 }
 
+/* Luau's library additions (bit32, utf8, DateTime, JSON...). */
+static void test_luaulib(void)
+{
+    char *src = read_text("tests/data/scripts/luaulib.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Lib", src);
+    /* attributes and tags as a place file brings them */
+    i32 tagged = ub_world_add(&w, ub_world_workspace(&w), UB_CLASS_FOLDER, "Folder", "Tagged");
+    ub_value speed;
+    memset(&speed, 0, sizeof speed);
+    speed.type = UB_PV_DOUBLE;
+    speed.v.d = 16;
+    ub_value tags = ub_vstr("Coin\0Spin", 9);
+    CHECK(ub_world_set_prop_named(&w, tagged, "@Speed", &speed) && ub_world_set_prop_named(&w, tagged, "Tags", &tags));
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    for (int i = 0; i < 300 && find_result(&g_g, "lib done") < 0; ++i)
+        ub_game_update(&g_g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    bool ok = find_result(&g_g, "lib ok") >= 0;
+    CHECK(find_result(&g_g, "lib done") >= 0);
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* ------------------------------------------------------ hostile code */
 
 static const char k_survivor[] =
@@ -357,7 +389,7 @@ static void test_demo_place(void)
     CHECK(ub_game_start(&g_g, &w, true));
     ub_script_stats st;
     ub_script_get_stats(&st);
-    CHECK(st.scripts == 6); /* the server's; the panel's LocalScript starts with the first frame */
+    CHECK(st.scripts == 7); /* the server's; the panel's LocalScript starts with the first frame */
     i32 ws = ub_world_workspace(&g_g.world);
     i32 house = ub_world_find_child(&g_g.world, ws, "House");
     i32 door = ub_world_find_child(&g_g.world, house, "Door");
@@ -391,7 +423,7 @@ static void test_demo_place(void)
     /* the panel came with the player, kept its count through the death
      * (ResetOnSpawn off) and is drawn; so are the sign and the door's label */
     ub_script_get_stats(&st);
-    CHECK(st.scripts == 7);
+    CHECK(st.scripts == 8);
     i32 hud = ub_world_find_child(&g_g.world, g_g.player_gui, "DemoHud");
     i32 panel = hud >= 0 ? ub_world_find_child(&g_g.world, hud, "Panel") : -1;
     i32 stats = panel >= 0 ? ub_world_find_child(&g_g.world, panel, "Stats") : -1;
@@ -410,7 +442,7 @@ static void test_demo_place(void)
     CHECK(ub_gui_screen(g_g.gui, &rects, &nr) != NULL && nr >= 1);
     const ub_gui_quad *q;
     int nq = ub_gui_quads(g_g.gui, &q);
-    CHECK(nq == 2); /* the sign and the door's label, both in view */
+    CHECK(nq == 3); /* the sign, the door's label and the lamp's prompt (the player is back at the spawn) */
     /* drawn by the software renderer over the real scene: the door's label
      * is in front of the wall, so it shows (dark, see-through) */
     {
@@ -462,6 +494,15 @@ static void test_demo_place(void)
         }
         ub_render_shutdown();
     }
+    /* the lamp by the path: E at its prompt switches it on */
+    i32 lamp = ub_world_find_child(&g_g.world, ws, "Lamp");
+    i32 bulb = lamp >= 0 ? ub_world_find_child(&g_g.world, lamp, "Bulb") : -1;
+    CHECK(bulb >= 0);
+    gui_frame(&g_g, 400, 400, false, false, 'E', 31.0);
+    frames(2, v3(0, 0, 0));
+    const ub_value *on = lamp >= 0 ? ub_world_prop_named(&g_g.world, lamp, "@On") : NULL;
+    CHECK(on && on->type == UB_PV_BOOL && on->v.b);
+    CHECK(bulb >= 0 && (g_g.world.parts[g_g.world.inst[bulb].part].flags & UB_PART_GLOW));
     /* chat commands */
     ub_script_chatted("fast");
     CHECK(g_g.walk_speed == 32);
@@ -581,11 +622,90 @@ static void test_gui_api(void)
     ub_game_stop(&g_g);
 }
 
+/* ------------------------------------------ the wider 2022 API (8B) */
+
+/* A frame with the camera behind the spawn point looking at workspace.Button:
+ * mouse in the middle; mouse button and keys as given (vk; 0 none). */
+static void interact_frame(ub_game *g, bool press, bool release, int key_press, int key_hold, int key_release,
+                           bool jump, f64 t)
+{
+    ub_frame fr;
+    memset(&fr, 0, sizeof fr);
+    fr.backend = UB_BACKEND_SOFTWARE;
+    fr.width = 800;
+    fr.height = 636;
+    static ub_input in;
+    memset(&in, 0, sizeof in);
+    in.has_focus = true;
+    in.mouse_x = 400;
+    in.mouse_y = 318;
+    in.mouse_down[0] = press;
+    in.mouse_pressed[0] = press;
+    in.mouse_released[0] = release;
+    if (key_press) in.key_pressed[key_press] = in.key_down[key_press] = true;
+    if (key_hold) in.key_down[key_hold] = true;
+    if (key_release) in.key_released[key_release] = true;
+    ub_camera cam;
+    memset(&cam, 0, sizeof cam);
+    cam.pos = v3(0, 2, -6);
+    cam.fov_y = 70.0f * 3.14159265f / 180.0f;
+    cam.far_dist = 1000;
+    play_gui_input(g, &fr, &in, &cam, false, t);
+    ub_game_update(g, 1.0f / 60.0f, v3(0, 0, 0), jump);
+    ub_gui_render(g->gui, &g->world, &cam);
+}
+
+static void test_api2022(void)
+{
+    char *src = read_text("tests/data/scripts/api2022.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    i32 ws = ub_world_workspace(&w);
+    i32 button = add_box(&w, ws, "Button", v3(0, 2, 4), v3(2, 2, 1), 0xC03030);
+    add_gui(&w, button, "ClickDetector", "ClickDetector");
+    i32 chest = add_box(&w, ws, "Chest", v3(3, 1, 0), v3(2, 2, 2), 0x8B5A2B);
+    add_gui(&w, chest, "ProximityPrompt", "ProximityPrompt");
+    i32 crate = add_box(&w, ws, "Crate", v3(-3, 1, 0), v3(2, 2, 2), 0x8B5A2B);
+    i32 held = add_gui(&w, crate, "ProximityPrompt", "ProximityPrompt");
+    ub_value hd = ub_vfloat(0.5f), key = ub_venum(102); /* KeyCode.F */
+    CHECK(ub_world_set_prop_named(&w, held, "HoldDuration", &hd) && ub_world_set_prop_named(&w, held, "KeyboardKeyCode", &key));
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Api2022", src);
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    int ready = -1;
+    for (int i = 0; i < 900 && find_result(&g_g, "api2022 done") < 0; ++i) {
+        if (ready < 0 && find_result(&g_g, "api2022 ready") >= 0) ready = i;
+        int k = ready >= 0 ? i - ready : -1;
+        interact_frame(&g_g, k == 5, k == 6, k == 15 ? 'E' : k == 25 ? 'F' : 0, k > 25 && k < 70 ? 'F' : 0,
+                       k == 16 ? 'E' : k == 70 ? 'F' : 0, k == 90, i / 60.0);
+    }
+    CHECK(find_result(&g_g, "api2022 done") >= 0);
+    bool ok = find_result(&g_g, "api2022 ok") >= 0;
+    CHECK(ok);
+    /* the prompts were drawn: a BillboardGui under CoreGui */
+    i32 core = -1;
+    for (i32 i = 0; i < g_g.world.count; ++i)
+        if (g_g.world.inst[i].parent < 0 && ub_world_alive(&g_g.world, i) &&
+            strcmp(ub_world_str(&g_g.world, g_g.world.inst[i].name), "CoreGui") == 0)
+            core = i;
+    CHECK(core >= 0 && g_g.world.inst[core].first_child >= 0);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 void test_game(void)
 {
     test_door();
     test_api();
+    test_luaulib();
     test_gui_api();
+    test_api2022();
     test_hostile();
     test_reuse();
     test_death();

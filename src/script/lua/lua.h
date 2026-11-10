@@ -213,6 +213,11 @@ LUA_API int (lua_dump) (lua_State *L, lua_Writer writer, void *data);
 LUA_API int  (lua_yield) (lua_State *L, int nresults);
 LUA_API int  (lua_resume) (lua_State *L, int narg);
 LUA_API int  (lua_status) (lua_State *L);
+/* UNIBLOX: table.freeze, coroutine.close */
+LUA_API void (lua_setreadonly) (lua_State *L, int idx, int on);
+LUA_API int  (lua_getreadonly) (lua_State *L, int idx);
+LUA_API void (lua_resetthread) (lua_State *L);
+LUA_API int  (lua_getparams) (lua_State *L, int idx, int *isvararg);
 
 /*
 ** garbage-collection function and options

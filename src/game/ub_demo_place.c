@@ -61,11 +61,16 @@ static const char k_door_script[] =
     "end)\n";
 
 static const char k_spin_script[] =
+    "-- click the block (its ClickDetector) to turn it the other way\n"
     "local part = script.Parent\n"
     "local home = part.Position\n"
-    "local t = 0\n"
+    "local t, way = 0, 1\n"
+    "part.ClickDetector.MouseClick:Connect(function(player)\n"
+    "\tway = -way\n"
+    "\tpart.Color = if way > 0 then Color3.fromRGB(46, 139, 239) else Color3.fromRGB(239, 139, 46)\n"
+    "end)\n"
     "game:GetService('RunService').Heartbeat:Connect(function(dt)\n"
-    "\tt += dt\n"
+    "\tt += dt * way\n"
     "\tpart.CFrame = CFrame.new(home + Vector3.new(0, math.sin(t * 2) * 0.5, 0))\n"
     "\t\t* CFrame.Angles(t * 0.9, t * 0.5, t * 0.3)\n"
     "end)\n";
@@ -109,7 +114,7 @@ static const char k_button_script[] =
 static const char k_welcome_script[] =
     "local Players = game:GetService('Players')\n"
     "Players.PlayerAdded:Connect(function(player)\n"
-    "\tprint('Welcome, ' .. player.Name .. '! Touch the door, step on the green button, avoid the lava.')\n"
+    "\tprint('Welcome, ' .. player.Name .. '! Touch the door, press E at the lamp, click the spinning block, avoid the lava.')\n"
     "\tplayer.Chatted:Connect(function(message)\n"
     "\t\tlocal humanoid = player.Character and player.Character:FindFirstChildOfClass('Humanoid')\n"
     "\t\tif message == 'fast' and humanoid then humanoid.WalkSpeed = 32 print('Fast!')\n"
@@ -119,6 +124,24 @@ static const char k_welcome_script[] =
     "\t\tend\n"
     "\tend)\n"
     "end)\n";
+
+/* the lamp by the path: its ProximityPrompt switches it (Luau 2022: types,
+ * if-expressions, attributes, CollectionService tags) */
+static const char k_lamp_script[] =
+    "local CollectionService = game:GetService('CollectionService')\n"
+    "local function wire(lamp: Model)\n"
+    "\tlocal bulb = lamp:WaitForChild('Bulb') :: Part\n"
+    "\tlocal prompt = bulb:WaitForChild('ProximityPrompt') :: ProximityPrompt\n"
+    "\tlamp:SetAttribute('On', false)\n"
+    "\tprompt.Triggered:Connect(function(player: Player)\n"
+    "\t\tlocal on = not lamp:GetAttribute('On')\n"
+    "\t\tlamp:SetAttribute('On', on)\n"
+    "\t\tbulb.Material = if on then Enum.Material.Neon else Enum.Material.SmoothPlastic\n"
+    "\t\tbulb.Color = if on then Color3.fromRGB(255, 214, 120) else Color3.fromRGB(150, 150, 150)\n"
+    "\t\tprompt.ActionText = if on then 'Switch off' else 'Switch on'\n"
+    "\tend)\n"
+    "end\n"
+    "for _, lamp in CollectionService:GetTagged('Lamp') do wire(lamp) end\n";
 
 static void add_script(i32 parent, const char *name, const char *source)
 {
@@ -415,8 +438,9 @@ void ub_demo_place(ub_world *w)
     add_part(house, "Ramp", UB_SHAPE_WEDGE, -12, 1.5f, 46, 6, 3, 8, 0x8090A0, UB_MAT_METAL);
     add_part(house, "Landing", UB_SHAPE_BOX, -12, 1.5f, 53, 6, 3, 6, 0x8090A0, UB_MAT_METAL);
     add_part(house, "Pedestal", UB_SHAPE_CYLINDER, 0, 1.5f, 40, 4, 3, 4, 0x7A8590, UB_MAT_METAL);
-    add_script(add_part(house, "Spinner", UB_SHAPE_BOX, 0, 6, 40, 3, 3, 3, 0x2E8BEF, UB_MAT_PLASTIC), "Spin",
-               k_spin_script);
+    i32 spinner = add_part(house, "Spinner", UB_SHAPE_BOX, 0, 6, 40, 3, 3, 3, 0x2E8BEF, UB_MAT_PLASTIC);
+    gui(spinner, "ClickDetector", "ClickDetector");
+    add_script(spinner, "Spin", k_spin_script);
     loosen(add_part(house, "Ball", UB_SHAPE_BALL, -6, 1.6f, 30, 3, 3, 3, 0xF2C230, UB_MAT_PLASTIC));
     loosen(add_part(house, "Ball", UB_SHAPE_BALL, 6, 1.1f, 33, 2, 2, 2, 0x30C060, UB_MAT_PLASTIC));
     loosen(add_part(house, "Ball", UB_SHAPE_BALL, -4, 1.1f, 50, 2, 2, 2, 0xE04080, UB_MAT_PLASTIC));
@@ -438,6 +462,15 @@ void ub_demo_place(ub_world *w)
     ub_world_add_part(W, ws, UB_CLASS_SPAWN, NULL, "SpawnLocation", &spawn);
     for (int i = 1; i < 4; ++i)
         add_part(ws, "Path", UB_SHAPE_BOX, 0, 0.05f, 2.5f + (f32)i * 5.0f, 4, 0.1f, 4, 0x8A8A8A, UB_MAT_STONE);
+    /* a lamp beside the path, tagged "Lamp", with a prompt (press E) */
+    i32 lamp = ub_world_add(W, ws, UB_CLASS_MODEL, NULL, "Lamp");
+    add_part(lamp, "Post", UB_SHAPE_CYLINDER, -5, 3, 9, 0.6f, 6, 0.6f, 0x3A3F47, UB_MAT_METAL);
+    i32 bulb = add_part(lamp, "Bulb", UB_SHAPE_BALL, -5, 6.6f, 9, 1.4f, 1.4f, 1.4f, 0x969696, UB_MAT_PLASTIC);
+    i32 prompt = gui(bulb, "ProximityPrompt", "ProximityPrompt");
+    p_str(prompt, "ActionText", "Switch on");
+    p_str(prompt, "ObjectText", "Lamp");
+    ub_value tag = ub_vstr("Lamp", 4);
+    ub_world_set_prop_named(W, lamp, "Tags", &tag);
     add_tree(ws, -30, 8, 1.0f);
     add_tree(ws, 32, -6, 1.2f);
     add_tree(ws, -34, 68, 0.9f);
@@ -476,5 +509,6 @@ void ub_demo_place(ub_world *w)
     i32 sss = ub_world_add(W, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
     add_script(sss, "Welcome", k_welcome_script);
     add_script(sss, "PanelServer", k_server_script);
+    add_script(sss, "Lamps", k_lamp_script);
     add_gui(ws, door);
 }

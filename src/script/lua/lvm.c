@@ -138,7 +138,10 @@ void luaV_settable (lua_State *L, const TValue *t, TValue *key, StkId val) {
     const TValue *tm;
     if (ttistable(t)) {  /* `t' is a table? */
       Table *h = hvalue(t);
-      TValue *oldval = luaH_set(L, h, key); /* do a primitive set */
+      TValue *oldval;
+      if (h->readonly)  /* UNIBLOX: table.freeze */
+        luaG_runerror(L, "attempt to modify a readonly table");
+      oldval = luaH_set(L, h, key); /* do a primitive set */
       if (!ttisnil(oldval) ||  /* result is no nil? */
           (tm = fasttm(L, h->metatable, TM_NEWINDEX)) == NULL) { /* or no TM? */
         setobj2t(L, oldval, val);
@@ -680,12 +683,25 @@ void luaV_execute (lua_State *L, int nexeccalls) {
       }
       case OP_TFORLOOP: {
         StkId cb = ra + 3;  /* call base */
+        /* UNIBLOX: Luau's generalized iteration: `for k, v in t' over a
+        ** table that cannot be called walks it as next() would (the array
+        ** part first, in order) */
+        if (ttistable(ra) && ttisnil(luaT_gettmbyobj(L, ra, TM_CALL))) {
+          int more, k, nres = GETARG_C(i);
+          setobjs2s(L, cb, ra+2);  /* the last key */
+          Protect(more = luaH_next(L, hvalue(ra), cb));
+          cb = RA(i) + 3;
+          if (more) { for (k = 2; k < nres; ++k) setnilvalue(cb+k); }
+          else setnilvalue(cb);
+        }
+        else {
         setobjs2s(L, cb+2, ra+2);
         setobjs2s(L, cb+1, ra+1);
         setobjs2s(L, cb, ra);
         L->top = cb+3;  /* func. + 2 args (state and index) */
         Protect(luaD_call(L, cb, GETARG_C(i)));
         L->top = L->ci->top;
+        }
         cb = RA(i) + 3;  /* previous call may change the stack */
         if (!ttisnil(cb)) {  /* continue loop? */
           setobjs2s(L, cb-1, cb);  /* save control variable */

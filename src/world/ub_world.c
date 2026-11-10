@@ -818,7 +818,9 @@ static ub_load_result load_props(ub_world *w, const u8 *p, u32 len, u32 inst_cou
             else {
                 memcpy(&v.v.d, r.p + r.pos, 8);
                 r.pos += 8;
-                if (!(v.v.d >= -1.0e300 && v.v.d <= 1.0e300)) v.v.d = 0;
+                /* only attributes ("@Name") may be infinite or NaN, as scripts can make them */
+                const char *kn = ub_world_key_name(w, keys[key]);
+                if (!(v.v.d >= -1.0e300 && v.v.d <= 1.0e300) && !(kn && kn[0] == '@')) v.v.d = 0;
             }
             break;
         case UB_PV_STRING: {

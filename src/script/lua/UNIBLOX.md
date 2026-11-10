@@ -25,3 +25,26 @@ Every change is marked `UNIBLOX` in the source.
     strings (`(""):rep(1e9)` would otherwise loop a billion times).
 - `llex.c`, `lparser.c`: the compound assignments of Roblox's Luau (`+=`
   `-=` `*=` `/=` `%=` `^=` `..=`) and `continue` in loops.
+- `llex.c`, `lparser.c` (milestone 8B): the rest of Luau's 2022 syntax.
+  Type annotations are parsed and dropped, as Roblox's VM ignores them:
+  `local x: T`, typed parameters, `...: T`, return types, generic `<T>`
+  on functions, `for i: number = ...`, `type Name<T> = ...`,
+  `export type`, and `expr :: T` casts (new tokens `::` and `->`). Also
+  if-then-else expressions, `0b` binary literals, `_` digit separators,
+  and the `\x`, `\z` and `\u{...}` string escapes.
+- `lvm.c` (OP_TFORLOOP): generalized iteration, `for k, v in t do` over a
+  table that cannot be called, walks it like `next`.
+- `lobject.h`, `ltable.c`, `lvm.c`, `lapi.c` (milestone 8B): Luau's
+  `table.freeze`. Tables have a `readonly` byte; assigning to a frozen
+  table (also through `rawset`, `table.insert` and `setmetatable`) raises
+  "attempt to modify a readonly table". `lua_setreadonly` and
+  `lua_getreadonly` reach it.
+- `lapi.c` (milestone 8B): `lua_resetthread`, which ends a suspended or
+  failed coroutine for `coroutine.close`, and `lua_getparams`, the
+  parameter count of a Lua function for `debug.info(f, "a")`.
+- `lstrlib.c` (milestone 8B): `string.format("%s", x)` accepts any value,
+  through `__tostring` or the usual `tostring` text, as Luau does.
+
+The rest of Luau's library (bit32, utf8, Random, DateTime, os.date,
+string.pack and the others) is written outside the Lua sources, in
+`src/script/ub_luaulib.c`.

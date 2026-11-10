@@ -41,6 +41,7 @@ const char *const luaX_tokens [] = {
     "return", "then", "true", "until", "while",
     "..", "...", "==", ">=", "<=", "~=",
     "+=", "-=", "*=", "/=", "%=", "^=", "..=",  /* UNIBLOX */
+    "::", "->",  /* UNIBLOX */
     "<number>", "<name>", "<string>", "<eof>",
     NULL
 };
@@ -196,12 +197,28 @@ static void read_numeral (LexState *ls, SemInfo *seminfo) {
   lua_assert(isdigit(ls->current));
   do {
     save_and_next(ls);
-  } while (isdigit(ls->current) || ls->current == '.');
+  } while (isdigit(ls->current) || ls->current == '.' || ls->current == '_');
   if (check_next(ls, "Ee"))  /* `E'? */
     check_next(ls, "+-");  /* optional exponent sign */
   while (isalnum(ls->current) || ls->current == '_')
     save_and_next(ls);
   save(ls, '\0');
+  {  /* UNIBLOX: Luau's digit separators (1_000_000) and binary literals (0b1010) */
+    char *b = luaZ_buffer(ls->buff), *d = b, *q;
+    for (q = b; *q; ++q)
+      if (*q != '_') *d++ = *q;
+    *d = '\0';
+    if (b[0] == '0' && (b[1] == 'b' || b[1] == 'B')) {
+      lua_Number n = 0;
+      if (!b[2]) luaX_lexerror(ls, "malformed number", TK_NUMBER);
+      for (q = b + 2; *q; ++q) {
+        if (*q != '0' && *q != '1') luaX_lexerror(ls, "malformed number", TK_NUMBER);
+        n = n * 2 + (*q - '0');
+      }
+      seminfo->r = n;
+      return;
+    }
+  }
   buffreplace(ls, '.', ls->decpoint);  /* follow locale for decimal point */
   if (!luaO_str2d(luaZ_buffer(ls->buff), &seminfo->r))  /* format error? */
     trydecpoint(ls, seminfo); /* try to update decimal point separator */
@@ -301,6 +318,54 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
           case '\n':  /* go through */
           case '\r': save(ls, '\n'); inclinenumber(ls); continue;
           case EOZ: continue;  /* will raise an error next loop */
+          /* UNIBLOX: Luau's (and Lua 5.2's) \xXX, \z and \u{XXXX} */
+          case 'x': {
+            int i;
+            c = 0;
+            for (i = 0; i < 2; ++i) {
+              next(ls);
+              if (!isxdigit(ls->current))
+                luaX_lexerror(ls, "hexadecimal digit expected", TK_STRING);
+              c = c * 16 + (isdigit(ls->current) ? ls->current - '0' : (tolower(ls->current) - 'a' + 10));
+            }
+            break;
+          }
+          case 'z': {
+            next(ls);
+            while (isspace(ls->current)) {
+              if (currIsNewline(ls)) inclinenumber(ls);
+              else next(ls);
+            }
+            continue;
+          }
+          case 'u': {
+            unsigned long cp = 0;
+            int digits = 0;
+            next(ls);
+            if (ls->current != '{') luaX_lexerror(ls, "missing '{' in \\u{xxxx}", TK_STRING);
+            next(ls);
+            while (isxdigit(ls->current)) {
+              cp = cp * 16 + (isdigit(ls->current) ? ls->current - '0' : (tolower(ls->current) - 'a' + 10));
+              if (cp > 0x10FFFFUL) luaX_lexerror(ls, "UTF-8 value too large", TK_STRING);
+              digits++;
+              next(ls);
+            }
+            if (!digits || ls->current != '}') luaX_lexerror(ls, "missing '}' in \\u{xxxx}", TK_STRING);
+            next(ls);
+            if (cp < 0x80) save(ls, (int)cp);
+            else if (cp < 0x800) { save(ls, (int)(0xC0 | (cp >> 6))); save(ls, (int)(0x80 | (cp & 0x3F))); }
+            else if (cp < 0x10000) {
+              save(ls, (int)(0xE0 | (cp >> 12)));
+              save(ls, (int)(0x80 | ((cp >> 6) & 0x3F)));
+              save(ls, (int)(0x80 | (cp & 0x3F)));
+            } else {
+              save(ls, (int)(0xF0 | (cp >> 18)));
+              save(ls, (int)(0x80 | ((cp >> 12) & 0x3F)));
+              save(ls, (int)(0x80 | ((cp >> 6) & 0x3F)));
+              save(ls, (int)(0x80 | (cp & 0x3F)));
+            }
+            continue;
+          }
           default: {
             if (!isdigit(ls->current))
               save_and_next(ls);  /* handles \\, \", \', and \? */
@@ -344,6 +409,7 @@ static int llex (LexState *ls, SemInfo *seminfo) {
       case '-': {
         next(ls);
         if (ls->current == '=') { next(ls); return TK_MINUSEQ; }  /* UNIBLOX */
+        if (ls->current == '>') { next(ls); return TK_ARROW; }  /* UNIBLOX: Luau function types */
         if (ls->current != '-') return '-';
         /* else is a comment */
         next(ls);
@@ -389,6 +455,11 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         next(ls);
         if (ls->current != '=') return '~';
         else { next(ls); return TK_NE; }
+      }
+      case ':': {  /* UNIBLOX: `::' (Luau's type cast) */
+        next(ls);
+        if (ls->current != ':') return ':';
+        else { next(ls); return TK_DBCOLON; }
       }
       /* UNIBLOX: += *= /= %= ^= */
       case '+': case '*': case '/': case '%': case '^': {

@@ -786,6 +786,30 @@ static void addintlen (char *form) {
 }
 
 
+/* UNIBLOX: %s takes any value, through tostring, as Luau's does */
+static const char *tostr_arg (lua_State *L, int arg, size_t *l) {
+  luaL_checkany(L, arg);
+  if (luaL_callmeta(L, arg, "__tostring")) {
+    if (!lua_isstring(L, -1))
+      luaL_error(L, "'__tostring' must return a string");
+    lua_replace(L, arg);
+  }
+  else switch (lua_type(L, arg)) {
+    case LUA_TNUMBER: case LUA_TSTRING: break;
+    case LUA_TNIL: lua_pushliteral(L, "nil"); lua_replace(L, arg); break;
+    case LUA_TBOOLEAN:
+      lua_pushstring(L, lua_toboolean(L, arg) ? "true" : "false");
+      lua_replace(L, arg);
+      break;
+    default:
+      lua_pushfstring(L, "%s: %p", luaL_typename(L, arg), lua_topointer(L, arg));
+      lua_replace(L, arg);
+      break;
+  }
+  return lua_tolstring(L, arg, l);
+}
+
+
 static int str_format (lua_State *L) {
   int top = lua_gettop(L);
   int arg = 1;
@@ -831,7 +855,7 @@ static int str_format (lua_State *L) {
         }
         case 's': {
           size_t l;
-          const char *s = luaL_checklstring(L, arg, &l);
+          const char *s = tostr_arg(L, arg, &l);
           if (!strchr(form, '.') && l >= 100) {
             /* no precision and string is too long to be formatted;
                keep original string */

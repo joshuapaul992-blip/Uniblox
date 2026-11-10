@@ -68,6 +68,8 @@ void ub_gui_free(ub_gui *g);
 /* The instance whose LayerCollectors are the screen's (the player's
  * PlayerGui), or -1. */
 void ub_gui_set_root(ub_gui *g, i32 player_gui);
+/* A second root drawn like the PlayerGui (the engine's own GUIs: prompts). */
+void ub_gui_set_core_root(ub_gui *g, i32 core_gui);
 
 /* Each frame, before scripts run: lays out what changed, handles the
  * mouse and keyboard and queues events. `cam` (may be NULL) places
