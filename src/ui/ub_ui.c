@@ -294,7 +294,8 @@ void ui_end(void)
 
 bool ui_wants_mouse(void)
 {
-    return U.over_cur || U.over_prev || U.top_prev > LAYER_BASE || U.top_cur > LAYER_BASE || U.active != 0;
+    /* (called before the frame's widgets: over_cur is still last frame's) */
+    return U.over_cur || U.top_prev > LAYER_BASE || U.top_cur > LAYER_BASE || U.active != 0;
 }
 
 bool ui_wants_keyboard(void) { return U.focus != 0; }
@@ -371,8 +372,21 @@ void ui_panel_end(void)
     else no_clip();
 }
 
+int ui_panel_scroll(void) { return U.scroll ? *U.scroll : 0; }
+int ui_tree_row_height(void) { return U.lh + 2 + 3; }
+
+/* a row of columns left unfinished ends here */
+static void finish_row(void)
+{
+    if (U.cols) {
+        U.y = U.row_y + U.row_h + 3;
+        U.cols = 0;
+    }
+}
+
 void ui_columns(int n)
 {
+    finish_row();
     U.cols = n > 1 ? n : 0;
     U.col_i = 0;
     U.col_w = n > 1 ? (U.inner_w - U.indent - (n - 1) * 4) / n : 0;
@@ -380,7 +394,11 @@ void ui_columns(int n)
     U.row_h = 0;
 }
 
-void ui_space(int px) { U.y += px; }
+void ui_space(int px)
+{
+    finish_row();
+    U.y += px;
+}
 void ui_indent(int px) { U.indent = UB_MAX(0, U.indent + px); }
 
 ui_rect ui_next_rect(int h)
@@ -697,7 +715,7 @@ bool ui_choice(const char *label, int *sel, const char *const *items, int count)
     record(id, label, r);
     int f = interact(id, vr);
     frame_rect(vr, (f & F_HOVER) ? UI_HOVER : UI_WIDGET, UI_BORDER);
-    const char *cur = *sel >= 0 && *sel < count ? items[*sel] : "-";
+    const char *cur = *sel >= 0 && *sel < count ? items[*sel] : "Choose...";
     text_in(ui_r(vr.x, vr.y, vr.w - 14, vr.h), 4, cur, UI_TEXT);
     ub_render_text(vr.x + vr.w - 12, vr.y + (vr.h - U.lh) / 2 + 1, "v", UI_DIM | UB_TEXT_FLAT);
     if (f & F_CLICK) {

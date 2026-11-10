@@ -13,6 +13,8 @@
 
 #define W (&e->world)
 
+static void clear_sel(ub_editor *e);
+
 static bool str_eq(const char *a, const char *b)
 {
     while (*a && *a == *b) {
@@ -99,6 +101,7 @@ static ub_part make_part(u8 shape, vec3 pos, vec3 size, u32 color, u8 material)
 
 void ed_new_place(ub_editor *e)
 {
+    e->scene_version++;
     ub_world_free(W);
     ub_world_init(W);
     ub_fmt(W->name, sizeof W->name, "New place");
@@ -109,7 +112,7 @@ void ed_new_place(ub_editor *e)
     ub_world_add_part(W, ws, UB_CLASS_PART, NULL, "Baseplate", &base);
     ub_part sp = make_part(UB_SHAPE_BOX, v3(0, 0.5f, 0), v3(6, 1, 6), 0xA3A2A5, UB_MAT_PLASTIC);
     ub_world_add_part(W, ws, UB_CLASS_SPAWN, "SpawnLocation", "SpawnLocation", &sp);
-    e->sel_count = 0;
+    clear_sel(e);
     e->sel_version++;
     e->version++;
     e->dirty = false;
@@ -132,11 +135,13 @@ void ed_free(ub_editor *e)
     ub_world_free(W);
     ub_world_free(&e->clip);
     plat_free(e->sel);
+    plat_free(e->sel_mark);
     memset(e, 0, sizeof *e);
 }
 
 ub_load_result ed_load(ub_editor *e, const u8 *data, u32 size, bool roblox)
 {
+    e->scene_version++;
     ub_world w;
     ub_world_init(&w);
     ub_import_stats st;
@@ -148,7 +153,7 @@ ub_load_result ed_load(ub_editor *e, const u8 *data, u32 size, bool roblox)
     ub_world_free(W);
     *W = w;
     ub_world_workspace(W);
-    e->sel_count = 0;
+    clear_sel(e);
     e->sel_version++;
     e->version++;
     e->dirty = false;
@@ -176,38 +181,69 @@ bool ed_play_world(const ub_editor *e, ub_world *out)
 
 /* ---------------------------------------------------------- selection */
 
+static void clear_sel(ub_editor *e)
+{
+    for (i32 i = 0; i < e->sel_count; ++i)
+        if (e->sel[i] >= 0 && e->sel[i] < e->sel_mark_cap) e->sel_mark[e->sel[i]] = 0;
+    e->sel_count = 0;
+}
+
+static bool mark(ub_editor *e, i32 inst, u8 v)
+{
+    if (inst >= e->sel_mark_cap) {
+        i32 nc = inst + 1024;
+        u8 *n = (u8 *)plat_alloc((size_t)nc);
+        if (!n) return false;
+        if (e->sel_mark) {
+            memcpy(n, e->sel_mark, (size_t)e->sel_mark_cap);
+            plat_free(e->sel_mark);
+        }
+        e->sel_mark = n;
+        e->sel_mark_cap = nc;
+    }
+    e->sel_mark[inst] = v;
+    return true;
+}
+
 void ed_select_none(ub_editor *e)
 {
     if (e->sel_count) e->sel_version++;
-    e->sel_count = 0;
+    clear_sel(e);
 }
 
 bool ed_selected(const ub_editor *e, i32 inst)
 {
-    for (i32 i = 0; i < e->sel_count; ++i)
-        if (e->sel[i] == inst) return true;
-    return false;
+    return inst >= 0 && inst < e->sel_mark_cap && e->sel_mark[inst];
 }
 
 void ed_select(ub_editor *e, i32 inst, bool add)
 {
     if (!ub_world_alive(W, inst)) return;
     e->sel_version++;
-    if (!add) e->sel_count = 0;
-    for (i32 i = 0; i < e->sel_count; ++i)
-        if (e->sel[i] == inst) { /* toggle off */
-            e->sel[i] = e->sel[--e->sel_count];
-            return;
-        }
-    if (!grow((void **)&e->sel, &e->sel_cap, e->sel_count + 1, sizeof(i32))) return;
+    if (!add) clear_sel(e);
+    if (ed_selected(e, inst)) { /* toggle off */
+        for (i32 i = 0; i < e->sel_count; ++i)
+            if (e->sel[i] == inst) {
+                memmove(e->sel + i, e->sel + i + 1, sizeof(i32) * (size_t)(e->sel_count - i - 1));
+                e->sel_count--;
+                break;
+            }
+        e->sel_mark[inst] = 0;
+        return;
+    }
+    if (!grow((void **)&e->sel, &e->sel_cap, e->sel_count + 1, sizeof(i32)) || !mark(e, inst, 1)) return;
     e->sel[e->sel_count++] = inst;
 }
 
 void ed_select_all(ub_editor *e)
 {
-    e->sel_count = 0;
+    clear_sel(e);
     i32 ws = ub_world_workspace(W);
-    for (i32 c = W->inst[ws].first_child; c >= 0; c = W->inst[c].next_sibling) ed_select(e, c, true);
+    for (i32 c = W->inst[ws].first_child; c >= 0; c = W->inst[c].next_sibling) {
+        if (!ub_world_alive(W, c) || !grow((void **)&e->sel, &e->sel_cap, e->sel_count + 1, sizeof(i32)) || !mark(e, c, 1))
+            continue;
+        e->sel[e->sel_count++] = c;
+    }
     e->sel_version++;
 }
 
@@ -346,6 +382,7 @@ static bool take_snapshot(ub_editor *e, ed_snapshot *s, const char *what)
 
 static bool restore_snapshot(ub_editor *e, const ed_snapshot *s)
 {
+    e->scene_version++;
     ub_world w;
     ub_world_init(&w);
     if (ub_ubx_load(&w, s->data, s->size) != UB_LOAD_OK) {
@@ -355,7 +392,7 @@ static bool restore_snapshot(ub_editor *e, const ed_snapshot *s)
     ub_world_free(W);
     *W = w;
     ub_world_workspace(W);
-    e->sel_count = 0;
+    clear_sel(e);
     for (i32 i = 0; i < s->sel_count; ++i) ed_select(e, s->sel[i], true);
     e->sel_version++;
     e->version++;
@@ -470,6 +507,7 @@ static i32 container(const ub_editor *e)
 
 i32 ed_insert(ub_editor *e, ed_insert_kind kind, vec3 pos)
 {
+    e->scene_version++;
     if (kind >= ED_INS_COUNT) return -1;
     ed_checkpoint(e, "Insert");
     i32 idx;
@@ -610,6 +648,7 @@ const char *ed_behaviour_source(ed_behaviour b) { return b < ED_BEH_COUNT ? k_be
 
 int ed_add_behaviour(ub_editor *e, ed_behaviour b)
 {
+    e->scene_version++;
     if (b >= ED_BEH_COUNT) return 0;
     i32 n;
     i32 *parts = sel_parts(e, &n);
@@ -650,6 +689,7 @@ static void destroy_now(ub_editor *e, i32 root)
 
 void ed_delete(ub_editor *e)
 {
+    e->scene_version++;
     i32 *roots = (i32 *)plat_alloc(sizeof(i32) * (size_t)(e->sel_count + 1));
     if (!roots) return;
     i32 n = sel_roots(e, roots), k = 0;
@@ -658,7 +698,7 @@ void ed_delete(ub_editor *e)
     for (i32 i = 0; i < n; ++i)
         if (deletable(e, roots[i])) destroy_now(e, roots[i]);
     plat_free(roots);
-    e->sel_count = 0;
+    clear_sel(e);
     e->sel_version++;
 }
 
@@ -749,6 +789,7 @@ static void offset_copies(ub_editor *e, const i32 *roots, i32 n)
 
 void ed_duplicate(ub_editor *e)
 {
+    e->scene_version++;
     i32 *roots = (i32 *)plat_alloc(sizeof(i32) * (size_t)(e->sel_count + 1));
     i32 *made = (i32 *)plat_alloc(sizeof(i32) * (size_t)(e->sel_count + 1));
     if (!roots || !made) {
@@ -766,7 +807,7 @@ void ed_duplicate(ub_editor *e)
         made[m++] = c;
     }
     offset_copies(e, made, m);
-    e->sel_count = 0;
+    clear_sel(e);
     for (i32 i = 0; i < m; ++i) ed_select(e, made[i], true);
     plat_free(roots);
     plat_free(made);
@@ -774,6 +815,7 @@ void ed_duplicate(ub_editor *e)
 
 void ed_paste(ub_editor *e)
 {
+    e->scene_version++;
     if (!e->has_clip) return;
     ed_checkpoint(e, "Paste");
     i32 parent = container(e);
@@ -786,7 +828,7 @@ void ed_paste(ub_editor *e)
     }
     if (made) {
         offset_copies(e, made, m);
-        e->sel_count = 0;
+        clear_sel(e);
         for (i32 i = 0; i < m; ++i) ed_select(e, made[i], true);
     }
     plat_free(made);
@@ -796,6 +838,7 @@ void ed_paste(ub_editor *e)
 
 void ed_group(ub_editor *e)
 {
+    e->scene_version++;
     i32 *roots = (i32 *)plat_alloc(sizeof(i32) * (size_t)(e->sel_count + 1));
     if (!roots) return;
     i32 n = sel_roots(e, roots), k = 0;
@@ -815,6 +858,7 @@ void ed_group(ub_editor *e)
 
 void ed_ungroup(ub_editor *e)
 {
+    e->scene_version++;
     i32 *roots = (i32 *)plat_alloc(sizeof(i32) * (size_t)(e->sel_count + 1));
     if (!roots) return;
     i32 n = sel_roots(e, roots);
@@ -824,7 +868,7 @@ void ed_ungroup(ub_editor *e)
         if (!deletable(e, g) || (W->inst[g].cls != UB_CLASS_MODEL && W->inst[g].cls != UB_CLASS_FOLDER)) continue;
         if (!any) {
             ed_checkpoint(e, "Ungroup");
-            e->sel_count = 0;
+            clear_sel(e);
             any = true;
         }
         i32 parent = W->inst[g].parent;

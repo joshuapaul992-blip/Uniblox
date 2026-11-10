@@ -43,6 +43,8 @@ typedef struct {
     ub_world world;
     i32 *sel;            /* selected instances */
     i32 sel_count, sel_cap;
+    u8 *sel_mark;        /* per instance: selected (fast lookups in big places) */
+    i32 sel_mark_cap;
 
     ed_snapshot undo[ED_UNDO_MAX], redo[ED_UNDO_MAX];
     int undo_n, redo_n;
@@ -57,6 +59,7 @@ typedef struct {
     bool dirty;          /* changed since loaded or saved */
     u32 version;         /* counts changes to the place */
     u32 sel_version;     /* counts changes to the selection */
+    u32 scene_version;   /* counts changes that can touch unselected things (redraw everything) */
 } ub_editor;
 
 void ed_init(ub_editor *e);          /* a new place: baseplate, spawn, lighting */

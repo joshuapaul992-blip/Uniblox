@@ -351,7 +351,7 @@ int main(int argc, char **argv)
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "fmt", test_fmt }, { "utf", test_utf }, { "path", test_path },
         { "math", test_math }, { "wav", test_wav }, { "mixer", test_mixer },
-        { "crt", test_crt }, { "compress", test_compress }, { "world", test_world }, { "physics", test_physics }, { "libc", test_libc }, { "script", test_script }, { "game", test_game }, { "ui", test_ui }, { "editor", test_editor }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render }, { "render 2d", test_render_2d },
+        { "crt", test_crt }, { "compress", test_compress }, { "world", test_world }, { "physics", test_physics }, { "libc", test_libc }, { "script", test_script }, { "game", test_game }, { "ui", test_ui }, { "editor", test_editor }, { "editor app", test_editor_app }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render }, { "render 2d", test_render_2d },
         { "render fuzz", test_render_fuzz }, { "meshes", test_meshes },
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; ++i) {

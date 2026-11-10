@@ -27,6 +27,7 @@ void test_script(void);
 void test_game(void);
 void test_ui(void);
 void test_editor(void);
+void test_editor_app(void);
 void test_vec(void);
 void test_palette(void);
 void test_render(void);

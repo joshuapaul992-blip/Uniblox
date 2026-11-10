@@ -18,6 +18,7 @@
  * frame rate. The demo place's door, spinner, lava and ball button are
  * scripts. */
 #include "app/app.h"
+#include "app/app_play.h"
 #include "audio/ub_mixer.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
@@ -33,12 +34,10 @@
 #include "crt/ub_crt.h"
 
 #define WORLD_LIMIT 100000.0f
-#define TURN_SPEED 1.8f        /* radians/s for arrow keys */
-#define LOOK_SENSITIVITY 0.006f
-#define PITCH_MIN (-1.35f)
-#define PITCH_MAX 0.35f
-#define ZOOM_MIN 6.0f
-#define ZOOM_MAX 60.0f
+#define PITCH_MIN PLAY_PITCH_MIN
+#define PITCH_MAX PLAY_PITCH_MAX
+#define ZOOM_MIN PLAY_ZOOM_MIN
+#define ZOOM_MAX PLAY_ZOOM_MAX
 #define CONFIG_PATH "uniblox.cfg"
 #define TYPED_MAX 40
 #define BENCH_SECONDS 10
@@ -50,9 +49,7 @@ static ub_game g_game;                /* the running place */
 static bool g_game_on;
 #define GW (&g_game.world)
 static bool g_run_scripts = true;     /* scripts= in the config */
-static ub_part_draw *g_statics;       /* visible parts nothing has moved or changed, handed to the renderer */
-static int g_static_count, g_static_cap;
-static f32 g_death_t;                 /* how far the character has fallen over */
+static ub_play_view g_view;           /* camera, controls, the character's figure, the static set */
 static vec3 g_bench_center;
 static bool g_demo_world;
 static ub_import_stats g_import;
@@ -61,10 +58,9 @@ static char g_place_arg[260];         /* place from the command line or config *
 static char g_cfg_place[260];         /* place= from the config, written back on exit */
 static char g_status[160];            /* last load/save message for the overlay */
 
-static f32 g_facing;                  /* player yaw */
-static f32 g_walk_phase, g_walk_amount;  /* limb swing animation */
-static f32 g_yaw, g_pitch = -0.35f;   /* camera angles around the player */
-static f32 g_zoom = 22.0f;            /* camera distance */
+#define g_yaw g_view.yaw
+#define g_pitch g_view.pitch
+#define g_zoom g_view.zoom
 static f32 g_time;
 static bool g_muted;
 static int g_colors_cfg;              /* 0 = automatic, 8 or 32 = chosen with F8 */
@@ -93,18 +89,6 @@ static char g_bench_result[160];
 
 /* --------------------------------------------------------------- scene */
 
-static ub_part_draw part_draw(const ub_part *p)
-{
-    ub_part_draw d;
-    d.pos = p->pos;
-    d.rot = p->rot;
-    d.size = p->size;
-    d.color = p->color;
-    d.shape = p->shape;
-    d.material = p->material;
-    d.flags = (u8)(((p->flags & UB_PART_GLOW) ? UB_DRAW_GLOW : 0) | ub_draw_see_through(p->transparency));
-    return d;
-}
 
 static void build_demo_world(void)
 {
@@ -114,23 +98,6 @@ static void build_demo_world(void)
     g_imported = false;
 }
 
-/* The static set: visible parts nothing has moved or changed. Rebuilt when
- * a part leaves it (a script changes it, physics moves it). */
-static void rebuild_statics(void)
-{
-    if (g_static_cap < GW->part_count + 1) {
-        plat_free(g_statics);
-        g_static_cap = GW->part_count + 1024;
-        g_statics = (ub_part_draw *)plat_alloc(sizeof(ub_part_draw) * (size_t)g_static_cap);
-        if (!g_statics) g_static_cap = 0;
-    }
-    g_static_count = 0;
-    for (i32 i = 0; i < GW->part_count && g_statics; ++i)
-        if (ub_game_part_visible(&g_game, i) && !ub_game_part_live(&g_game, i))
-            g_statics[g_static_count++] = part_draw(&GW->parts[i]);
-    ub_render_set_static(g_statics, g_static_count);
-    g_game.statics_dirty = false;
-}
 
 /* After building or loading g_world: run it (the game takes it over). */
 static void world_changed(void)
@@ -138,16 +105,15 @@ static void world_changed(void)
     ub_render_set_static(NULL, 0);
     if (g_game_on) ub_game_stop(&g_game);
     g_game_on = ub_game_start(&g_game, &g_world, g_run_scripts);
-    rebuild_statics();
+    play_view_reset(&g_view, &g_game);
     g_bench_center = g_demo_world ? v3(0, 3, 40) : v3_add(g_game.spawn, v3(0, 3, 0));
-    g_death_t = 0;
     char title[128];
     ub_fmt(title, sizeof title, "Uniblox - %s", GW->name);
     plat_set_title(title);
     ub_script_stats st;
     ub_script_get_stats(&st);
     ub_info("world: \"%s\", %d instances, %d parts drawn (%d live), spawn at %d,%d,%d; %u script(s) running%s",
-            GW->name, GW->count, g_static_count, g_game.live_count, ub_roundf(g_game.spawn.x),
+            GW->name, GW->count, g_view.static_count, g_game.live_count, ub_roundf(g_game.spawn.x),
             ub_roundf(g_game.spawn.y), ub_roundf(g_game.spawn.z), g_game.scripts ? st.scripts : 0u,
             g_run_scripts ? "" : " (scripts are off: scripts=0 in uniblox.cfg)");
 }
@@ -240,32 +206,6 @@ static void save_place(void)
     ub_fmt(g_status, sizeof g_status, "%s %s", ok ? "Saved" : "Could not save", path);
 }
 
-/* Roblox-style lighting -> renderer environment: sun position from the
- * clock time and latitude (equinox), fog from FogEnd. */
-static ub_render_env env_from_world(void)
-{
-    ub_render_env e = ub_render_default_env();
-    const ub_lighting *l = &GW->lighting;
-    f32 h = (l->clock_time - 12.0f) * (UB_PI / 12.0f);        /* hour angle */
-    f32 lat = l->latitude * (UB_PI / 180.0f);
-    /* east = +X, north = +Z here (Roblox's north is -Z; Z is flipped) */
-    vec3 sun = v3(-ub_sinf(h), ub_cosf(lat) * ub_cosf(h), -ub_sinf(lat) * ub_cosf(h));
-    f32 day = ub_clampf((sun.y + 0.05f) / 0.25f, 0.0f, 1.0f);  /* fades out at dusk */
-    if (sun.y < 0.12f) sun.y = 0.12f;                           /* keep some modelling at night */
-    e.sun_dir = v3_normalize(sun);
-    f32 b = ub_clampf(l->brightness / 2.0f, 0.4f, 1.5f) * (0.15f + 0.85f * day);
-    e.sun_strength *= b;
-    u32 sc = e.sun_color;
-    u32 r = (u32)UB_MIN(255.0f, (f32)((sc >> 16) & 255) * b), g = (u32)UB_MIN(255.0f, (f32)((sc >> 8) & 255) * b),
-        bl = (u32)UB_MIN(255.0f, (f32)(sc & 255) * b);
-    e.sun_color = (r << 16) | (g << 8) | bl;
-    if (day < 1.0f) { /* dusk/night sky */
-        e.sky_top = 0x0B1630;
-        e.sky_horizon = day > 0.3f ? 0xE0905A : 0x1C2A48;
-    }
-    e.fog_density = l->fog_end > 1.0f && l->fog_end < 20000.0f ? 3.0f / l->fog_end : 0.0012f;
-    return e;
-}
 
 /* ------------------------------------------------------------ sounds */
 
@@ -450,55 +390,7 @@ static void save_config(void)
 
 /* --------------------------------------------------------- character */
 
-/* A simple blocky figure: torso, round head, arms and legs that swing
- * while walking. Each limb pivots at its top (shoulder or hip). */
-static void draw_limb(vec3 base, const mat3 *body, vec3 pivot, vec3 size, f32 swing, u32 color,
-                      ub_material mat)
-{
-    mat3 r = mat3_from_euler(0, swing, 0);
-    mat3 rot;   /* body rotation followed by the swing about the pivot */
-    rot.x = mat3_apply(body, r.x);
-    rot.y = mat3_apply(body, r.y);
-    rot.z = mat3_apply(body, r.z);
-    vec3 hang = mat3_apply(&rot, v3(0, -size.y * 0.5f, 0));
-    ub_part_draw p;
-    p.pos = v3_add(v3_add(base, mat3_apply(body, pivot)), hang);
-    p.rot = rot;
-    p.size = size;
-    p.color = color;
-    p.shape = UB_SHAPE_BOX;
-    p.material = (u8)mat;
-    p.flags = 0;
-    ub_render_part(&p);
-}
 
-static void draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amount, f32 fallen)
-{
-    const u32 shirt = 0x2F8F9D, pants = 0x3B3F4A, skin = 0xF0C8A0;
-    mat3 body = mat3_from_euler(facing, -UB_HALF_PI * fallen, 0); /* dead: tipped over backwards */
-    vec3 base = v3(x, y, z);
-    f32 swing = ub_sinf(phase) * 0.7f * amount;
-
-    draw_limb(base, &body, v3(-0.5f, 2.0f, 0), v3(0.9f, 2.0f, 1.0f), swing, pants, UB_MAT_PLASTIC);
-    draw_limb(base, &body, v3(0.5f, 2.0f, 0), v3(0.9f, 2.0f, 1.0f), -swing, pants, UB_MAT_PLASTIC);
-    ub_part_draw torso;
-    torso.pos = v3_add(base, mat3_apply(&body, v3(0, 3.0f, 0)));
-    torso.rot = body;
-    torso.size = v3(2.0f, 2.0f, 1.0f);
-    torso.color = shirt;
-    torso.shape = UB_SHAPE_BOX;
-    torso.material = UB_MAT_PLASTIC;
-    torso.flags = 0;
-    ub_render_part(&torso);
-    draw_limb(base, &body, v3(-1.5f, 4.0f, 0), v3(0.9f, 2.0f, 0.9f), -swing, skin, UB_MAT_PLASTIC);
-    draw_limb(base, &body, v3(1.5f, 4.0f, 0), v3(0.9f, 2.0f, 0.9f), swing, skin, UB_MAT_PLASTIC);
-    ub_part_draw head = torso;
-    head.pos = v3_add(base, mat3_apply(&body, v3(0, 4.75f, 0)));
-    head.size = v3(1.4f, 1.4f, 1.4f);
-    head.color = skin;
-    head.shape = UB_SHAPE_BALL;
-    ub_render_part(&head);
-}
 
 /* ------------------------------------------------------------ app API */
 
@@ -510,6 +402,7 @@ const ub_app_info *app_info(void)
 
 void app_preinit(ub_display_prefs *prefs)
 {
+    play_view_init(&g_view);
     g_prefs = *prefs; /* platform defaults: 120 fps cap, software height 480 */
     plat_command_line_arg(g_place_arg, sizeof g_place_arg); /* "uniblox.exe castle.rbxl" */
     load_config();
@@ -562,9 +455,7 @@ void app_shutdown(void)
     ub_sound_free(&g_snd_land);
     ub_sound_free(&g_snd_click);
     ub_render_set_static(NULL, 0);
-    plat_free(g_statics);
-    g_statics = NULL;
-    g_static_cap = 0;
+    play_view_free(&g_view);
     u32 jumps = g_game.jumps;
     if (g_game_on) ub_game_stop(&g_game);
     g_game_on = false;
@@ -718,42 +609,10 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         plat_set_fps_cap(g_prefs.fps_cap);
     }
 
-    /* --- camera controls --- */
-    bool want_look = in->mouse_down[UB_MOUSE_RIGHT] && in->has_focus && !g_bench;
-    if (want_look != in->mouse_captured) ub_debug("mouse look %s", want_look ? "on" : "off");
-    plat_set_mouse_capture(want_look);
-    g_yaw += (f32)in->mouse_dx * LOOK_SENSITIVITY;
-    g_pitch = ub_clampf(g_pitch - (f32)in->mouse_dy * LOOK_SENSITIVITY, PITCH_MIN, PITCH_MAX);
-    if (play_keys && in->key_down[UB_KEY_LEFT]) g_yaw -= TURN_SPEED * dt;
-    if (play_keys && in->key_down[UB_KEY_RIGHT]) g_yaw += TURN_SPEED * dt;
-    g_yaw = ub_wrap_angle(g_yaw);
-    for (int n = in->wheel; n >= UB_WHEEL_NOTCH; n -= UB_WHEEL_NOTCH) g_zoom *= 0.88f;
-    for (int n = in->wheel; n <= -UB_WHEEL_NOTCH; n += UB_WHEEL_NOTCH) g_zoom /= 0.88f;
-    g_zoom = ub_clampf(g_zoom, ZOOM_MIN, ZOOM_MAX);
-
-    f32 fx = ub_sinf(g_yaw), fz = ub_cosf(g_yaw);
-    f32 rx = fz, rz = -fx;
-
-    /* --- movement, relative to the camera --- */
-    f32 mf = 0, mr = 0;
-    if (play_keys) {
-        if (in->key_down['W'] || in->key_down[UB_KEY_UP]) mf += 1;
-        if (in->key_down['S'] || in->key_down[UB_KEY_DOWN]) mf -= 1;
-        if (in->key_down['D']) mr += 1;
-        if (in->key_down['A']) mr -= 1;
-    }
-    if (mf != 0 && mr != 0) { mf *= 0.7071f; mr *= 0.7071f; }
-    vec3 move = v3(fx * mf + rx * mr, 0, fz * mf + rz * mr);
-    bool moving = mf != 0 || mr != 0;
-    if (moving) {
-        /* turn the character smoothly towards where it is going
-         * (yaw of direction (x, z) is atan2(x, z): yaw 0 faces +Z) */
-        f32 want = ub_atan2f(move.x, move.z);
-        f32 diff = ub_wrap_angle(want - g_facing);
-        g_facing = ub_wrap_angle(g_facing + diff * ub_clampf(dt * 12.0f, 0, 1));
-    }
-    /* Roblox-style: holding Space keeps jumping each time the feet land */
-    bool jump = play_keys && (in->key_down[UB_KEY_SPACE] || in->key_pressed[UB_KEY_SPACE]);
+    /* --- camera controls and movement --- */
+    vec3 move;
+    bool jump;
+    play_view_input(&g_view, in, dt, play_keys, !g_bench, &move, &jump);
 
     /* --- the game: scripts, physics in fixed steps, the character --- */
     ub_game_update(&g_game, dt, move, jump);
@@ -769,17 +628,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         }
         g_game.landed_speed = 0;
     }
-    if (g_game.respawned) {
-        g_game.respawned = false;
-        g_death_t = 0;
-    }
-    g_death_t = g_game.dead ? ub_clampf(g_death_t + dt * 3.0f, 0, 1) : 0;
-    if (g_game.statics_dirty) rebuild_statics();
-    vec3 vel = g_game.phys_ok ? ub_char_velocity(&g_game.chr, &g_game.phys) : v3(0, 0, 0);
-    f32 hspeed = ub_sqrtf(vel.x * vel.x + vel.z * vel.z);
-    bool walking = moving && hspeed > 2.0f && !g_game.dead;
-    g_walk_amount = ub_clampf(g_walk_amount + (walking ? dt : -dt) * 6.0f, 0.0f, 1.0f);
-    if (walking) g_walk_phase = ub_wrap_angle(g_walk_phase + dt * 10.0f * hspeed / UB_CHAR_WALK_SPEED);
+    play_view_update(&g_view, &g_game, dt);
 
     /* --- other input --- */
     if (play_keys && in->key_pressed['M']) {
@@ -814,33 +663,16 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
                      target.z + ub_cosf(a) * dist);
         cam.yaw = ub_wrap_angle(a + UB_PI);
         cam.focus = target;
+        cam.fov_y = 70.0f * UB_PI / 180.0f;
+        cam.far_dist = 600.0f;
     } else {
-        vec3 target = v3_add(g_game.feet, v3(0, 3.5f, 0));
-        cam.yaw = g_yaw;
-        cam.pitch = g_pitch;
-        f32 cp = ub_cosf(g_pitch);
-        vec3 fwd = v3(fx * cp, ub_sinf(g_pitch), fz * cp);
-        cam.pos = v3_sub(target, v3_scale(fwd, g_zoom));
-        cam.focus = target;
+        cam = play_view_camera(&g_view, &g_game);
     }
-    cam.fov_y = 70.0f * UB_PI / 180.0f;
-    cam.far_dist = 600.0f;
 
     /* --- render --- */
-    ub_render_env env = env_from_world();
+    ub_render_env env = play_env(GW);
     ub_render_begin(frame, &cam, &env);
-    /* the static set was handed over (rebuild_statics); live parts here:
-     * moving ones blended between the last two physics steps, and any a
-     * script changed */
-    for (i32 i = 0; i < g_game.live_count; ++i) {
-        i32 pi = g_game.live[i];
-        if (!ub_game_part_visible(&g_game, pi)) continue;
-        ub_part_draw d = part_draw(&GW->parts[pi]);
-        ub_game_part_pose(&g_game, pi, &d.pos, &d.rot);
-        ub_render_part(&d);
-    }
-    if (!g_bench)
-        draw_character(g_game.feet.x, g_game.feet.y, g_game.feet.z, g_facing, g_walk_phase, g_walk_amount, g_death_t);
+    play_view_draw(&g_view, &g_game, !g_bench);
     ub_render_end_scene();
 
     /* --- overlay --- */

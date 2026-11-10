@@ -171,6 +171,62 @@ the chat line to try one more. Parts with a `Transparency` between 0 and 1
 are drawn see-through, with a dither pattern that works in both renderers
 and in 256 colours.
 
+## The editor
+
+`ubedit.exe` is a separate program for building places. It runs on the
+same machines as the game: NT 3.51 and later, either renderer, and 256
+colours. It saves to `places/<name>.ubx`, which `uniblox.exe` plays (open
+one from the command line, or with `place=` in `uniblox.cfg`).
+
+- **Explorer** (left): every object in the place as a tree. Click to
+  select (Ctrl or Shift adds); double-click a script to edit it.
+- **Properties** (right): the selection's name, position, size and
+  orientation, in Roblox's axes, so numbers match scripts and Studio. Also
+  colour, material, shape, transparency, Anchored, CanCollide and Neon.
+  With nothing selected, the place itself: name, time of day, gravity,
+  fall limit and the grid.
+- **The 3D view:** hold the right mouse button to look around, use WASD to
+  fly (Q/E down/up, Shift faster), the wheel to move, and F to look at the
+  selection. Click to select; Alt-click picks a part inside a model. Drag
+  a selected part to slide it along the ground, snapped to the grid.
+- **Tools:** 1 Select, 2 Move (drag the coloured arrows along an axis),
+  3 Scale (pull a face out or in), 4 Rotate. R turns the selection 90
+  degrees and T tips it over.
+- **Insert:** blocks, wedges, corner wedges, cylinders, balls and spawn
+  points from the toolbar or the Insert menu. Models, folders and scripts
+  come from the Insert menu.
+- **Behaviours** make parts do things without writing code. Select parts,
+  then pick one from the Behaviours menu or the Properties panel's
+  *Add behaviour* list:
+  - *Kill brick* knocks the player out.
+  - *Checkpoint*: the player comes back here after falling.
+  - *Finish line* says how long the course took.
+  - *Spinner* turns round and round.
+  - *Mover* slides back and forth, carrying players.
+  - *Disappearing* fades when stepped on, then comes back.
+  - *Bounce pad* launches the player upwards.
+  - *Speed pad* runs the player faster for a few seconds.
+  - *Door* opens when touched.
+
+  Each behaviour is a short, readable Roblox-style script inside the part,
+  so you can open it and change it (its speed, distance or power).
+- **Play test:** F5, or the Play button, runs the place right there with
+  your character and its scripts. F5 or Esc goes back to editing, with the
+  place as it was before you played.
+- **Editing:** undo and redo with Ctrl+Z/Ctrl+Y (64 steps), copy, cut and
+  paste with Ctrl+C/X/V (copies land beside the originals), Ctrl+D
+  duplicates, Delete deletes, Ctrl+G/Ctrl+U group into a model and
+  ungroup, Ctrl+A selects all.
+- **Files:** File > Open lists the places in `places/` and any `.rbxl`,
+  `.rbxm` or `.ubx` next to the program (Roblox places are imported). New
+  and Open ask before throwing away unsaved changes. If you close the
+  window with changes unsaved, they're kept in `places/autosave.ubx`.
+
+The script editor numbers its lines, keeps the indentation when you press
+Enter, and has Tab, Home/End, PgUp/PgDn and Ctrl+Home/End. Big imported
+places stay usable: with 20,000 parts, selecting everything takes about
+70 ms, and a frame with all of them selected about 15 ms.
+
 ## Building (Linux)
 
 Install the 32-bit mingw-w64 cross compiler (Debian/Ubuntu):
@@ -179,7 +235,8 @@ Install the 32-bit mingw-w64 cross compiler (Debian/Ubuntu):
 sudo apt-get install gcc-mingw-w64-i686 binutils-mingw-w64-i686
 ```
 
-Build `build/win32/uniblox.exe` and verify that it can load on NT 3.51:
+Build `build/win32/uniblox.exe` (the game) and `build/win32/ubedit.exe` (the
+editor), and verify that both can load on NT 3.51:
 
 ```bash
 make check
@@ -213,8 +270,8 @@ fallback.
 - **Unit tests** for the OS-independent code (strings, UTF-8, paths, maths,
   WAV loading, audio mixer, palette, the renderer, the C runtime, the LZ4
   and Zstandard decoders, `.ubx` files, the Roblox importer, physics, the
-  character, the C library under Lua, and scripts), compiled natively with
-  AddressSanitizer and UBSan:
+  character, the C library under Lua, scripts, the UI toolkit and the
+  editor), compiled natively with AddressSanitizer and UBSan:
 
   ```bash
   make test
@@ -250,6 +307,25 @@ fallback.
   world and physics stay small. A last one plays the demo place: the door,
   the button, the lava and the chat commands.
 
+  The editor tests build an obstacle course with editor actions only (no
+  code written): a lava floor, platforms over gaps, a checkpoint and a
+  finish line. The place is saved, loaded and played by the character,
+  which jumps the gaps, dies in the lava on purpose, comes back at the
+  checkpoint and reaches the finish. Every behaviour is also checked
+  working in a game. Another test drives the real editor app through its
+  own UI with made-up mouse and keyboard input on the software renderer:
+  - inserting from the toolbar and menus
+  - adding behaviours
+  - typing numbers into the properties
+  - dragging in the 3D view and with the Move and Scale arrows
+  - undo
+  - the script editor
+  - the play test
+  - Save as, New and Open, and the unsaved-changes question
+  - a 20,000-part place
+
+  The UI toolkit is tested the same way.
+
 - **Wine smoke test.** This drives the real `.exe` with keyboard and mouse
   events under Xvfb, then checks the log and settings file. It needs
   `wine` (32-bit), `xvfb-run`, `xdotool` and `imagemagick`, plus 32-bit
@@ -268,6 +344,14 @@ fallback.
   script failed, opens a Roblox place from the command line, saves it with
   F7, and opens the result through `place=`.
 
+  The editor has its own. It clicks through building a place (insert, add
+  a behaviour, open its script, Save as), play-tests it, then checks that
+  `uniblox.exe` opens the saved place and runs its script:
+
+  ```bash
+  tools/wine_smoke_editor.sh nt351 software
+  ```
+
   The first argument is the Windows version Wine pretends to be: `nt351`,
   `nt40`, `win2k` or `winxp`. The second picks the renderer. Wine is
   forgiving, so passing proves the logic works, not that the `.exe` runs on
@@ -282,7 +366,8 @@ fallback.
 |---|---|
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
 | `uniblox.cfg` | Settings saved on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `sw_height`, `colors`, camera, mute, `scripts` (1 runs the place's scripts, 0 doesn't) and `place` |
-| `places/` | Places saved with F7 |
+| `places/` | Places saved with F7 in the game or from the editor (`autosave.ubx`: the editor's unsaved changes when it was closed) |
+| `ubedit.log`, `ubedit.cfg` | The editor's log and settings (`renderer`, `quality`, `gl_shaders`, `fps_cap`, window size, `sw_height`, grid size) |
 | `sounds/jump.wav`, `sounds/land.wav`, `sounds/click.wav` | Optional. Replace the built-in sounds; any PCM 8/16-bit mono/stereo WAV works |
 
 If the folder is read-only (e.g. a CD-ROM), the game still runs; it just

@@ -57,6 +57,8 @@ void ui_indent(int px);      /* add to (or with a negative, take from) the left 
 ui_rect ui_next_rect(int h); /* reserve space for something drawn by the caller */
 /* Treat a rectangle the caller laid out as UI (the mouse belongs to the UI there). */
 void ui_claim(ui_rect r);
+int ui_panel_scroll(void);     /* how far the current panel is scrolled (pixels) */
+int ui_tree_row_height(void);  /* space one ui_tree_row takes */
 
 /* ------------------------------------------------------------ widgets */
 void ui_label(const char *text);
