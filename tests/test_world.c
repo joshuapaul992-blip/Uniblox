@@ -1,3 +1,4 @@
+#include <stdio.h>
 /* Uniblox - tests for the world model, .ubx files and the .rbxl importer. */
 #include <math.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 #include "render/ub_texture.h"
 #include "world/ub_query.h"
 #include "world/ub_rbxl.h"
+#include "world/ub_rbxmesh.h"
+#include "world/ub_looks.h"
 #include "world/ub_classes.h"
 #include "world/ub_world.h"
 #include "test.h"
@@ -789,6 +792,133 @@ static void test_rbx_unions(void)
     }
 }
 
+/* Roblox .mesh files (milestone 8C), built here byte by byte: a pyramid
+ * (5 points, 6 triangles) in versions 1.00, 2.00 and 4.00. */
+static u32 put32(u8 *b, u32 at, u32 v) { b[at] = (u8)v; b[at + 1] = (u8)(v >> 8); b[at + 2] = (u8)(v >> 16); b[at + 3] = (u8)(v >> 24); return at + 4; }
+static u32 putf(u8 *b, u32 at, f32 f) { u32 u; memcpy(&u, &f, 4); return put32(b, at, u); }
+static const f32 k_pyr[5][3] = { { -1, 0, -1 }, { 1, 0, -1 }, { 1, 0, 1 }, { -1, 0, 1 }, { 0, 3, 0 } };
+static const u32 k_pyr_t[6][3] = { { 0, 1, 2 }, { 0, 2, 3 }, { 0, 4, 1 }, { 1, 4, 2 }, { 2, 4, 3 }, { 3, 4, 0 } };
+
+static u32 make_mesh_file(u8 *b, int version)
+{
+    u32 at = 0;
+    if (version == 1) {
+        char *t = (char *)b;
+        at = (u32)sprintf(t, "version 1.01\n6\n");
+        for (int f = 0; f < 6; ++f)
+            for (int k = 0; k < 3; ++k) {
+                const f32 *v = k_pyr[k_pyr_t[f][k]];
+                at += (u32)sprintf(t + at, "[%g,%g,%g][0,1,0][0,0,0]", (double)v[0], (double)v[1], (double)v[2]);
+            }
+        return at;
+    }
+    const char *head = version == 2 ? "version 2.00\n" : "version 4.00\n";
+    memcpy(b, head, 13);
+    at = 13;
+    if (version == 2) {
+        b[at] = 12; b[at + 1] = 0; b[at + 2] = 36; b[at + 3] = 12;
+        put32(b, at + 4, 5);
+        put32(b, at + 8, 6);
+        at += 12;
+    } else {
+        memset(b + at, 0, 24);
+        b[at] = 24;
+        put32(b, at + 4, 5);
+        put32(b, at + 8, 6);
+        b[at + 12] = 2; /* two levels of detail: the first has every face */
+        at += 24;
+    }
+    for (int i = 0; i < 5; ++i) {
+        u32 s = at;
+        at = putf(b, at, k_pyr[i][0]);
+        at = putf(b, at, k_pyr[i][1]);
+        at = putf(b, at, k_pyr[i][2]);
+        while (at < s + (version == 2 ? 36u : 40u)) b[at++] = 0;
+    }
+    for (int f = 0; f < 6; ++f)
+        for (int k = 0; k < 3; ++k) at = put32(b, at, k_pyr_t[f][k]);
+    if (version == 4) {
+        at = put32(b, at, 0);
+        at = put32(b, at, 6);
+    }
+    return at;
+}
+
+static void test_mesh_files(void)
+{
+    static u8 buf[4096];
+    for (int ver = 1; ver <= 4; ver += (ver == 1 ? 1 : 2)) {
+        u32 n = make_mesh_file(buf, ver);
+        f32 *v;
+        u32 nv, nt, *tri;
+        bool ok = ub_rbxmesh_parse(buf, n, &v, &nv, &tri, &nt);
+        CHECK(ok && nt == 6);
+        if (!ok) continue;
+        f32 top = -1e9f;
+        for (u32 i = 0; i < nv; ++i) top = UB_MAX(top, v[i * 3 + 1]);
+        CHECK(fabsf(top - 3.0f) < 1e-4f);
+        plat_free(v);
+        CHECK(!ub_rbxmesh_parse(buf, n / 2, &v, &nv, &tri, &nt)); /* cut short */
+    }
+    /* looks: a MeshPart with its mesh in content/, and a part with a sphere SpecialMesh */
+    plat_make_dir("content");
+    u32 n = make_mesh_file(buf, 2);
+    CHECK(plat_file_write_all("content/4242.mesh", buf, n));
+    ub_world w;
+    ub_world_init(&w);
+    i32 ws = ub_world_add(&w, -1, UB_CLASS_WORKSPACE, "Workspace", "Workspace");
+    ub_part p;
+    memset(&p, 0, sizeof p);
+    p.rot = mat3_identity();
+    p.size = v3(4, 6, 4);
+    p.flags = UB_PART_ANCHORED | UB_PART_CAN_COLLIDE;
+    i32 mp = ub_world_add_part(&w, ws, UB_CLASS_PART, "MeshPart", "Rock", &p);
+    ub_value id = ub_vstr("rbxassetid://4242", 17);
+    ub_world_set_prop_named(&w, mp, "MeshId", &id);
+    i32 missing = ub_world_add_part(&w, ws, UB_CLASS_PART, "MeshPart", "Gone", &p);
+    ub_value id2 = ub_vstr("rbxassetid://999", 16);
+    ub_world_set_prop_named(&w, missing, "MeshId", &id2);
+    i32 ball = ub_world_add_part(&w, ws, UB_CLASS_PART, "Part", "Egg", &p);
+    i32 sm = ub_world_add(&w, ball, UB_CLASS_OTHER, "SpecialMesh", "Mesh");
+    ub_cdb_fill_defaults(&w, sm, "SpecialMesh");
+    ub_value mt = ub_venum(3); /* Sphere */
+    ub_world_set_prop_named(&w, sm, "MeshType", &mt);
+    CHECK(ub_world_resolve_looks(&w) == 2);
+    const ub_part *rock = &w.parts[w.inst[mp].part];
+    CHECK(rock->look != 0 && w.parts[w.inst[missing].part].look == 0 && w.parts[w.inst[ball].part].look != 0);
+    if (rock->look) { /* fitted to the part: the pyramid's top at the cube's top, its base at the bottom */
+        const ub_wmesh *m = ub_world_mesh(&w, rock->look);
+        f32 lo = 1, hi = -1;
+        for (u32 i = 0; i < m->nv; ++i) {
+            lo = UB_MIN(lo, m->v[i * 3 + 1]);
+            hi = UB_MAX(hi, m->v[i * 3 + 1]);
+        }
+        CHECK(fabsf(lo + 0.5f) < 1e-4f && fabsf(hi - 0.5f) < 1e-4f && (m->flags & UB_WMESH_WOUND));
+        const ub_mesh *rm = ub_world_render_mesh(&w, rock->look);
+        /* wound faces point out: the base's normal down, the sides' up and out */
+        bool out = rm != NULL;
+        for (int f = 0; rm && f < rm->face_count; ++f) {
+            vec3 c = v3(0, 0, 0);
+            for (int k = 0; k < 3; ++k) c = v3_add(c, rm->verts[rm->faces[f].v[k]]);
+            c = v3_scale(c, 1.0f / 3.0f);
+            out &= v3_dot(rm->faces[f].normal, v3_sub(c, v3(0, -0.1f, 0))) > 0;
+        }
+        CHECK(out);
+    }
+    /* .ubx keeps looks */
+    u8 *a1, *b1;
+    u32 na, nb;
+    CHECK(ub_ubx_save(&w, &a1, &na));
+    ub_world w2;
+    ub_world_init(&w2);
+    CHECK(ub_ubx_load(&w2, a1, na) == UB_LOAD_OK && w2.mesh_count == w.mesh_count);
+    CHECK(ub_ubx_save(&w2, &b1, &nb) && na == nb && memcmp(a1, b1, na) == 0);
+    plat_free(a1);
+    plat_free(b1);
+    ub_world_free(&w2);
+    ub_world_free(&w);
+}
+
 static void test_rbx_attributes(void);
 static void test_rbx_gui(void)
 {
@@ -801,6 +931,7 @@ static void test_rbx_gui(void)
     for (int i = 0; i < (int)(sizeof models / sizeof models[0]); ++i) check_rbx_props(models[i]);
     test_rbx_attributes();
     test_rbx_unions();
+    test_mesh_files();
 }
 
 static i32 load_model_first(ub_world *w, const char *path, const char *cls)

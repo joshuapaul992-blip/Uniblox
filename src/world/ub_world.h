@@ -41,7 +41,8 @@ typedef struct {
     u8 material;
     u8 transparency;      /* 0 opaque .. 255 invisible */
     u8 flags;             /* UB_PART_* */
-    u16 mesh;             /* 0: drawn as its shape; else meshes[mesh - 1] (unions, MeshParts) */
+    u16 mesh;             /* 0: its shape; else meshes[mesh - 1], for collision and looks (unions, MeshParts) */
+    u16 look;             /* 0: as `mesh`; else meshes[look - 1], for looks only (mesh files, SpecialMesh) */
 } ub_part;
 
 /* A part's own geometry (milestone 8C): triangles in the part's unit cube
@@ -53,10 +54,16 @@ typedef struct {
     u32 *tri;             /* 3 vertex indices per triangle */
     u32 *piece_v, *piece_t; /* per piece: its end vertex and end triangle */
     u32 nv, nt, npieces;
+    u32 flags;            /* UB_WMESH_* */
     u32 hash;
     void *render_cache;   /* the renderer's form of it (one allocation, freed with the world) */
     void *phys_cache;     /* physics' collision hulls (one allocation, freed with the world) */
 } ub_wmesh;
+
+enum {
+    UB_WMESH_WOUND = 1,   /* triangles face the way they are wound (counter-clockwise = outside);
+                             otherwise each faces out of its convex piece */
+};
 
 /* Instance flags. The low byte is saved; the rest only exists while the
  * game runs. */
@@ -314,7 +321,7 @@ void ub_part_sanitize(ub_part *p);
  * identical mesh already there is shared), or 0 if out of memory or
  * invalid. The data is copied. Pieces as in ub_wmesh. */
 u16 ub_world_add_mesh(ub_world *w, const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
-                      const u32 *piece_t, u32 npieces);
+                      const u32 *piece_t, u32 npieces, u32 flags);
 /* The renderer's form of mesh `id` (render/ub_mesh.h), made on first use;
  * NULL if none or out of memory. */
 const struct ub_mesh_s *ub_world_render_mesh(const ub_world *w, u16 id);

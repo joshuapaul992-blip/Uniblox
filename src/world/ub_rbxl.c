@@ -5,6 +5,7 @@
 #include "core/ub_string.h"
 #include "platform/platform.h"
 #include "render/ub_mesh.h"
+#include "world/ub_looks.h"
 #include "render/ub_texture.h"
 #include "crt/ub_crt.h"
 
@@ -1061,6 +1062,10 @@ static ub_load_result chunk_prop(importer *im, rd *r)
                 recs[i].phys_len = sl;
             }
         }
+    } else if (c->k == K_MESH && ((type == 0x01 && name_is(pname, pl, "MeshId")) ||
+                                  (type == 0x22 && name_is(pname, pl, "MeshContent")))) {
+        plat_free(tmp); /* kept as a property ("MeshId", or "Mesh" from the newer Content type) */
+        return data_prop(im, c, pname, pl, type, r);
     } else if (c->k == K_MESH && type == 0x0E && name_is(pname, pl, "InitialSize")) {
         if (rd_interleaved32x3(r, n, tmp))
             for (u32 i = 0; i < n; ++i)
@@ -1318,7 +1323,7 @@ static u16 csg_mesh(ub_world *w, const u8 *d, u32 len, vec3 init)
         pt[pi] = ti;
         pi++;
     }
-    u16 id = ub_world_add_mesh(w, v, nv, tri, nt, pv, pt, np);
+    u16 id = ub_world_add_mesh(w, v, nv, tri, nt, pv, pt, np, 0);
     plat_free(v);
     return id;
 }
@@ -1514,6 +1519,7 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
         ub_fmt(st->compression, sizeof st->compression, "%s%s%s", im.used_zstd ? "zstd" : "",
                im.used_zstd && im.used_lz4 ? "+" : "", im.used_lz4 ? "lz4" : (im.used_zstd ? "" : "none"));
         res = build_world(&im, w, st);
+        if (res == UB_LOAD_OK) st->looks = (u32)ub_world_resolve_looks(w);
         w->lighting = im.light;
         w->lighting.latitude = ub_clampf(w->lighting.latitude, -90.0f, 90.0f);
         w->lighting.clock_time = ub_clampf(w->lighting.clock_time, 0.0f, 24.0f);

@@ -296,35 +296,7 @@ static bool starts(const char *s, const char *p)
 
 bool ub_image_path(const char *content, char *path, int cap, const char *ext)
 {
-    path[0] = 0;
-    const char *s = content;
-    while (*s == ' ') ++s;
-    /* an asset id: rbxassetid://N, ...roblox.com/asset/?id=N, or just N */
-    const char *id = NULL;
-    if (starts(s, "rbxassetid://")) id = s + 13;
-    else if (starts(s, "http://") || starts(s, "https://")) {
-        const char *q = s;
-        while (*q && !(starts(q, "id=") && (q[-1] == '?' || q[-1] == '&'))) ++q;
-        if (*q) id = q + 3;
-    } else if (*s >= '0' && *s <= '9') id = s;
-    if (id) {
-        char num[24];
-        int n = 0;
-        while (id[n] >= '0' && id[n] <= '9' && n < 20) {
-            num[n] = id[n];
-            ++n;
-        }
-        num[n] = 0;
-        if (!n) return false;
-        ub_fmt(path, cap, "content/%s.%s", num, ext);
-        return true;
-    }
-    if (starts(s, "rbxasset://")) {
-        ub_fmt(path, cap, "content/%s", s + 11);
-        for (char *c = path; *c; ++c) if (*c == '\\') *c = '/';
-        return ub_path_is_safe(path);
-    }
-    return false;
+    return ub_content_path(content, path, cap, ext);
 }
 
 #define IMG_SLOTS 256

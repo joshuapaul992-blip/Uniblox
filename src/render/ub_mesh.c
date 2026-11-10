@@ -169,7 +169,7 @@ const ub_mesh *ub_mesh_get(ub_shape s, ub_detail d)
 }
 
 ub_mesh *ub_mesh_from_triangles(const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
-                                const u32 *piece_t, u32 npieces)
+                                const u32 *piece_t, u32 npieces, bool wound)
 {
     if (nv > 0xFFFF) return NULL; /* faces index vertices with 16 bits */
     size_t bytes = sizeof(ub_mesh) + sizeof(vec3) * 2 * nv + sizeof(ub_face) * nt;
@@ -198,7 +198,7 @@ ub_mesh *ub_mesh_from_triangles(const f32 *v, u32 nv, const u32 *tri, u32 nt, co
             ub_face *f = &m->faces[m->face_count++];
             f->count = 3;
             f->smooth = false;
-            bool flip = v3_dot(n, v3_sub(m->verts[a], c)) < 0; /* convex piece: out is away from its middle */
+            bool flip = !wound && v3_dot(n, v3_sub(m->verts[a], c)) < 0; /* convex piece: out is away from its middle */
             f->v[0] = (u16)a;
             f->v[1] = (u16)(flip ? cc : b);
             f->v[2] = (u16)(flip ? b : cc);

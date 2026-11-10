@@ -17,4 +17,10 @@
  * and no component that is a reserved DOS device name (CON, NUL, COM1...). */
 bool ub_path_is_safe(const char *path);
 
+/* The local file for a Roblox content address (milestone 8A/8C): nothing
+ * is downloaded. rbxassetid://N (or a roblox.com asset URL, or a bare
+ * number) -> "content/N.<ext>"; rbxasset://a/b.png -> "content/a/b.png".
+ * False if it names no local file. */
+bool ub_content_path(const char *content, char *path, int cap, const char *ext);
+
 #endif

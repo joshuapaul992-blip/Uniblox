@@ -15,7 +15,8 @@ ub_part_draw play_part_draw(const ub_world *w, const ub_part *p)
 {
     ub_part_draw d;
     memset(&d, 0, sizeof d);
-    d.mesh = p->mesh ? ub_world_render_mesh(w, p->mesh) : NULL;
+    u16 id = p->look ? p->look : p->mesh;
+    d.mesh = id ? ub_world_render_mesh(w, id) : NULL;
     d.pos = p->pos;
     d.rot = p->rot;
     d.size = p->size;

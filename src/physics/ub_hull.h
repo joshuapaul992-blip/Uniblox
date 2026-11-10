@@ -41,6 +41,12 @@ typedef struct {
 /* The hull for a shape; balls (and unknown shapes) get the box. */
 const ub_hull *ub_hull_get(ub_shape s);
 
+/* A convex hull of points (in the unit cube) with the triangles of their
+ * surface: exact when it fits the limits above, else the 18 planes around
+ * the points (a box with its edges bevelled), else their box. False if
+ * the points enclose no volume. (Unions' and MeshParts' pieces.) */
+bool ub_hull_build(ub_hull *h, const vec3 *pts, int n, const u32 *tri, int nt);
+
 /* Mass properties of a part shape of this size, density 1: volume, centre
  * of mass and inertia tensor about the centre of mass, in part space. */
 void ub_shape_mass(ub_shape s, vec3 size, f32 *volume, vec3 *centroid, mat3 *inertia);

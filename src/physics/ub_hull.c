@@ -1,6 +1,7 @@
 #include "physics/ub_hull.h"
 #include "physics/ub_pmath.h"
 #include "core/ub_math.h"
+#include "crt/ub_crt.h"
 
 #define CYL_SIDES 12
 
@@ -198,4 +199,187 @@ void ub_shape_mass(ub_shape s, vec3 size, f32 *volume, vec3 *centroid, mat3 *ine
     *volume = v;
     *centroid = c;
     *inertia = out;
+}
+
+/* ------------------------------------------------- hulls from points
+ * For the convex pieces of unions and MeshParts (milestone 8C). */
+
+#define BUILD_EPS 1e-4f
+
+typedef struct {
+    vec3 n;
+    f32 d;
+} hplane;
+
+/* 2D convex hull (monotone chain) of the points on a plane, as indices,
+ * counter-clockwise in the plane's (u, w) basis, collinear points dropped. */
+static int plane_polygon(const vec3 *pts, int n, const int *on, int count, vec3 normal, int *out)
+{
+    vec3 u = ub_absf(normal.x) < 0.9f ? v3(1, 0, 0) : v3(0, 1, 0);
+    u = v3_normalize(v3_sub(u, v3_scale(normal, v3_dot(u, normal))));
+    vec3 wv = v3_cross(normal, u);
+    f32 px[64], py[64];
+    int idx[64];
+    if (count > 64) return 0;
+    for (int i = 0; i < count; ++i) {
+        idx[i] = on[i];
+        px[i] = v3_dot(pts[on[i]], u);
+        py[i] = v3_dot(pts[on[i]], wv);
+    }
+    (void)n;
+    /* sort by x then y (insertion: few points) */
+    for (int i = 1; i < count; ++i)
+        for (int j = i; j > 0 && (px[j] < px[j - 1] || (px[j] == px[j - 1] && py[j] < py[j - 1])); --j) {
+            f32 tx = px[j]; px[j] = px[j - 1]; px[j - 1] = tx;
+            f32 ty = py[j]; py[j] = py[j - 1]; py[j - 1] = ty;
+            int ti = idx[j]; idx[j] = idx[j - 1]; idx[j - 1] = ti;
+        }
+    int hull[130], k = 0;
+#define CROSS(o, a, b) ((px[a] - px[o]) * (py[b] - py[o]) - (py[a] - py[o]) * (px[b] - px[o]))
+    for (int i = 0; i < count; ++i) {
+        while (k >= 2 && CROSS(hull[k - 2], hull[k - 1], i) <= 1e-7f) k--;
+        hull[k++] = i;
+    }
+    for (int i = count - 2, t = k + 1; i >= 0; --i) {
+        while (k >= t && CROSS(hull[k - 2], hull[k - 1], i) <= 1e-7f) k--;
+        hull[k++] = i;
+    }
+#undef CROSS
+    k--; /* the first point again */
+    for (int i = 0; i < k; ++i) out[i] = idx[hull[i]];
+    return k < 3 ? 0 : k;
+}
+
+/* Hull from points and the planes of its faces; false if it does not fit
+ * the limits or comes out inconsistent. */
+static bool from_planes(ub_hull *h, const vec3 *pts, int n, const hplane *pl, int np)
+{
+    memset(h, 0, sizeof *h);
+    int map[256];
+    for (int i = 0; i < n && i < 256; ++i) map[i] = -1;
+    if (n > 256) return false;
+    int faces[UB_HULL_MAX_FACES][64], counts[UB_HULL_MAX_FACES], nf = 0, total = 0;
+    for (int p = 0; p < np; ++p) {
+        int on[64], c = 0;
+        for (int i = 0; i < n && c < 64; ++i)
+            if (ub_absf(v3_dot(pl[p].n, pts[i]) - pl[p].d) < BUILD_EPS * 4) on[c++] = i;
+        if (c < 3) continue;
+        if (nf >= UB_HULL_MAX_FACES) return false;
+        int k = plane_polygon(pts, n, on, c, pl[p].n, faces[nf]);
+        if (k < 3) continue;
+        counts[nf++] = k;
+        total += k;
+        if (total > UB_HULL_MAX_FACE_VERTS) return false;
+    }
+    if (nf < 4) return false;
+    for (int f = 0; f < nf; ++f)
+        for (int i = 0; i < counts[f]; ++i) {
+            int v = faces[f][i];
+            if (map[v] < 0) {
+                if (h->vert_count >= UB_HULL_MAX_VERTS) return false;
+                map[v] = h->vert_count;
+                h->v[h->vert_count++] = pts[v];
+            }
+        }
+    if (h->vert_count + nf - 2 > UB_HULL_MAX_EDGES) return false; /* Euler: E = V + F - 2 */
+    for (int f = 0; f < nf; ++f) {
+        int idx[64];
+        for (int i = 0; i < counts[f]; ++i) idx[i] = map[faces[f][i]];
+        face(h, counts[f], idx);
+    }
+    if (total / 2 > UB_HULL_MAX_EDGES) return false;
+    finish(h);
+    for (int e = 0; e < h->edge_count; ++e)
+        if (h->e[e].f0 == h->e[e].f1) return false; /* an edge with one face: not closed */
+    return h->volume > 1e-9f;
+}
+
+bool ub_hull_build(ub_hull *h, const vec3 *in, int n, const u32 *tri, int nt)
+{
+    if (!g_ready) build();
+    /* unique points */
+    vec3 pts[256];
+    int np = 0;
+    for (int i = 0; i < n && np <= 255; ++i) {
+        bool dup = false;
+        for (int j = 0; j < np && !dup; ++j) dup = v3_length(v3_sub(pts[j], in[i])) < BUILD_EPS;
+        if (!dup) pts[np++] = in[i];
+    }
+    if (np < 4) return false;
+    vec3 mid = v3(0, 0, 0);
+    for (int i = 0; i < np; ++i) mid = v3_add(mid, pts[i]);
+    mid = v3_scale(mid, 1.0f / (f32)np);
+    /* exact: the planes of its triangles, coplanar ones merged */
+    if (np <= 255) {
+        hplane pl[UB_HULL_MAX_FACES + 1];
+        int npl = 0;
+        bool fits = true;
+        for (int t = 0; t < nt && fits; ++t) {
+            vec3 a = in[tri[t * 3]], b = in[tri[t * 3 + 1]], c = in[tri[t * 3 + 2]];
+            vec3 nn = v3_cross(v3_sub(b, a), v3_sub(c, a));
+            f32 len = v3_length(nn);
+            if (len < 1e-9f) continue;
+            nn = v3_scale(nn, 1.0f / len);
+            if (v3_dot(nn, v3_sub(a, mid)) < 0) nn = v3_scale(nn, -1.0f);
+            f32 d = v3_dot(nn, a);
+            bool seen = false;
+            for (int k = 0; k < npl && !seen; ++k) seen = v3_dot(pl[k].n, nn) > 0.9999f && ub_absf(pl[k].d - d) < BUILD_EPS * 4;
+            if (seen) continue;
+            if (npl >= UB_HULL_MAX_FACES) fits = false;
+            else {
+                pl[npl].n = nn;
+                pl[npl].d = d;
+                npl++;
+            }
+        }
+        if (fits && from_planes(h, pts, np, pl, npl)) return true;
+    }
+    /* too detailed: the 18 planes around it (box, and its edges bevelled) */
+    static const f32 dirs[9][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 1, 0 }, { 1, -1, 0 },
+                                    { 1, 0, 1 }, { 1, 0, -1 }, { 0, 1, 1 }, { 0, 1, -1 } };
+    hplane pl[18];
+    for (int k = 0; k < 18; ++k) {
+        vec3 dn = v3_normalize(v3(dirs[k / 2][0], dirs[k / 2][1], dirs[k / 2][2]));
+        if (k & 1) dn = v3_scale(dn, -1.0f);
+        f32 best = -1e30f;
+        for (int i = 0; i < np; ++i) best = UB_MAX(best, v3_dot(dn, pts[i]));
+        pl[k].n = dn;
+        pl[k].d = best;
+    }
+    /* its corners: where three planes meet, inside all of them */
+    vec3 corners[256];
+    int nc = 0;
+    for (int a = 0; a < 18; ++a)
+        for (int b = a + 1; b < 18; ++b)
+            for (int c = b + 1; c < 18; ++c) {
+                vec3 bc = v3_cross(pl[b].n, pl[c].n);
+                f32 det = v3_dot(pl[a].n, bc);
+                if (ub_absf(det) < 1e-6f) continue;
+                vec3 x = v3_scale(v3_add(v3_add(v3_scale(bc, pl[a].d), v3_scale(v3_cross(pl[c].n, pl[a].n), pl[b].d)),
+                                         v3_scale(v3_cross(pl[a].n, pl[b].n), pl[c].d)),
+                                  1.0f / det);
+                bool inside = true;
+                for (int k = 0; k < 18 && inside; ++k) inside = v3_dot(pl[k].n, x) <= pl[k].d + BUILD_EPS * 4;
+                if (!inside) continue;
+                bool dup = false;
+                for (int j = 0; j < nc && !dup; ++j) dup = v3_length(v3_sub(corners[j], x)) < BUILD_EPS * 4;
+                if (!dup && nc < 256) corners[nc++] = x;
+            }
+    if (from_planes(h, corners, nc, pl, 18)) return true;
+    /* last resort: its bounding box */
+    vec3 lo = pts[0], hi = pts[0];
+    for (int i = 1; i < np; ++i) {
+        lo = v3(UB_MIN(lo.x, pts[i].x), UB_MIN(lo.y, pts[i].y), UB_MIN(lo.z, pts[i].z));
+        hi = v3(UB_MAX(hi.x, pts[i].x), UB_MAX(hi.y, pts[i].y), UB_MAX(hi.z, pts[i].z));
+    }
+    memset(h, 0, sizeof *h);
+    for (int i = 0; i < 8; ++i) vert(h, (i & 1) ? hi.x : lo.x, (i & 2) ? hi.y : lo.y, (i & 4) ? hi.z : lo.z);
+    face4(h, 1, 5, 7, 3);
+    face4(h, 0, 4, 6, 2);
+    face4(h, 2, 3, 7, 6);
+    face4(h, 0, 1, 5, 4);
+    face4(h, 4, 5, 7, 6);
+    face4(h, 0, 1, 3, 2);
+    finish(h);
+    return h->volume > 1e-12f;
 }

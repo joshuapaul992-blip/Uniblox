@@ -73,6 +73,8 @@ typedef struct {
     mat3 wrot;
     vec3 lo, hi;          /* world bounding box */
     f32 friction, restitution;
+    const ub_hull *hull;  /* a piece of the part's own mesh (unit cube), or NULL: the shape's */
+    i32 next_piece;       /* the part's next piece (anchored unions and MeshParts), -1 none */
 } ub_pshape;
 
 typedef struct ub_manifold ub_manifold;

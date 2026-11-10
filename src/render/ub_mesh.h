@@ -47,9 +47,10 @@ const ub_mesh *ub_mesh_get(ub_shape s, ub_detail d);
 
 /* A mesh of flat triangles in the unit cube, made of convex pieces
  * (piece_v / piece_t: each piece's end vertex and end triangle), with each
- * face turned to face out of its piece. One allocation: plat_free it.
+ * face turned to face out of its piece, or (wound) facing the side its
+ * vertices go counter-clockwise round. One allocation: plat_free it.
  * NULL if out of memory. */
 ub_mesh *ub_mesh_from_triangles(const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
-                                const u32 *piece_t, u32 npieces);
+                                const u32 *piece_t, u32 npieces, bool wound);
 
 #endif
