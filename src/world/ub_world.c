@@ -41,8 +41,21 @@ void ub_world_init(ub_world *w)
 
 void ub_world_free_props(ub_world *w); /* ub_props.c */
 
+static void free_meshes(ub_world *w)
+{
+    for (i32 i = 0; i < w->mesh_count; ++i) {
+        plat_free(w->meshes[i].v); /* one block: v, tri, pieces */
+        plat_free(w->meshes[i].render_cache);
+        plat_free(w->meshes[i].phys_cache);
+    }
+    plat_free(w->meshes);
+    w->meshes = NULL;
+    w->mesh_count = w->mesh_cap = 0;
+}
+
 void ub_world_free(ub_world *w)
 {
+    free_meshes(w);
     ub_world_free_props(w);
     plat_free(w->inst);
     plat_free(w->parts);
@@ -161,6 +174,7 @@ i32 ub_world_add_part(ub_world *w, i32 parent, ub_class cls, const char *class_n
     if (idx < 0) return -1;
     i32 pi = w->free_part_count > 0 ? w->free_part[--w->free_part_count] : w->part_count++;
     w->parts[pi] = *part;
+    if ((i32)part->mesh > w->mesh_count) w->parts[pi].mesh = 0;
     w->part_inst[pi] = idx;
     w->inst[idx].part = pi;
     return idx;
@@ -701,6 +715,35 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
 
     save_props(w, &b, order, n, remap);
 
+    /* meshes, and which saved part uses which (only if any does) */
+    bool any_mesh = false;
+    for (i32 k = 0; k < n && !any_mesh; ++k) {
+        const ub_instance *in = &w->inst[order[k]];
+        any_mesh = in->part >= 0 && w->parts[in->part].mesh != 0;
+    }
+    if (any_mesh) {
+        c = chunk_begin(&b, "MESH");
+        put_u32(&b, (u32)w->mesh_count);
+        for (i32 i = 0; i < w->mesh_count; ++i) {
+            const ub_wmesh *m = &w->meshes[i];
+            put_u32(&b, m->nv);
+            put_u32(&b, m->nt);
+            put_u32(&b, m->npieces);
+            for (u32 j = 0; j < m->nv * 3; ++j) put_f32(&b, m->v[j]);
+            for (u32 j = 0; j < m->nt * 3; ++j) put_u32(&b, m->tri[j]);
+            for (u32 j = 0; j < m->npieces; ++j) put_u32(&b, m->piece_v[j]);
+            for (u32 j = 0; j < m->npieces; ++j) put_u32(&b, m->piece_t[j]);
+        }
+        chunk_end(&b, c);
+        c = chunk_begin(&b, "PMSH");
+        put_u32(&b, (u32)parts_written);
+        for (i32 k = 0; k < n; ++k) {
+            const ub_instance *in = &w->inst[order[k]];
+            if (in->part >= 0) put_u16(&b, w->parts[in->part].mesh);
+        }
+        chunk_end(&b, c);
+    }
+
     c = chunk_begin(&b, "END ");
     chunk_end(&b, c);
 
@@ -768,6 +811,63 @@ void ub_part_sanitize(ub_part *p)
             p->rot = mat3_identity();
             break;
         }
+}
+
+/* ------------------------------------------------------------- meshes */
+
+u16 ub_world_add_mesh(ub_world *w, const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
+                      const u32 *piece_t, u32 npieces)
+{
+    if (!nv || !nt || !npieces || nv > 1000000 || nt > 2000000 || npieces > 100000 || w->mesh_count >= 65535)
+        return 0;
+    /* valid: indices in range, pieces in order and ending at the totals */
+    for (u32 i = 0; i < nt * 3; ++i)
+        if (tri[i] >= nv) return 0;
+    for (u32 i = 0; i < npieces; ++i)
+        if ((i > 0 && (piece_v[i] < piece_v[i - 1] || piece_t[i] < piece_t[i - 1])) || piece_v[i] > nv || piece_t[i] > nt)
+            return 0;
+    if (piece_v[npieces - 1] != nv || piece_t[npieces - 1] != nt) return 0;
+    u32 h = 2166136261u;
+    const u8 *bytes[4] = { (const u8 *)v, (const u8 *)tri, (const u8 *)piece_v, (const u8 *)piece_t };
+    const u32 lens[4] = { nv * 12, nt * 12, npieces * 4, npieces * 4 };
+    for (int k = 0; k < 4; ++k)
+        for (u32 i = 0; i < lens[k]; ++i) h = (h ^ bytes[k][i]) * 16777619u;
+    for (i32 i = 0; i < w->mesh_count; ++i) {
+        const ub_wmesh *m = &w->meshes[i];
+        if (m->hash == h && m->nv == nv && m->nt == nt && m->npieces == npieces && !memcmp(m->v, v, lens[0]) &&
+            !memcmp(m->tri, tri, lens[1]) && !memcmp(m->piece_v, piece_v, lens[2]) && !memcmp(m->piece_t, piece_t, lens[3]))
+            return (u16)(i + 1);
+    }
+    if (!grow((void **)&w->meshes, &w->mesh_cap, w->mesh_count + 1, sizeof(ub_wmesh))) return 0;
+    u8 *block = (u8 *)plat_alloc((size_t)lens[0] + lens[1] + lens[2] + lens[3]);
+    if (!block) return 0;
+    ub_wmesh *m = &w->meshes[w->mesh_count];
+    memset(m, 0, sizeof *m);
+    m->v = (f32 *)block;
+    m->tri = (u32 *)(block + lens[0]);
+    m->piece_v = (u32 *)(block + lens[0] + lens[1]);
+    m->piece_t = (u32 *)(block + lens[0] + lens[1] + lens[2]);
+    memcpy(m->v, v, lens[0]);
+    memcpy(m->tri, tri, lens[1]);
+    memcpy(m->piece_v, piece_v, lens[2]);
+    memcpy(m->piece_t, piece_t, lens[3]);
+    for (u32 i = 0; i < nv * 3; ++i) /* untrusted: inside a sane box, never NaN */
+        m->v[i] = sane(m->v[i], -1000.0f, 1000.0f, 0);
+    m->nv = nv;
+    m->nt = nt;
+    m->npieces = npieces;
+    m->hash = h;
+    w->mesh_count++;
+    return (u16)w->mesh_count;
+}
+
+const struct ub_mesh_s *ub_world_render_mesh(const ub_world *w, u16 id)
+{
+    if (id == 0 || (i32)id > w->mesh_count) return NULL;
+    ub_wmesh *m = &((ub_world *)w)->meshes[id - 1]; /* the cache is not part of the world's value */
+    if (!m->render_cache)
+        m->render_cache = ub_mesh_from_triangles(m->v, m->nv, m->tri, m->nt, m->piece_v, m->piece_t, m->npieces);
+    return (const ub_mesh *)m->render_cache;
 }
 
 static f32 get_fin(rd *r) /* not NaN (infinity is a real value: BillboardGui.MaxDistance) */
@@ -889,8 +989,8 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
     u32 inst_count = 0, part_count = 0;
     const u8 *inst_p = NULL;
     u32 inst_len = 0;
-    const u8 *weld_p = NULL, *src_p = NULL, *prop_p = NULL;
-    u32 weld_count = 0, src_len = 0, prop_len = 0;
+    const u8 *weld_p = NULL, *src_p = NULL, *prop_p = NULL, *pmsh_p = NULL;
+    u32 weld_count = 0, src_len = 0, prop_len = 0, pmsh_len = 0;
     while (!ended) {
         if (top.len - top.pos < 8) return UB_LOAD_CORRUPT;
         const u8 *tag = top.p + top.pos;
@@ -964,12 +1064,42 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
         } else if (memcmp(tag, "PROP", 4) == 0) {
             prop_p = r.p;
             prop_len = len;
+        } else if (memcmp(tag, "MESH", 4) == 0) {
+            u32 count = get_u32(&r);
+            if (r.bad || count > 65535) return UB_LOAD_CORRUPT;
+            for (u32 i = 0; i < count; ++i) {
+                u32 nv = get_u32(&r), nt = get_u32(&r), np = get_u32(&r);
+                u64 need = (u64)nv * 12 + (u64)nt * 12 + (u64)np * 8;
+                if (r.bad || need > r.len - r.pos) return UB_LOAD_CORRUPT;
+                const u8 *q = r.p + r.pos;
+                r.pos += (u32)need;
+                f32 *v = (f32 *)plat_alloc((size_t)need + 4);
+                if (!v) return UB_LOAD_NO_MEMORY;
+                memcpy(v, q, (size_t)need); /* little-endian on every machine Uniblox runs on */
+                u32 *tri = (u32 *)(v + nv * 3), *pv = tri + nt * 3, *pt = pv + np;
+                u16 id = ub_world_add_mesh(w, v, nv, tri, nt, pv, pt, np);
+                plat_free(v);
+                if (id != i + 1) return UB_LOAD_CORRUPT; /* invalid, or a duplicate a saver never writes */
+            }
+        } else if (memcmp(tag, "PMSH", 4) == 0) {
+            pmsh_p = r.p;
+            pmsh_len = len;
         } else if (memcmp(tag, "END ", 4) == 0) {
             ended = true;
         }
         /* unknown chunks are skipped */
     }
     (void)have_parts; /* optional: without it no instance may reference a part */
+    if (pmsh_p) {
+        rd pr = { pmsh_p, pmsh_len, 0, false };
+        u32 n = get_u32(&pr);
+        if (pr.bad || n != part_count || pmsh_len != 4 + n * 2) return UB_LOAD_CORRUPT;
+        for (u32 i = 0; i < n; ++i) {
+            u32 id = get_u16(&pr);
+            if ((i32)id > w->mesh_count) return UB_LOAD_CORRUPT;
+            w->parts[i].mesh = (u16)id;
+        }
+    }
     if (!have_inst || (inst_count > 0 && !have_strs)) return UB_LOAD_CORRUPT;
 
     if (inst_count) {

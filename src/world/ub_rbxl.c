@@ -189,6 +189,8 @@ typedef struct {
     u32 source;          /* scripts: offset of their code in the name pool, 0xFFFFFFFF = none */
     u8 disabled;         /* scripts */
     u8 run_context;      /* scripts: 0 legacy, 1 server, 2 client */
+    u32 phys_off, phys_len; /* unions, MeshParts: their CSGPHS collision data in the blob arena (0 = none) */
+    vec3 init_size;      /* unions, MeshParts: the size their geometry was made at */
 } rec;
 
 /* A property of a K_DATA instance, kept until the world is built. */
@@ -218,7 +220,32 @@ typedef struct {
     ub_lighting light;
     f32 gravity, fallen_height;
     bool used_zstd, used_lz4;
+    u8 *blob;            /* shared strings and binary data kept for building (meshes) */
+    u32 blob_len, blob_cap;
+    u32 *sstr_off, *sstr_len; /* SSTR: each shared string's place in blob */
+    u32 sstr_count;
 } importer;
+
+/* Appends bytes to the blob arena; their offset, or 0xFFFFFFFF. */
+static u32 add_blob(importer *im, const u8 *p, u32 n)
+{
+    if (im->blob_len + n + 1 > im->blob_cap) {
+        u32 nc = im->blob_cap ? im->blob_cap * 2 : 65536;
+        while (nc < im->blob_len + n + 1) nc *= 2;
+        u8 *nb = (u8 *)plat_alloc(nc);
+        if (!nb) return 0xFFFFFFFFu;
+        if (im->blob) {
+            memcpy(nb, im->blob, im->blob_len);
+            plat_free(im->blob);
+        }
+        im->blob = nb;
+        im->blob_cap = nc;
+    }
+    u32 off = im->blob_len;
+    memcpy(im->blob + off, p, n);
+    im->blob_len += n;
+    return off;
+}
 
 static void map_put(importer *im, i32 ref, i32 idx)
 {
@@ -912,6 +939,32 @@ static ub_load_result meta_prop(importer *im, cls *c, bool tags, rd *r)
     return UB_LOAD_OK;
 }
 
+/* SSTR: version, count, then (16-byte hash, string) each. */
+static ub_load_result chunk_sstr(importer *im, rd *r)
+{
+    rd_u32(r);
+    u32 n = rd_u32(r);
+    if (r->bad || n > r->len / 20) return UB_LOAD_CORRUPT;
+    plat_free(im->sstr_off);
+    plat_free(im->sstr_len);
+    im->sstr_off = (u32 *)plat_alloc(sizeof(u32) * (n + 1));
+    im->sstr_len = (u32 *)plat_alloc(sizeof(u32) * (n + 1));
+    if (!im->sstr_off || !im->sstr_len) return UB_LOAD_NO_MEMORY;
+    im->sstr_count = n;
+    for (u32 i = 0; i < n; ++i) {
+        if (!need(r, 16)) return UB_LOAD_CORRUPT;
+        r->pos += 16;
+        u32 sl;
+        const u8 *str = rd_str(r, &sl);
+        if (!str) return UB_LOAD_CORRUPT;
+        u32 off = add_blob(im, str, sl);
+        if (off == 0xFFFFFFFFu) return UB_LOAD_NO_MEMORY;
+        im->sstr_off[i] = off;
+        im->sstr_len[i] = sl;
+    }
+    return UB_LOAD_OK;
+}
+
 static ub_load_result chunk_prop(importer *im, rd *r)
 {
     u32 id = rd_u32(r), pl;
@@ -987,6 +1040,31 @@ static ub_load_result chunk_prop(importer *im, rd *r)
             for (u32 i = 0; i < n; ++i)
                 recs[i].pos = v3(roblox_float(tmp[i]), roblox_float(tmp[n + i]), roblox_float(tmp[2 * n + i]));
         }
+    } else if (c->k == K_MESH && type == 0x1C && name_is(pname, pl, "PhysicalConfigData")) {
+        if (rd_interleaved32(r, n, tmp))
+            for (u32 i = 0; i < n; ++i) {
+                u32 si = tmp[i]; /* big-endian u32s, not transformed */
+                if (si < im->sstr_count && im->sstr_len[si] > 10 && !memcmp(im->blob + im->sstr_off[si], "CSGPHS", 6)) {
+                    recs[i].phys_off = im->sstr_off[si];
+                    recs[i].phys_len = im->sstr_len[si];
+                }
+            }
+    } else if (c->k == K_MESH && type == 0x01 && name_is(pname, pl, "PhysicsData")) {
+        for (u32 i = 0; i < n && res == UB_LOAD_OK; ++i) { /* older files: the same data, in place */
+            u32 sl;
+            const u8 *str = rd_str(r, &sl);
+            if (!str) { res = UB_LOAD_CORRUPT; break; }
+            if (sl > 10 && !memcmp(str, "CSGPHS", 6) && !recs[i].phys_len) {
+                u32 off = add_blob(im, str, sl);
+                if (off == 0xFFFFFFFFu) { res = UB_LOAD_NO_MEMORY; break; }
+                recs[i].phys_off = off;
+                recs[i].phys_len = sl;
+            }
+        }
+    } else if (c->k == K_MESH && type == 0x0E && name_is(pname, pl, "InitialSize")) {
+        if (rd_interleaved32x3(r, n, tmp))
+            for (u32 i = 0; i < n; ++i)
+                recs[i].init_size = v3(roblox_float(tmp[i]), roblox_float(tmp[n + i]), roblox_float(tmp[2 * n + i]));
     } else if (part && type == 0x0E && (name_is(pname, pl, "size") || name_is(pname, pl, "Size"))) {
         if (rd_interleaved32x3(r, n, tmp))
             for (u32 i = 0; i < n; ++i)
@@ -1165,6 +1243,86 @@ static void convert_part(const rec *e, kind k, ub_part *p)
     ub_part_sanitize(p);
 }
 
+/* ------------------------------------------------------- CSGPHS
+ *
+ * The collision data Roblox saves with unions and MeshParts (milestone
+ * 8C): "CSGPHS", a u32 version (6, or 7 with one more byte), then the
+ * solid's volume, centre and inertia (10 floats), then convex pieces to
+ * the end, each: a 40-byte header, u32 float count, u32 4, the vertices
+ * (x y z floats), u32 index count, the triangle indices (u32). Vertices
+ * are in the part's space at InitialSize. Worked out from rbx-test-files'
+ * unions; read defensively. */
+static u16 csg_mesh(ub_world *w, const u8 *d, u32 len, vec3 init)
+{
+    if (len < 10 + 40 || memcmp(d, "CSGPHS", 6) != 0) return 0;
+    u32 ver = le32(d + 6);
+    u32 p = ver == 7 ? 11 : 10;
+    if (ver != 6 && ver != 7) return 0;
+    p += 40;
+    /* first pass: count, and the bounds (for a missing InitialSize) */
+    u32 nv = 0, nt = 0, np = 0;
+    vec3 lo = v3(1e30f, 1e30f, 1e30f), hi = v3(-1e30f, -1e30f, -1e30f);
+    for (u32 q = p; q < len;) {
+        if (len - q < 48 || le32(d + q) != 16) return 0;
+        q += 40;
+        u32 nf = le32(d + q), fs = le32(d + q + 4);
+        q += 8;
+        if (fs != 4 || nf % 3 || nf > (len - q) / 4) return 0;
+        for (u32 i = 0; i < nf; ++i) {
+            f32 f = u2f(le32(d + q + i * 4));
+            if (!(f > -1e5f && f < 1e5f)) return 0;
+            f32 *lo_c = &lo.x + i % 3, *hi_c = &hi.x + i % 3;
+            if (f < *lo_c) *lo_c = f;
+            if (f > *hi_c) *hi_c = f;
+        }
+        q += nf * 4;
+        if (len - q < 4) return 0;
+        u32 ni = le32(d + q);
+        q += 4;
+        if (ni % 3 || ni > (len - q) / 4) return 0;
+        for (u32 i = 0; i < ni; ++i)
+            if (le32(d + q + i * 4) >= nf / 3) return 0;
+        q += ni * 4;
+        nv += nf / 3;
+        nt += ni / 3;
+        np++;
+    }
+    if (!np || !nt || nv > 0xFFFF) return 0;
+    vec3 size = init;
+    if (!(size.x > 1e-4f && size.y > 1e-4f && size.z > 1e-4f)) size = v3_sub(hi, lo);
+    if (!(size.x > 1e-4f && size.y > 1e-4f && size.z > 1e-4f)) return 0;
+    f32 *v = (f32 *)plat_alloc(sizeof(f32) * nv * 3 + sizeof(u32) * (nt * 3 + np * 2));
+    if (!v) return 0;
+    u32 *tri = (u32 *)(v + nv * 3), *pv = tri + nt * 3, *pt = pv + np;
+    u32 vi = 0, ti = 0, pi = 0;
+    for (u32 q = p; q < len;) {
+        q += 40;
+        u32 nf = le32(d + q);
+        q += 8;
+        u32 base = vi;
+        for (u32 i = 0; i < nf / 3; ++i, ++vi) { /* to the unit cube, and Uniblox's axes (z flipped) */
+            v[vi * 3] = u2f(le32(d + q + i * 12)) / size.x;
+            v[vi * 3 + 1] = u2f(le32(d + q + i * 12 + 4)) / size.y;
+            v[vi * 3 + 2] = -u2f(le32(d + q + i * 12 + 8)) / size.z;
+        }
+        q += nf * 4;
+        u32 ni = le32(d + q);
+        q += 4;
+        for (u32 i = 0; i < ni / 3; ++i, ++ti) {
+            tri[ti * 3] = base + le32(d + q + i * 12);
+            tri[ti * 3 + 1] = base + le32(d + q + i * 12 + 4);
+            tri[ti * 3 + 2] = base + le32(d + q + i * 12 + 8);
+        }
+        q += ni * 4;
+        pv[pi] = vi;
+        pt[pi] = ti;
+        pi++;
+    }
+    u16 id = ub_world_add_mesh(w, v, nv, tri, nt, pv, pt, np);
+    plat_free(v);
+    return id;
+}
+
 static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st)
 {
     i32 *stack = (i32 *)plat_alloc(sizeof(i32) * 2 * (im->rec_count + 1));
@@ -1203,7 +1361,15 @@ static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st
             i32 wi;
             if (is_part_kind(c->k)) {
                 ub_part p;
+                memset(&p, 0, sizeof p);
                 convert_part(e, c->k, &p);
+                if (c->k == K_MESH && e->phys_len) {
+                    p.mesh = csg_mesh(w, im->blob + e->phys_off, e->phys_len, e->init_size);
+                    if (p.mesh) {
+                        p.flags &= (u8)~UB_PART_PLACEHOLDER;
+                        st->meshes++;
+                    }
+                }
                 wi = ub_world_add_part(w, wparent, wc, c->name, name, &p);
                 if (p.transparency >= 250) st->invisible++;
                 else if (p.flags & UB_PART_PLACEHOLDER) st->placeholders++;
@@ -1309,8 +1475,9 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
         pos += stored;
         if (memcmp(h, "END\0", 4) == 0) { ended = true; break; }
 
-        bool interesting = memcmp(h, "INST", 4) == 0 || memcmp(h, "PROP", 4) == 0 || memcmp(h, "PRNT", 4) == 0;
-        if (!interesting) continue; /* META, SSTR and future chunks */
+        bool interesting = memcmp(h, "INST", 4) == 0 || memcmp(h, "PROP", 4) == 0 || memcmp(h, "PRNT", 4) == 0 ||
+                           memcmp(h, "SSTR", 4) == 0;
+        if (!interesting) continue; /* META and future chunks */
         const u8 *payload = body;
         if (comp) {
             plat_free(chunk);
@@ -1332,6 +1499,8 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
             res = chunk_inst(&im, &r);
         } else if (memcmp(h, "PROP", 4) == 0) {
             res = chunk_prop(&im, &r);
+        } else if (memcmp(h, "SSTR", 4) == 0) {
+            res = chunk_sstr(&im, &r);
         } else {
             res = chunk_prnt(&im, &r);
         }
@@ -1354,6 +1523,9 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
         w->fallen_height = im.fallen_height >= -1.0e6f && im.fallen_height <= 1.0e6f ? im.fallen_height
                                                                                      : UB_FALLEN_HEIGHT_DEFAULT;
     }
+    plat_free(im.blob);
+    plat_free(im.sstr_off);
+    plat_free(im.sstr_len);
     plat_free(im.classes);
     plat_free(im.recs);
     plat_free(im.map_keys);

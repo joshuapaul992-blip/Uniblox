@@ -49,6 +49,7 @@ typedef struct {
     u8 shape;            /* ub_shape */
     u8 material;         /* ub_material */
     u8 flags;            /* UB_DRAW_* */
+    const ub_mesh *mesh; /* its own geometry (unions, MeshParts), or NULL: the shape's */
 } ub_part_draw;
 
 enum { UB_DRAW_GLOW = 1 }; /* lit at full brightness (neon) */

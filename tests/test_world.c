@@ -734,6 +734,61 @@ static void check_rbx_props(const char *name)
     free(data);
 }
 
+/* Unions keep their shape (milestone 8C): the convex pieces Roblox saves
+ * for collision become the part's mesh. */
+static void test_rbx_unions(void)
+{
+    static const struct { const char *file; u32 meshes, distinct; } k[] = {
+        { "tests/data/rbx/unions.rbxm", 3, 2 },               /* 2020: PhysicalConfigData, two the same */
+        { "tests/data/rbx/unions-sharedstring.rbxm", 8, 3 },  /* 2023: shared strings */
+    };
+    for (int f = 0; f < 2; ++f) {
+        u32 size = 0;
+        u8 *data = load_file(k[f].file, &size);
+        CHECK(data != NULL);
+        if (!data) continue;
+        ub_world w;
+        ub_world_init(&w);
+        ub_import_stats st;
+        CHECK(ub_rbxl_load(&w, data, size, &st) == UB_LOAD_OK);
+        printf("  %s: %u unions with their shape, %d meshes\n", k[f].file, st.meshes, w.mesh_count);
+        CHECK(st.meshes == k[f].meshes && st.placeholders == 0 && w.mesh_count == (i32)k[f].distinct);
+        /* every vertex inside the part's unit cube, and a renderable mesh */
+        for (i32 m = 0; m < w.mesh_count; ++m) {
+            const ub_wmesh *wm = &w.meshes[m];
+            bool inside = true;
+            for (u32 i = 0; i < wm->nv * 3; ++i) inside &= wm->v[i] >= -0.5001f && wm->v[i] <= 0.5001f;
+            CHECK(inside && wm->npieces >= 1);
+            const ub_mesh *rm = ub_world_render_mesh(&w, (u16)(m + 1));
+            CHECK(rm && rm->face_count > 0 && rm->face_count <= (int)wm->nt);
+        }
+        /* the first file's unions: 5x2x2 and 4x2x2 boxes made of pieces; the
+         * mesh spans the whole cube */
+        if (f == 0) {
+            const ub_wmesh *wm = &w.meshes[0];
+            f32 lo = 1, hi = -1;
+            for (u32 i = 0; i < wm->nv; ++i) {
+                lo = UB_MIN(lo, wm->v[i * 3]);
+                hi = UB_MAX(hi, wm->v[i * 3]);
+            }
+            CHECK(lo < -0.499f && hi > 0.499f);
+        }
+        /* survives .ubx */
+        u8 *a1, *b1;
+        u32 na, nb;
+        CHECK(ub_ubx_save(&w, &a1, &na));
+        ub_world w2;
+        ub_world_init(&w2);
+        CHECK(ub_ubx_load(&w2, a1, na) == UB_LOAD_OK && w2.mesh_count == w.mesh_count);
+        CHECK(ub_ubx_save(&w2, &b1, &nb) && na == nb && memcmp(a1, b1, na) == 0);
+        plat_free(a1);
+        plat_free(b1);
+        ub_world_free(&w2);
+        ub_world_free(&w);
+        free(data);
+    }
+}
+
 static void test_rbx_attributes(void);
 static void test_rbx_gui(void)
 {
@@ -745,6 +800,7 @@ static void test_rbx_gui(void)
     };
     for (int i = 0; i < (int)(sizeof models / sizeof models[0]); ++i) check_rbx_props(models[i]);
     test_rbx_attributes();
+    test_rbx_unions();
 }
 
 static i32 load_model_first(ub_world *w, const char *path, const char *cls)

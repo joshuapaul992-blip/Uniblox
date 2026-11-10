@@ -471,7 +471,7 @@ static void test_demo_place(void)
         ub_render_begin(&fr, &cam, &env);
         for (i32 pi = 0; pi < g_g.world.part_count; ++pi)
             if (ub_game_part_visible(&g_g, pi)) {
-                ub_part_draw d = play_part_draw(&g_g.world.parts[pi]);
+                ub_part_draw d = play_part_draw(&g_g.world, &g_g.world.parts[pi]);
                 ub_render_part(&d);
             }
         play_gui_input(&g_g, &fr, &(ub_input){ .has_focus = true }, &cam, false, 31.0);

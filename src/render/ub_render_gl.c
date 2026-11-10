@@ -800,7 +800,7 @@ static f32 arc_u(vec3 l, f32 radius)
 
 static void emit_part(const ub_part_draw *p, batch *set)
 {
-    const ub_mesh *mesh = ub_mesh_get((ub_shape)p->shape, UB_DETAIL_HIGH);
+    const ub_mesh *mesh = p->mesh ? p->mesh : ub_mesh_get((ub_shape)p->shape, UB_DETAIL_HIGH);
     ub_material mat = (ub_material)(p->material < UB_MAT_COUNT ? p->material : UB_MAT_PLASTIC);
     batch *b = &set[mat];
     u8 ca = (p->flags & UB_DRAW_GLOW) ? 0 : 255;

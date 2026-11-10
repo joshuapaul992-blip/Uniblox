@@ -11,9 +11,11 @@
 #define LOOK_SENSITIVITY 0.006f
 
 /* A part as the renderer wants it. */
-ub_part_draw play_part_draw(const ub_part *p)
+ub_part_draw play_part_draw(const ub_world *w, const ub_part *p)
 {
     ub_part_draw d;
+    memset(&d, 0, sizeof d);
+    d.mesh = p->mesh ? ub_world_render_mesh(w, p->mesh) : NULL;
     d.pos = p->pos;
     d.rot = p->rot;
     d.size = p->size;
@@ -63,6 +65,7 @@ static void draw_limb(vec3 base, const mat3 *body, vec3 pivot, vec3 size, f32 sw
     rot.z = mat3_apply(body, r.z);
     vec3 hang = mat3_apply(&rot, v3(0, -size.y * 0.5f, 0));
     ub_part_draw p;
+    memset(&p, 0, sizeof p);
     p.pos = v3_add(v3_add(base, mat3_apply(body, pivot)), hang);
     p.rot = rot;
     p.size = size;
@@ -83,6 +86,7 @@ void play_draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amount,
     draw_limb(base, &body, v3(-0.5f, 2.0f, 0), v3(0.9f, 2.0f, 1.0f), swing, pants, UB_MAT_PLASTIC);
     draw_limb(base, &body, v3(0.5f, 2.0f, 0), v3(0.9f, 2.0f, 1.0f), -swing, pants, UB_MAT_PLASTIC);
     ub_part_draw torso;
+    memset(&torso, 0, sizeof torso);
     torso.pos = v3_add(base, mat3_apply(&body, v3(0, 3.0f, 0)));
     torso.rot = body;
     torso.size = v3(2.0f, 2.0f, 1.0f);
@@ -128,7 +132,7 @@ static void rebuild_statics(ub_play_view *v, ub_game *g)
     }
     v->static_count = 0;
     for (i32 i = 0; i < w->part_count && v->statics; ++i)
-        if (ub_game_part_visible(g, i) && !ub_game_part_live(g, i)) v->statics[v->static_count++] = play_part_draw(&w->parts[i]);
+        if (ub_game_part_visible(g, i) && !ub_game_part_live(g, i)) v->statics[v->static_count++] = play_part_draw(w, &w->parts[i]);
     ub_render_set_static(v->statics, v->static_count);
     g->statics_dirty = false;
 }
@@ -217,7 +221,7 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
     for (i32 i = 0; i < g->live_count; ++i) {
         i32 pi = g->live[i];
         if (!ub_game_part_visible(g, pi)) continue;
-        ub_part_draw d = play_part_draw(&g->world.parts[pi]);
+        ub_part_draw d = play_part_draw(&g->world, &g->world.parts[pi]);
         ub_game_part_pose(g, pi, &d.pos, &d.rot);
         ub_render_part(&d);
     }
@@ -241,6 +245,7 @@ void play_draw_blob_shadow(ub_game *g)
     if (height < 0) height = 0;
     f32 k = 1.0f - height / 40.0f; /* 1 on the ground, 0 at 40 studs */
     ub_part_draw d;
+    memset(&d, 0, sizeof d);
     d.pos = v3_add(h.point, v3(0, 0.04f, 0));
     d.rot = mat3_identity();
     d.size = v3(3.2f * (0.4f + 0.6f * k), 0.05f, 3.2f * (0.4f + 0.6f * k));

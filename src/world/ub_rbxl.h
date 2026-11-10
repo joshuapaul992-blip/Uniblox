@@ -31,6 +31,7 @@ typedef struct {
     u32 instances;        /* in the file */
     u32 parts;            /* imported as visible parts */
     u32 placeholders;     /* meshes/unions shown as boxes */
+    u32 meshes;           /* meshes/unions shown with the geometry in the file (8C) */
     u32 invisible;        /* parts with Transparency ~1, kept but not drawn */
     u32 terrain;          /* Terrain instances (voxels not imported) */
     u32 classes;          /* distinct classes */
