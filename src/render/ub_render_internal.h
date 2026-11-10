@@ -22,6 +22,7 @@ void sw_end(ub_render_stats *stats);
 /* the fast renderer: draws the scene kept since sw_begin (before the GUI pictures) */
 void sw_flush(void);
 void sw_set_fast(bool on, int threads);
+void sw_set_quality(int q); /* fast renderer: 0 low, 1 medium, 2 high */
 bool sw_fast(void);
 int sw_threads(void);
 

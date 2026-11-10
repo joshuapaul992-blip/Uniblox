@@ -68,9 +68,9 @@ static inline int ub_draw_see_level(u8 flags) { return (flags >> UB_DRAW_SEE_SHI
 extern const u8 ub_see_through_pattern[4][4];
 
 typedef enum {
-    UB_QUALITY_LOW,      /* OpenGL: no shadows, no anti-aliasing */
-    UB_QUALITY_MEDIUM,   /* OpenGL: shadows */
-    UB_QUALITY_HIGH,     /* OpenGL: shadows + 4x anti-aliasing */
+    UB_QUALITY_LOW,      /* OpenGL: no shadows, no anti-aliasing. Fast software: lit per face, as 9A */
+    UB_QUALITY_MEDIUM,   /* OpenGL: shadows. Fast software: light in colour, smooth curves, fog, the sun, mipmaps */
+    UB_QUALITY_HIGH,     /* OpenGL: shadows + 4x anti-aliasing. Fast software: and the sun's shadows */
     UB_QUALITY_COUNT
 } ub_quality;
 

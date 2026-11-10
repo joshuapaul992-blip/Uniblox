@@ -201,7 +201,7 @@ elif [ "$RENDERER" = fast ]; then
     expect "$RUN1" "CPU: .*; [0-9]* processor" "processors counted"
     expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
     expect "$CFG" "colors=32" "colour choice saved"
-    expect "$RUN1" "software render height" "F6 changed the render resolution"
+    expect "$RUN1" "quality: medium" "F6 changed the fast renderer's quality"
 else
     expect "$RUN1" "renderer: software" "software renderer started"
     expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"

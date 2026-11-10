@@ -496,7 +496,13 @@ static bool handle_typing(const ub_input *in)
 static const char *mode_name(const ub_frame *frame)
 {
     if (frame->backend == UB_BACKEND_OPENGL) return ub_render_quality_name(ub_render_quality());
-    return frame->fb && frame->fb->format == UB_PIXEL_INDEX8 ? "8-bit" : "32-bit";
+    bool idx8 = frame->fb && frame->fb->format == UB_PIXEL_INDEX8;
+    if (ub_render_fast()) {
+        static const char *const k[2][UB_QUALITY_COUNT] = { { "32-bit low", "32-bit medium", "32-bit high" },
+                                                            { "8-bit low", "8-bit medium", "8-bit high" } };
+        return k[idx8][UB_CLAMP((int)ub_render_quality(), 0, UB_QUALITY_COUNT - 1)];
+    }
+    return idx8 ? "8-bit" : "32-bit";
 }
 
 /* what the menu changed, applied now */
@@ -640,6 +646,7 @@ static bool hud_input(const ub_frame *frame, const ub_input *in, bool keys_free)
         g_menu_open = true; /* the settings menu (it reads Esc itself from the next frame) */
         g_menu.page = 1; /* straight to the settings: the game menu is the paused page */
         g_menu.opengl = frame->backend == UB_BACKEND_OPENGL;
+        g_menu.fast = ub_render_fast();
         ub_info("menu opened");
         break;
     default: break;
@@ -707,7 +714,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         play_keys = false; /* this Escape only cancels */
     }
     if (play_keys && in->key_pressed[UB_KEY_F6]) {
-        if (frame->backend == UB_BACKEND_OPENGL) {
+        if (frame->backend == UB_BACKEND_OPENGL || ub_render_fast()) {
             g_quality = (g_quality + UB_QUALITY_COUNT - 1) % UB_QUALITY_COUNT; /* high, medium, low, high... */
             ub_render_set_quality((ub_quality)g_quality);
             ub_info("quality: %s", ub_render_quality_name((ub_quality)g_quality));
@@ -771,6 +778,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_menu_open = true; /* no game: straight to the settings (it reads Esc itself from the next frame) */
         g_menu.page = 0;
         g_menu.opengl = frame->backend == UB_BACKEND_OPENGL;
+        g_menu.fast = ub_render_fast();
         ub_info("menu opened");
         play_keys = false;
     }
@@ -876,7 +884,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
             if (g_bench_result[0]) LINE("%s", g_bench_result);
             if (g_demo_world && !g_last_message[0]) LINE("Chat (/): fast, slow, night, day");
             LINE("F5 benchmark, F6 %s, F7 save place, F8 colours, F9 fps cap, F3 hide this text",
-                 frame->backend == UB_BACKEND_OPENGL ? "quality" : "resolution");
+                 frame->backend == UB_BACKEND_OPENGL || ub_render_fast() ? "quality" : "resolution");
         }
 #undef LINE
     }

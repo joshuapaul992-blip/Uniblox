@@ -26,31 +26,47 @@
 #define TILE       (1 << TILE_SHIFT)  /* fast: tiles and the rows of them a thread draws */
 #define MAX_TILES_X 512               /* fast: no coarse depth on frames wider than 8192 */
 #define MAX_THREADS 16
+#define SMAP 512               /* fast, high: the sun's shadow map, texels a side */
+#define SMAP_TEXEL 0.25f       /* studs a texel: the map covers 128 studs round the camera's focus */
+#define SDEPTH_SCALE 262144.0f /* shadow map depth units a stud */
+#define SDEPTH_OFFSET 4096.0f
+/* how far behind the map's depth a point must be to be in shadow, by its
+ * face's shadow level (faces the sun lights at a slant need a little more) */
+static const f32 k_shadow_bias[8] = { 0, 0.3f * SDEPTH_SCALE, 0.2f * SDEPTH_SCALE, 0.12f * SDEPTH_SCALE,
+                                      0.1f * SDEPTH_SCALE, 0.1f * SDEPTH_SCALE, 0.1f * SDEPTH_SCALE, 0.1f * SDEPTH_SCALE };
+#define FOG_BITS 4096          /* fog table: by the exponent and top 7 bits of a depth as a float, */
+#define FOG_BASE (127 << 7)    /* from 1 (exponent 127) to 2^32 (159) */
 
 /* View-space vertex with texture coordinates in texels. */
 typedef struct {
-    f32 x, y, z, u, v;
+    f32 x, y, z, u, v, l;   /* l: smooth faces' light (a ramp index) */
 } cvert;
 
 /* Projected vertex: screen position plus attributes that are linear in
  * screen space (1/z, u/z, v/z). */
 typedef struct {
-    f32 sx, sy, iz, uz, vz;
+    f32 sx, sy, iz, uz, vz, l;
 } pvert;
 
 /* Screen-space gradients of the attributes over the current polygon. */
 typedef struct {
-    f32 diz_dx, diz_dy, duz_dx, duz_dy, dvz_dx, dvz_dy;
-    f32 x0, y0, iz0, uz0, vz0;
+    f32 diz_dx, diz_dy, duz_dx, duz_dy, dvz_dx, dvz_dy, dl_dx, dl_dy;
+    f32 x0, y0, iz0, uz0, vz0, l0;
 } grads;
 
 /* How the current face turns texels into pixels. */
+#define RAMP 64            /* smooth faces: light levels */
+#define RAMP_MAX 2.0f      /* the light at the top of the ramp (above 1: highlights going white) */
+
 typedef struct {
     const u8 *tex;         /* NULL: flat colour */
     u32 lut32[UB_TEX_LEVELS];
     u8 lut8[4][UB_TEX_LEVELS];
     u32 flat32;
     u8 flat8[4];
+    const u8 *mip[UB_TEX_MIPS]; /* the texture averaged for far away (mip[0] = tex) */
+    u32 ramp32[RAMP + 2];  /* smooth faces (fast renderer): the colour at each light level */
+    u8 ramp8[4][RAMP + 2];
 } shading;
 
 /* What one thread needs to draw polygons: everything else is shared and
@@ -61,7 +77,10 @@ typedef struct rctx {
     int see;               /* see-through level of the current part (0 = solid) */
     int subdiv;            /* pixels between perspective divides */
     int y0, y1;            /* the rows it may draw */
+    int w;                 /* and how wide they are */
+    u32 zmask, lvl;        /* fast, high: depths keep the face's shadow level in their low 3 bits */
     u32 pixels;            /* pixels tested (stats) */
+    bool mips;             /* fast: textures averaged for far away */
     const u8 *occ;         /* fast: per tile column of the current row of tiles, 1 = the polygon is hidden there */
     u8 *dirty;             /* fast: per tile column, drawn into since its depth was taken */
 } rctx;
@@ -73,11 +92,12 @@ typedef void (*span_fn)(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz);
  * an 8-bit table costs 128 palette searches. Direct-mapped, keyed exactly.
  * The fast renderer draws after the whole scene is set up, so an entry in
  * use this frame is never replaced: a clash takes a table from a pool. */
-#define LUT_CACHE 512
+#define LUT_CACHE 2048
 typedef struct {
     u32 color;
-    i16 light_q;
+    i16 q[3];              /* the light (or a ramp's tint) per channel, 1/256 steps */
     u8 material, format;
+    bool ramp;
     bool used;
     u32 frame;
     shading s;
@@ -103,7 +123,7 @@ typedef struct {
     u32 first;             /* its vertices in the pool */
     u32 znear;             /* depth (z-buffer units) of its nearest point */
     i16 x0, x1, y0, y1;    /* pixels it can touch */
-    u8 n, see, subdiv;
+    u8 n, see, subdiv, lvl;
 } fpoly;
 
 static struct {
@@ -137,6 +157,27 @@ static struct {
     bool flushed;          /* the scene is drawn (this frame) */
     int strips, tiles_x;
     u32 t_pixels[MAX_THREADS], t_hidden[MAX_THREADS];
+    int quality;           /* fast: 0 low (plain lighting), 1 medium (colour, smooth faces, fog), 2 high (and shadows) */
+    f32 sky_tint[3], ground_tint[3], sun_tint[3]; /* the lights' colours, averaging 1 */
+    vec3 sun_view;         /* the sun's direction in view space */
+    /* fast, high: the sun's shadows */
+    bool shadow_on;
+    u32 *smap;             /* SMAP x SMAP depths seen from the sun (larger = nearer it), 0 = nothing */
+    vec3 lx, ly, lz;       /* the sun's view: across, up, towards the sun */
+    f32 lcx, lcy;          /* the middle of the map, along lx and ly */
+    const ub_part_draw **casters;
+    int ncasters, casters_cap;
+    fpoly *spolys;
+    int nspolys, spolys_cap;
+    pvert *sverts;
+    int nsverts, sverts_cap;
+    /* fast, medium and up: distance fog */
+    bool fog_on;
+    u32 fog_color;
+    u8 fog_lut[FOG_BITS];  /* fog amount (0..255) by a depth's float bits (fog_index) */
+    u8 remap[4][8][8][256];/* 256 colours: index -> shadowed (8 levels) and fogged (8 levels), per dither cell */
+    u32 remap_key;         /* what the remap tables were made for */
+    bool remap_ok;
 } R;
 
 /* -------------------------------------------------------------- setup */
@@ -164,6 +205,16 @@ void sw_shutdown(void)
     R.polys = NULL;
     R.verts = NULL;
     R.queue_cap = R.queue_tmp_cap = R.polys_cap = R.verts_cap = 0;
+    plat_free(R.smap);
+    plat_free(R.casters);
+    plat_free(R.spolys);
+    plat_free(R.sverts);
+    R.smap = NULL;
+    R.casters = NULL;
+    R.spolys = NULL;
+    R.sverts = NULL;
+    R.casters_cap = R.spolys_cap = R.sverts_cap = 0;
+    R.remap_ok = false;
     while (R.pool) {
         pool_block *n = R.pool->next;
         plat_free(R.pool);
@@ -179,6 +230,8 @@ void sw_set_fast(bool on, int threads)
 }
 
 bool sw_fast(void) { return R.fast; }
+
+void sw_set_quality(int q) { R.quality = UB_CLAMP(q, 0, 2); }
 
 int sw_threads(void)
 {
@@ -267,6 +320,9 @@ static void set_plane(int i, f32 a, f32 b, f32 c, f32 d)
     for (int k = 0; k < 4; ++k) R.cull[i][k] = R.clip[i][k] / len;
 }
 
+static vec3 to_view(vec3 w);
+static vec3 to_view_dir(vec3 w) { return to_view(w); }
+
 void sw_begin(ub_framebuffer *fb, const ub_camera *cam, const ub_render_env *env)
 {
     R.t0 = plat_time_us();
@@ -308,10 +364,63 @@ void sw_begin(ub_framebuffer *fb, const ub_camera *cam, const ub_render_env *env
     set_plane(3, 0, -R.focal, R.cy, 0);          /* top:    sy >= 0 */
     set_plane(4, 0, R.focal, h - R.cy, 0);       /* bottom: sy <= h */
 
+    /* the lights' colours, as tints that average 1 (the fast renderer's) */
+    u32 lc[3] = { env->sky_light, env->ground_light, env->sun_color };
+    f32 *tint[3] = { R.sky_tint, R.ground_tint, R.sun_tint };
+    for (int i = 0; i < 3; ++i) {
+        f32 r = (f32)((lc[i] >> 16) & 255), g = (f32)((lc[i] >> 8) & 255), b = (f32)(lc[i] & 255);
+        f32 avg = (r + g + b) / 3.0f;
+        if (avg < 1) r = g = b = avg = 1;
+        tint[i][0] = r / avg;
+        tint[i][1] = g / avg;
+        tint[i][2] = b / avg;
+    }
+    R.sun_view = to_view_dir(env->sun_dir);
+
+    /* fast, high: the sun's shadow map round the camera's focus, its middle
+     * on the map's grid so the shadows' edges keep still as it moves */
+    R.shadow_on = R.fast && R.quality >= 2 && env->sun_strength > 0.05f && env->sun_dir.y > 0.05f;
+    R.ncasters = R.nspolys = R.nsverts = 0;
+    if (R.shadow_on && !R.smap) {
+        R.smap = (u32 *)plat_alloc(sizeof(u32) * SMAP * SMAP);
+        if (!R.smap) R.shadow_on = false;
+    }
+    if (R.shadow_on) {
+        R.lz = v3_normalize(env->sun_dir);
+        vec3 a = ub_absf(R.lz.y) < 0.9f ? v3(0, 1, 0) : v3(1, 0, 0);
+        R.lx = v3_normalize(v3_cross(a, R.lz));
+        R.ly = v3_cross(R.lz, R.lx);
+        R.lcx = (f32)ub_rint(v3_dot(cam->focus, R.lx) / SMAP_TEXEL) * SMAP_TEXEL;
+        R.lcy = (f32)ub_rint(v3_dot(cam->focus, R.ly) / SMAP_TEXEL) * SMAP_TEXEL;
+    }
+    /* fast, medium and up: fog towards the horizon's colour, looked up by
+     * depth (the z-buffer's 1/z as a float's bits: no divide per pixel) */
+    /* (not in 256 colours: light fog snaps to a palette colour too far off) */
+    R.fog_on = R.fast && R.quality >= 1 && env->fog_density > 0.0001f && fb->format == UB_PIXEL_XRGB32;
+    if (R.fog_on) {
+        static f32 last_density = -1;
+        if (env->fog_density != last_density) {
+            for (int i = 0; i < FOG_BITS; ++i) {
+                union { u32 b; f32 f; } u;
+                u.b = ((u32)(i + FOG_BASE) << 16) | 0x8000u; /* the middle of the bucket */
+                f32 zv = u.f; /* a z-buffer value (2^28 / z) */
+                f32 d = zv > 1 ? ZSCALE / zv * env->fog_density : 1e9f;
+                /* 1 - e^-d, without a library exp: (1 + d/64)^-64 */
+                f32 e = d < 1e6f ? 1.0f / (1.0f + d / 64.0f) : 0;
+                e = e * e; e = e * e; e = e * e; e = e * e; e = e * e; e = e * e;
+                R.fog_lut[i] = (u8)ub_clampf((1.0f - e) * 255.0f + 0.5f, 0, 255);
+            }
+            last_density = env->fog_density;
+        }
+        R.fog_color = env->sky_horizon;
+    }
+
     memset(&R.main, 0, sizeof R.main);
     R.main.subdiv = SUBDIV;
     R.main.y0 = 0;
     R.main.y1 = fb->height;
+    R.main.w = fb->width;
+    R.main.zmask = ~0u;
     if (!R.fast) {
         /* (the fast renderer clears and draws the sky row by row, in its threads) */
         if (R.zbuf) memset(R.zbuf, 0, (size_t)R.zw * R.zh * sizeof(u32));
@@ -343,8 +452,8 @@ static void span_flat32(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
     u32 *row = R.fb->pixels + y * R.fb->pitch;
     u32 *zrow = R.zbuf + y * R.zw;
     u32 col = c->s->flat32;
-    u32 zf = ub_rintu(iz * ZSCALE);
-    u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE);
+    u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl;
+    u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
     for (int x = x0; x < x1; ++x) {
         if (zf > zrow[x]) {
             zrow[x] = zf;
@@ -361,8 +470,8 @@ static void span_flat8(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
     u8 *row = R.fb->pixels8 + y * R.fb->pitch;
     u32 *zrow = R.zbuf + y * R.zw;
     u8 even = c->s->flat8[(y & 1) << 1], odd = c->s->flat8[((y & 1) << 1) | 1];
-    u32 zf = ub_rintu(iz * ZSCALE);
-    u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE);
+    u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl;
+    u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
     for (int x = x0; x < x1; ++x) {
         if (zf > zrow[x]) {
             zrow[x] = zf;
@@ -402,8 +511,8 @@ static void segment(const rctx *c, seg *s, int len, f32 *iz, f32 *uz, f32 *vz, f
     s->v = ub_rint((*v - bv) * 65536.0f);
     s->du = ub_rint(su * inv);
     s->dv = ub_rint(sv * inv);
-    s->z = ub_rintu(*iz * ZSCALE);
-    s->dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE);
+    s->z = (ub_rintu(*iz * ZSCALE) & c->zmask) | c->lvl;
+    s->dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
     *iz = iz2;
     *uz = uz2;
     *vz = vz2;
@@ -474,8 +583,8 @@ static void span_see32(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
     c->pixels += (u32)(x1 - x0);
     if (!c->s->tex) {
         u32 col = c->s->flat32;
-        u32 zf = ub_rintu(iz * ZSCALE);
-        u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE);
+        u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl;
+        u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
         for (int x = x0; x < x1; ++x, zf += dz)
             if (pat[x & 3] >= level && zf > zrow[x]) {
                 zrow[x] = zf;
@@ -512,8 +621,8 @@ static void span_see8(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
     c->pixels += (u32)(x1 - x0);
     if (!c->s->tex) {
         u8 even = c->s->flat8[(y & 1) << 1], odd = c->s->flat8[((y & 1) << 1) | 1];
-        u32 zf = ub_rintu(iz * ZSCALE);
-        u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE);
+        u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl;
+        u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
         for (int x = x0; x < x1; ++x, zf += dz)
             if (pat[x & 3] >= level && zf > zrow[x]) {
                 zrow[x] = zf;
@@ -549,17 +658,32 @@ static inline u32 pack_uv(const seg *s) { return ((u32)(s->v >> 6) << 16) | ((u3
 static inline u32 pack_duv(const seg *s) { return ((u32)(s->dv >> 6) << 16) + (u32)(s->du >> 6); }
 #define PTEXEL(tex, uv) (tex)[(((uv) >> 20) & (UB_TEX_MASK << UB_TEX_SHIFT)) | (((uv) >> 10) & UB_TEX_MASK)]
 
+/* Which of the texture's averaged versions suits a segment starting at
+ * (u, v) (texels) with 1/z = iz on row y: how many texels a pixel covers,
+ * across and down the screen (mipmapping, in the fast renderer). */
+static const u8 *mip_for(const rctx *c, f32 iz, f32 u, f32 v)
+{
+    if (!c->mips) return c->s->tex;
+    f32 z = 1.0f / iz;
+    f32 udx = (c->g.duz_dx - u * c->g.diz_dx) * z, vdx = (c->g.dvz_dx - v * c->g.diz_dx) * z;
+    f32 udy = (c->g.duz_dy - u * c->g.diz_dy) * z, vdy = (c->g.dvz_dy - v * c->g.diz_dy) * z;
+    f32 a = udx * udx + vdx * vdx, b = udy * udy + vdy * vdy;
+    f32 r2 = a > b ? a : b;
+    int k = r2 < 1.96f ? 0 : r2 < 7.84f ? 1 : r2 < 31.4f ? 2 : r2 < 125.0f ? 3 : r2 < 502.0f ? 4 : 5;
+    return c->s->mip[k];
+}
+
 static void span_ftex32(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
 {
     u32 *row = R.fb->pixels + y * R.fb->pitch + x0;
     u32 *zp = R.zbuf + y * R.zw + x0;
-    const u8 *tex = c->s->tex;
     const u32 *lut = c->s->lut32;
     f32 z = 1.0f / iz, u = uz * z, v = vz * z;
     c->pixels += (u32)(x1 - x0);
     while (x0 < x1) {
         int len = x1 - x0 > c->subdiv ? c->subdiv : x1 - x0;
         seg s;
+        const u8 *tex = mip_for(c, iz, u, v);
         segment(c, &s, len, &iz, &uz, &vz, &u, &v);
         u32 uv = pack_uv(&s), zf = s.z;
         const u32 duv = pack_duv(&s), dz = s.dz;
@@ -582,13 +706,13 @@ static void span_ftex8(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
 {
     u8 *row = R.fb->pixels8 + y * R.fb->pitch;
     u32 *zrow = R.zbuf + y * R.zw;
-    const u8 *tex = c->s->tex;
     const u8 *lut[2] = { c->s->lut8[(y & 1) << 1], c->s->lut8[((y & 1) << 1) | 1] };
     f32 z = 1.0f / iz, u = uz * z, v = vz * z;
     c->pixels += (u32)(x1 - x0);
     while (x0 < x1) {
         int len = x1 - x0 > c->subdiv ? c->subdiv : x1 - x0;
         seg s;
+        const u8 *tex = mip_for(c, iz, u, v);
         segment(c, &s, len, &iz, &uz, &vz, &u, &v);
         u32 uv = pack_uv(&s), zf = s.z;
         const u32 duv = pack_duv(&s), dz = s.dz;
@@ -625,6 +749,60 @@ static void span_ftex8(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
     }
 }
 
+/* Smooth faces (fast renderer): flat colour, the light stepped across the
+ * span through the face's ramp (16.16 fixed point). */
+static void smooth_start(const rctx *c, int y, int x0, int x1, i32 *l, i32 *dl)
+{
+    f32 fl = c->g.l0 + c->g.dl_dx * ((f32)x0 + 0.5f - c->g.x0) + c->g.dl_dy * ((f32)y + 0.5f - c->g.y0);
+    f32 fe = fl + c->g.dl_dx * (f32)(x1 - x0 - 1);
+    fl = ub_clampf(fl, 0, (f32)RAMP - 0.01f);
+    fe = ub_clampf(fe, 0, (f32)RAMP - 0.01f);
+    *l = ub_rint(fl * 65536.0f);
+    *dl = x1 - x0 > 1 ? ub_rint((fe - fl) * 65536.0f / (f32)(x1 - x0 - 1)) : 0;
+}
+
+static void span_smooth32(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
+{
+    (void)uz; (void)vz;
+    u32 *row = R.fb->pixels + y * R.fb->pitch + x0;
+    u32 *zp = R.zbuf + y * R.zw + x0;
+    const u32 *ramp = c->s->ramp32;
+    u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl, dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
+    i32 l, dl;
+    smooth_start(c, y, x0, x1, &l, &dl);
+    c->pixels += (u32)(x1 - x0);
+    for (int n = x1 - x0; n > 0; --n) {
+        if (zf > *zp) {
+            *zp = zf;
+            *row = ramp[l >> 16];
+        }
+        zp++;
+        row++;
+        zf += dz;
+        l += dl;
+    }
+}
+
+static void span_smooth8(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
+{
+    (void)uz; (void)vz;
+    u8 *row = R.fb->pixels8 + y * R.fb->pitch;
+    u32 *zrow = R.zbuf + y * R.zw;
+    const u8 *re = c->s->ramp8[(y & 1) << 1], *ro = c->s->ramp8[((y & 1) << 1) | 1];
+    u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl, dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
+    i32 l, dl;
+    smooth_start(c, y, x0, x1, &l, &dl);
+    c->pixels += (u32)(x1 - x0);
+    for (int x = x0; x < x1; ++x) {
+        if (zf > zrow[x]) {
+            zrow[x] = zf;
+            row[x] = ((x & 1) ? ro : re)[l >> 16];
+        }
+        zf += dz;
+        l += dl;
+    }
+}
+
 /* ------------------------------------------------------- rasterizer */
 
 /* Attribute gradients from the largest triangle fan member, for numerical
@@ -652,6 +830,9 @@ static bool poly_grads(const pvert *p, int n, grads *g)
     g->duz_dy = ((c->uz - a->uz) * x1 - (b->uz - a->uz) * x2) * inv;
     g->dvz_dx = ((b->vz - a->vz) * y2 - (c->vz - a->vz) * y1) * inv;
     g->dvz_dy = ((c->vz - a->vz) * x1 - (b->vz - a->vz) * x2) * inv;
+    g->dl_dx = ((b->l - a->l) * y2 - (c->l - a->l) * y1) * inv;
+    g->dl_dy = ((c->l - a->l) * x1 - (b->l - a->l) * x2) * inv;
+    g->l0 = a->l;
     g->x0 = a->sx;
     g->y0 = a->sy;
     g->iz0 = a->iz;
@@ -696,7 +877,7 @@ static void raster_scan(rctx *c, const pvert *p, int n, span_fn span)
     int bi = top, bn = (top + n - 1) % n;      /* chain B: decreasing index */
     f32 aslope = 0, bslope = 0;
     bool a_set = false, b_set = false;
-    const int w = R.fb->width;
+    const int w = c->w;
 
     for (; y < yend; ++y) {
         f32 fy = (f32)y + 0.5f;
@@ -755,6 +936,7 @@ static int clip_poly(const cvert *in, int n, cvert *out, const f32 *pl)
             o->z = a->z + (b->z - a->z) * t;
             o->u = a->u + (b->u - a->u) * t;
             o->v = a->v + (b->v - a->v) * t;
+            o->l = a->l + (b->l - a->l) * t;
         }
     }
     return m;
@@ -762,26 +944,57 @@ static int clip_poly(const cvert *in, int n, cvert *out, const f32 *pl)
 
 /* --------------------------------------------------------------- parts */
 
-static void fill_shading(shading *sh, u32 color, ub_material mat, i32 lq, bool idx8)
+static u32 pack_rgb(i32 r, i32 g, i32 b)
+{
+    return ((u32)UB_CLAMP(r, 0, 255) << 16) | ((u32)UB_CLAMP(g, 0, 255) << 8) | (u32)UB_CLAMP(b, 0, 255);
+}
+
+/* The colour table for a face: its colour in light q (per channel, 256 =
+ * full), through the material's texture levels. */
+static void fill_shading(shading *sh, u32 color, ub_material mat, const i16 *q, bool idx8)
 {
     i32 r = (i32)((color >> 16) & 255), g = (i32)((color >> 8) & 255), b = (i32)(color & 255);
     sh->tex = ub_texture(mat);
+    for (int k = 0; k < UB_TEX_MIPS; ++k) sh->mip[k] = ub_texture_mip(mat, k);
     if (!sh->tex) {
-        i32 rr = (r * lq) >> 8, gg = (g * lq) >> 8, bb = (b * lq) >> 8;
+        i32 rr = (r * q[0]) >> 8, gg = (g * q[1]) >> 8, bb = (b * q[2]) >> 8;
         if (idx8) {
             for (int d = 0; d < 4; ++d) sh->flat8[d] = ub_palette_match(rr, gg, bb, d);
         } else {
-            sh->flat32 = ((u32)UB_MIN(rr, 255) << 16) | ((u32)UB_MIN(gg, 255) << 8) | (u32)UB_MIN(bb, 255);
+            sh->flat32 = pack_rgb(rr, gg, bb);
         }
         return;
     }
     for (int t = 0; t < UB_TEX_LEVELS; ++t) {
-        i32 k = (lq * ub_texel_gain(t)) >> 8;
-        i32 rr = (r * k) >> 8, gg = (g * k) >> 8, bb = (b * k) >> 8;
+        i32 k = ub_texel_gain(t);
+        i32 rr = (r * ((q[0] * k) >> 8)) >> 8, gg = (g * ((q[1] * k) >> 8)) >> 8, bb = (b * ((q[2] * k) >> 8)) >> 8;
         if (idx8) {
             for (int d = 0; d < 4; ++d) sh->lut8[d][t] = ub_palette_match(rr, gg, bb, d);
         } else {
-            sh->lut32[t] = ((u32)UB_MIN(rr, 255) << 16) | ((u32)UB_MIN(gg, 255) << 8) | (u32)UB_MIN(bb, 255);
+            sh->lut32[t] = pack_rgb(rr, gg, bb);
+        }
+    }
+}
+
+/* A smooth face's ramp: its colour, tinted by q (per channel, 256 = 1),
+ * from no light to RAMP_MAX; past 1 the highlight goes towards white. */
+static void fill_ramp(shading *sh, u32 color, const i16 *q, bool idx8)
+{
+    f32 c[3] = { (f32)((color >> 16) & 255), (f32)((color >> 8) & 255), (f32)(color & 255) };
+    sh->tex = NULL;
+    for (int i = 0; i < RAMP + 2; ++i) {
+        f32 lv = (f32)UB_MIN(i, RAMP - 1) * RAMP_MAX / (f32)(RAMP - 1);
+        f32 o[3];
+        for (int k = 0; k < 3; ++k) {
+            f32 d = c[k] * (f32)q[k] / 256.0f * (lv < 1 ? lv : 1);
+            if (lv > 1) d += (255.0f - d) * ub_clampf((lv - 1) * 0.8f, 0, 1);
+            o[k] = d;
+        }
+        i32 rr = ub_rint(o[0]), gg = ub_rint(o[1]), bb = ub_rint(o[2]);
+        if (idx8) {
+            for (int d = 0; d < 4; ++d) sh->ramp8[d][i] = ub_palette_match(rr, gg, bb, d);
+        } else {
+            sh->ramp32[i] = pack_rgb(rr, gg, bb);
         }
     }
 }
@@ -809,33 +1022,72 @@ static shading *pool_take(void)
     return &R.pool_cur->s[R.pool_used++];
 }
 
-/* light is 0..1.3; quantised to 1/64 steps (finer is invisible). */
-static const shading *select_shading(u32 color, ub_material mat, f32 light)
+/* The table for (colour, material, light per channel 0..1.6), cached;
+ * ramp: a smooth face's ramp, the light being its tint. Light is
+ * quantised to 1/64 steps (finer is invisible). */
+static const shading *select_table(u32 color, ub_material mat, const f32 *light, bool ramp)
 {
-    i32 lq = (i32)(ub_clampf(light, 0.0f, 1.3f) * 64.0f) * 4;
+    i16 q[3];
+    for (int k = 0; k < 3; ++k) q[k] = (i16)((i32)(ub_clampf(light[k], 0.0f, 1.6f) * 64.0f) * 4);
     u8 fmt = (u8)R.fb->format;
-    u32 h = (color * 2654435761u) ^ ((u32)lq * 40503u) ^ ((u32)mat * 97u) ^ ((u32)fmt * 7919u);
+    if (ramp) mat = UB_MAT_PLASTIC;
+    u32 h = (color * 2654435761u) ^ ((u32)q[0] * 40503u) ^ ((u32)q[1] * 9973u) ^ ((u32)q[2] * 70001u) ^
+            ((u32)mat * 97u) ^ ((u32)fmt * 7919u) ^ (ramp ? 0x5bd1e995u : 0);
     lut_entry *e = &g_lut_cache[(h ^ (h >> 15)) & (LUT_CACHE - 1)];
-    if (!e->used || e->color != color || e->light_q != lq || e->material != mat || e->format != fmt) {
+    if (!e->used || e->color != color || e->q[0] != q[0] || e->q[1] != q[1] || e->q[2] != q[2] || e->material != mat ||
+        e->format != fmt || e->ramp != ramp) {
+        shading *s = &e->s;
+        bool cached = true;
         if (R.fast && e->used && e->frame == R.frame) {
             /* the slot holds another table a waiting polygon uses */
-            shading *s = pool_take();
-            if (s) {
-                fill_shading(s, color, mat, lq, fmt == UB_PIXEL_INDEX8);
-                R.st.luts_built++;
-                return s;
+            shading *p = pool_take();
+            if (p) {
+                s = p;
+                cached = false;
             }
         }
-        fill_shading(&e->s, color, mat, lq, fmt == UB_PIXEL_INDEX8);
+        if (ramp) fill_ramp(s, color, q, fmt == UB_PIXEL_INDEX8);
+        else fill_shading(s, color, mat, q, fmt == UB_PIXEL_INDEX8);
+        R.st.luts_built++;
+        if (!cached) return s;
         e->color = color;
-        e->light_q = (i16)lq;
+        for (int k = 0; k < 3; ++k) e->q[k] = q[k];
         e->material = (u8)mat;
         e->format = fmt;
+        e->ramp = ramp;
         e->used = true;
-        R.st.luts_built++;
     }
     e->frame = R.frame;
     return &e->s;
+}
+
+static const shading *select_shading(u32 color, ub_material mat, f32 light)
+{
+    f32 l[3] = { light, light, light };
+    return select_table(color, mat, l, false);
+}
+
+/* The fast renderer's light on a face turned to n (world space): the sky's
+ * colour from above, the ground's from below, the sun's. */
+static void light_rgb(vec3 n, f32 *out)
+{
+    f32 ndl = v3_dot(n, R.env.sun_dir);
+    if (ndl < 0) ndl = 0;
+    f32 a = R.env.ambient * (0.8f + 0.2f * n.y), up = n.y * 0.5f + 0.5f;
+    for (int k = 0; k < 3; ++k)
+        out[k] = a * (R.ground_tint[k] + (R.sky_tint[k] - R.ground_tint[k]) * up) + R.env.sun_strength * ndl * R.sun_tint[k];
+}
+
+/* x^n for a whole n (highlights) */
+static f32 powi(f32 x, int n)
+{
+    f32 r = 1;
+    while (n > 0) {
+        if (n & 1) r *= x;
+        x *= x;
+        n >>= 1;
+    }
+    return r;
 }
 
 static vec3 to_view(vec3 w)
@@ -858,7 +1110,7 @@ static bool grow(void **p, int *cap, int need, size_t elem)
 }
 
 /* A polygon ready to draw: now (plain renderer) or after the scene (fast). */
-static void out_poly(const pvert *pv, int n, span_fn span, const shading *sh, int see)
+static void out_poly(const pvert *pv, int n, span_fn span, const shading *sh, int see, int lvl)
 {
     grads g;
     if (!poly_grads(pv, n, &g)) return;
@@ -882,6 +1134,7 @@ static void out_poly(const pvert *pv, int n, span_fn span, const shading *sh, in
     fp->first = (u32)R.nverts;
     fp->n = (u8)n;
     fp->see = (u8)see;
+    fp->lvl = (u8)lvl;
     f32 x0 = pv[0].sx, x1 = pv[0].sx, y0 = pv[0].sy, y1 = pv[0].sy, izmin = pv[0].iz, izmax = pv[0].iz;
     for (int i = 0; i < n; ++i) {
         R.verts[R.nverts++] = pv[i];
@@ -908,7 +1161,13 @@ static void out_poly(const pvert *pv, int n, span_fn span, const shading *sh, in
 /* Sets up (and draws, or keeps) every face of a part. */
 static void part_faces(const ub_part_draw *p, vec3 size, vec3 centre)
 {
-    const ub_mesh *mesh = p->mesh ? p->mesh : ub_mesh_get((ub_shape)p->shape, UB_DETAIL_LOW);
+    ub_detail detail = UB_DETAIL_LOW;
+    if (R.fast && R.quality >= 1 && !p->mesh) {
+        /* big on the screen: the round shapes' finer mesh */
+        f32 radius = 0.5f * v3_length(size), z = centre.z > NEAR_Z ? centre.z : NEAR_Z;
+        if (radius * R.focal / z > 48.0f) detail = UB_DETAIL_HIGH;
+    }
+    const ub_mesh *mesh = p->mesh ? p->mesh : ub_mesh_get((ub_shape)p->shape, detail);
     ub_material mat = (ub_material)(p->material < UB_MAT_COUNT ? p->material : UB_MAT_PLASTIC);
     bool textured = ub_texture(mat) != NULL;
     f32 texels_per_unit = (f32)UB_TEX_SIZE / ub_materials[mat].world_size;
@@ -954,10 +1213,55 @@ static void part_faces(const ub_part_draw *p, vec3 size, vec3 centre)
         vec3 nv = to_view(nw);
         if (v3_dot(nv, view[f->v[0]]) >= 0) { R.st.faces_backfacing++; continue; }
 
-        f32 sun = v3_dot(nw, R.env.sun_dir);
-        f32 light = R.env.ambient * (0.8f + 0.2f * nw.y) + R.env.sun_strength * (sun > 0 ? sun : 0);
-        if (p->flags & UB_DRAW_GLOW) light = 1.25f;
-        const shading *sh = select_shading(p->color, mat, light);
+        const shading *sh;
+        span_fn fspan = span;
+        bool smooth = false;
+        int lvl = 0; /* how much of its light is the sun's (where shadows darken it), 0 = none */
+        if (R.shadow_on && !(p->flags & UB_DRAW_GLOW)) {
+            f32 ndl = v3_dot(nw, R.env.sun_dir);
+            if (ndl > 0.03f) {
+                f32 sun = R.env.sun_strength * ndl, amb = R.env.ambient * (0.8f + 0.2f * nw.y);
+                lvl = UB_CLAMP(ub_rint(sun / (sun + amb) * 0.85f * 8.0f), 0, 7);
+            }
+        }
+        f32 vl[UB_FACE_MAX_VERTS];
+        if (R.fast && R.quality >= 1 && !(p->flags & UB_DRAW_GLOW)) {
+            /* in colour; curved faces lit at each corner, with a highlight */
+            f32 rgb[3];
+            light_rgb(nw, rgb);
+            smooth = f->smooth && mesh->vnormals && !textured && !see;
+            if (smooth) {
+                f32 lum = (rgb[0] + rgb[1] + rgb[2]) / 3.0f, tint[3];
+                /* (coarse steps: one ramp serves a ball's faces) */
+                for (int k = 0; k < 3; ++k) tint[k] = (f32)ub_rint((lum > 0.02f ? rgb[k] / lum : 1.0f) * 16.0f) / 16.0f;
+                sh = select_table(p->color, mat, tint, true);
+                f32 spec = ub_materials[mat].specular;
+                int shine = (int)ub_materials[mat].shininess;
+                for (int i = 0; i < f->count; ++i) {
+                    vec3 vn = mesh->vnormals[f->v[i]];
+                    vec3 nws = v3_normalize(mat3_apply(&p->rot, v3_normalize(v3(vn.x / size.x, vn.y / size.y, vn.z / size.z))));
+                    f32 c3[3];
+                    light_rgb(nws, c3);
+                    f32 l = (c3[0] + c3[1] + c3[2]) / 3.0f;
+                    vec3 nvv = to_view(nws);
+                    f32 ndl = v3_dot(nvv, R.sun_view);
+                    if (ndl > 0 && spec > 0) {
+                        vec3 h = v3_normalize(v3_sub(R.sun_view, v3_normalize(view[f->v[i]])));
+                        f32 ndh = v3_dot(nvv, h);
+                        if (ndh > 0) l += spec * powi(ndh, shine) * ndl * R.env.sun_strength * 2.0f;
+                    }
+                    vl[i] = ub_clampf(l, 0, RAMP_MAX) * (f32)(RAMP - 1) / RAMP_MAX;
+                }
+                fspan = R.fb->format == UB_PIXEL_INDEX8 ? span_smooth8 : span_smooth32;
+            } else {
+                sh = select_table(p->color, mat, rgb, false);
+            }
+        } else {
+            f32 sun = v3_dot(nw, R.env.sun_dir);
+            f32 light = R.env.ambient * (0.8f + 0.2f * nw.y) + R.env.sun_strength * (sun > 0 ? sun : 0);
+            if (p->flags & UB_DRAW_GLOW) light = 1.25f;
+            sh = select_shading(p->color, mat, light);
+        }
 
         /* Planar texture mapping in the part's scaled space: u along the
          * face's first edge, v perpendicular to it within the face. */
@@ -973,6 +1277,7 @@ static void part_faces(const ub_part_draw *p, vec3 size, vec3 centre)
             a[i].x = v.x;
             a[i].y = v.y;
             a[i].z = v.z;
+            a[i].l = smooth ? vl[i] : 0;
             if (textured) {
                 vec3 d = v3_sub(v3_mul(mesh->verts[f->v[i]], size), s0);
                 a[i].u = v3_dot(d, tu) * texels_per_unit;
@@ -1006,12 +1311,13 @@ static void part_faces(const ub_part_draw *p, vec3 size, vec3 centre)
             pv[i].iz = iz;
             pv[i].uz = in[i].u * iz;
             pv[i].vz = in[i].v * iz;
+            pv[i].l = in[i].l;
             /* comparisons are false for NaN, so this also rejects NaN */
             if (!(pv[i].sx > -1.0e5f && pv[i].sx < 1.0e5f && pv[i].sy > -1.0e5f && pv[i].sy < 1.0e5f))
                 sane = false;
         }
         if (!sane) continue;
-        out_poly(pv, n, span, sh, see);
+        out_poly(pv, n, fspan, sh, see, lvl);
     }
 }
 
@@ -1024,6 +1330,14 @@ void sw_part(const ub_part_draw *p)
     vec3 centre = to_view(v3_sub(p->pos, R.cam_pos));
     f32 radius = 0.5f * v3_length(size);
 
+    /* shadows come from parts near the camera's focus, seen or not */
+    if (R.shadow_on && ub_draw_see_level(p->flags) < 8) {
+        f32 px = v3_dot(p->pos, R.lx) - R.lcx, py = v3_dot(p->pos, R.ly) - R.lcy;
+        f32 half = SMAP_TEXEL * SMAP * 0.5f + radius;
+        if (px > -half && px < half && py > -half && py < half &&
+            grow((void **)&R.casters, &R.casters_cap, R.ncasters + 1, sizeof(*R.casters)))
+            R.casters[R.ncasters++] = p;
+    }
     /* bounding sphere against the far distance and the five planes */
     if (centre.z - radius > R.far_dist) { R.st.parts_culled++; return; }
     for (int i = 0; i < 5; ++i) {
@@ -1092,6 +1406,243 @@ static bool tile_depth(int tx, int y0, int y1, u32 thr, u32 *far)
     return true;
 }
 
+/* ------------------------------------------- shadows, fog, the sun
+ * (the fast renderer, medium and high) */
+
+/* The shadow map's depth spans: nearest the sun wins. */
+static void span_shadow(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
+{
+    (void)uz; (void)vz;
+    u32 *row = R.smap + y * SMAP;
+    u32 zf = ub_rintu(iz), dz = (u32)ub_rint(c->g.diz_dx);
+    for (int x = x0; x < x1; ++x, zf += dz)
+        if (zf > row[x]) row[x] = zf;
+}
+
+/* A point in the shadow map: x, y in texels; depth in its units. */
+static void to_smap(vec3 w, f32 *x, f32 *y, f32 *d)
+{
+    *x = (v3_dot(w, R.lx) - R.lcx) / SMAP_TEXEL + SMAP * 0.5f;
+    *y = (R.lcy - v3_dot(w, R.ly)) / SMAP_TEXEL + SMAP * 0.5f;
+    *d = (v3_dot(w, R.lz) + SDEPTH_OFFSET) * SDEPTH_SCALE;
+}
+
+/* The casters' faces turned from the sun, as polygons on the map. */
+static void shadow_polys(void)
+{
+    for (int ci = 0; ci < R.ncasters; ++ci) {
+        const ub_part_draw *p = R.casters[ci];
+        vec3 size = v3(UB_MAX(p->size.x, 0.01f), UB_MAX(p->size.y, 0.01f), UB_MAX(p->size.z, 0.01f));
+        const ub_mesh *mesh = p->mesh ? p->mesh : ub_mesh_get((ub_shape)p->shape, UB_DETAIL_LOW);
+        for (int fi = 0; fi < mesh->face_count; ++fi) {
+            const ub_face *f = &mesh->faces[fi];
+            vec3 ns = v3_normalize(v3(f->normal.x / size.x, f->normal.y / size.y, f->normal.z / size.z));
+            /* the faces turned away from the sun: a lit face is then always
+             * nearer the sun than its own part's far side, so it never
+             * shadows itself */
+            if (v3_dot(mat3_apply(&p->rot, ns), R.lz) >= 0) continue;
+            if (!grow((void **)&R.sverts, &R.sverts_cap, R.nsverts + f->count, sizeof(pvert)) ||
+                !grow((void **)&R.spolys, &R.spolys_cap, R.nspolys + 1, sizeof(fpoly)))
+                return;
+            pvert *pv = R.sverts + R.nsverts;
+            f32 x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+            bool sane = true;
+            for (int i = 0; i < f->count; ++i) {
+                vec3 l = v3_mul(mesh->verts[f->v[i]], size);
+                vec3 w = v3_add(p->pos, mat3_apply(&p->rot, l));
+                memset(&pv[i], 0, sizeof pv[i]);
+                to_smap(w, &pv[i].sx, &pv[i].sy, &pv[i].iz);
+                if (!(pv[i].sx > -1.0e5f && pv[i].sx < 1.0e5f && pv[i].sy > -1.0e5f && pv[i].sy < 1.0e5f)) sane = false;
+                x0 = UB_MIN(x0, pv[i].sx);
+                x1 = UB_MAX(x1, pv[i].sx);
+                y0 = UB_MIN(y0, pv[i].sy);
+                y1 = UB_MAX(y1, pv[i].sy);
+            }
+            if (!sane || x1 < 0 || y1 < 0 || x0 >= SMAP || y0 >= SMAP) continue;
+            fpoly *fp = &R.spolys[R.nspolys];
+            memset(fp, 0, sizeof *fp);
+            if (!poly_grads(pv, f->count, &fp->g)) continue;
+            fp->first = (u32)R.nsverts;
+            fp->n = (u8)f->count;
+            fp->y0 = (i16)UB_CLAMP((int)ub_floorf(y0), 0, SMAP);
+            fp->y1 = (i16)UB_CLAMP((int)ub_floorf(y1) + 2, 0, SMAP);
+            R.nsverts += f->count;
+            R.nspolys++;
+        }
+    }
+}
+
+/* Thread t draws rows t, t + threads... of tiles of the shadow map. */
+static void shadow_job(void *unused, int t)
+{
+    (void)unused;
+    rctx c;
+    memset(&c, 0, sizeof c);
+    c.w = SMAP;
+    for (int s = t; s < SMAP / TILE; s += R.threads) {
+        int y0 = s * TILE, y1 = y0 + TILE;
+        memset(R.smap + y0 * SMAP, 0, sizeof(u32) * TILE * SMAP);
+        c.y0 = y0;
+        c.y1 = y1;
+        for (int i = 0; i < R.nspolys; ++i) {
+            const fpoly *fp = &R.spolys[i];
+            if (fp->y1 <= y0 || fp->y0 >= y1) continue;
+            c.g = fp->g;
+            raster_scan(&c, R.sverts + fp->first, fp->n, span_shadow);
+        }
+    }
+}
+
+/* 256 colours: each index shadowed (8 levels) and fogged (8 levels), made
+ * again when the palette's use or the fog's colour changes */
+static void make_remap(void)
+{
+    u32 key = R.fog_color ^ 0x80000000u;
+    if (R.remap_ok && R.remap_key == key) return;
+    const u32 *pal = ub_palette;
+    i32 fr = (i32)((R.fog_color >> 16) & 255), fg = (i32)((R.fog_color >> 8) & 255), fb = (i32)(R.fog_color & 255);
+    for (int sh = 0; sh < 8; ++sh)
+        for (int fo = 0; fo < 8; ++fo)
+            for (int i = 0; i < 256; ++i) {
+                i32 m = 256 - sh * 32, f = fo * 32;
+                i32 r = (i32)((pal[i] >> 16) & 255) * m >> 8, g = (i32)((pal[i] >> 8) & 255) * m >> 8,
+                    b = (i32)(pal[i] & 255) * m >> 8;
+                r += (fr - r) * f >> 8;
+                g += (fg - g) * f >> 8;
+                b += (fb - b) * f >> 8;
+                for (int d = 0; d < 4; ++d) R.remap[d][sh][fo][i] = (sh || fo) ? ub_palette_match(r, g, b, d) : (u8)i;
+            }
+    R.remap_key = key;
+    R.remap_ok = true;
+}
+
+static inline u32 darken_fog32(u32 c, u32 m, u32 f, u32 fogc)
+{
+    u32 rb = c & 0xFF00FFu, g = c & 0x00FF00u;
+    if (m < 256) {
+        rb = ((rb * m) >> 8) & 0xFF00FFu;
+        g = ((g * m) >> 8) & 0x00FF00u;
+    }
+    if (f) {
+        u32 frb = fogc & 0xFF00FFu, fg = fogc & 0x00FF00u, k = 256 - f;
+        rb = ((rb * k + frb * f) >> 8) & 0xFF00FFu;
+        g = ((g * k + fg * f) >> 8) & 0x00FF00u;
+    }
+    return rb | g;
+}
+
+/* How lit a pixel is (256 = all, less in shadow): where its depth puts it
+ * on the shadow map, the four texels round that point weighted by nearness
+ * (soft edges), deeper than the map by the face level's bias. */
+static u32 shadow_at(int x, f32 zv, u32 lvl, f32 sx_base, f32 sy_base, f32 sd_base, f32 sx_row, f32 sy_row,
+                     f32 sd_row, f32 sx_step, f32 sy_step, f32 sd_step)
+{
+    f32 zz = ZSCALE / zv, fx = (f32)x;
+    f32 px = sx_base + zz * (sx_row + sx_step * fx) - 0.5f, py = sy_base + zz * (sy_row + sy_step * fx) - 0.5f;
+    i32 ix = ub_rint(px - 0.5f), iy = ub_rint(py - 0.5f);
+    if ((u32)ix >= SMAP - 1 || (u32)iy >= SMAP - 1) return 256;
+    const u32 *t = R.smap + iy * SMAP + ix;
+    u32 d = (u32)(sd_base + zz * (sd_row + sd_step * fx) + k_shadow_bias[lvl]);
+    u32 a = t[0] > d, b = t[1] > d, c = t[SMAP] > d, e = t[SMAP + 1] > d;
+    if (!(a | b | c | e)) return 256;
+    i32 wx = ub_rint((px - (f32)ix) * 256.0f), wy = ub_rint((py - (f32)iy) * 256.0f);
+    wx = UB_CLAMP(wx, 0, 256);
+    wy = UB_CLAMP(wy, 0, 256);
+    u32 top = a * (u32)(256 - wx) + b * (u32)wx, bot = c * (u32)(256 - wx) + e * (u32)wx;
+    u32 w = (top * (u32)(256 - wy) + bot * (u32)wy) >> 8; /* 0..256 */
+    return 256 - ((lvl * 32) * w >> 8);
+}
+
+/* After a row of tiles is drawn: the sky (and the sun) where nothing was;
+ * elsewhere each pixel's place in the world from its depth, its shadow
+ * (four samples of the map round it, so edges are soft) and its fog. */
+static void finish_rows(int y0, int y1)
+{
+    ub_framebuffer *fb = R.fb;
+    bool idx8 = fb->format == UB_PIXEL_INDEX8;
+    const f32 inv_f = 1.0f / R.focal;
+    /* the sun on the screen */
+    f32 sunx = 0, suny = 0, sunr = 0;
+    bool sun = R.quality >= 1 && R.sun_view.z > 0.05f && R.env.sun_strength > 0.05f;
+    if (sun) {
+        sunx = R.cx + R.focal * R.sun_view.x / R.sun_view.z;
+        suny = R.cy - R.focal * R.sun_view.y / R.sun_view.z;
+        sunr = R.focal * 0.035f;
+    }
+    u32 sunc = R.env.sun_color | 0x101010u;
+    /* shadow map coordinates of the point at depth z through pixel (x, y):
+     * base + z * (row + x * step), for each of x, y and depth */
+    vec3 dx = v3_scale(R.right, inv_f);
+    f32 sx_step = v3_dot(dx, R.lx) / SMAP_TEXEL, sy_step = -v3_dot(dx, R.ly) / SMAP_TEXEL;
+    f32 sd_step = v3_dot(dx, R.lz) * SDEPTH_SCALE;
+    f32 sx_base = 0, sy_base = 0, sd_base = 0;
+    if (R.shadow_on) to_smap(R.cam_pos, &sx_base, &sy_base, &sd_base);
+    if (idx8 && (R.shadow_on || R.fog_on)) make_remap();
+    for (int y = y0; y < y1; ++y) {
+        const u32 *z = R.zbuf + y * R.zw;
+        u8 even = 0, odd = 0;
+        u32 sky = sky_row(y, &even, &odd);
+        u32 *row32 = fb->pixels + y * fb->pitch;
+        u8 *row8 = fb->pixels8 + y * fb->pitch;
+        f32 yn = (R.cy - ((f32)y + 0.5f)) * inv_f;
+        /* the ray through (x = 0.5) of this row, in the map's terms */
+        vec3 r0 = v3_add(R.fwd, v3_add(v3_scale(R.up, yn), v3_scale(R.right, (0.5f - R.cx) * inv_f)));
+        f32 sx_row = v3_dot(r0, R.lx) / SMAP_TEXEL, sy_row = -v3_dot(r0, R.ly) / SMAP_TEXEL;
+        f32 sd_row = v3_dot(r0, R.lz) * SDEPTH_SCALE;
+        bool sun_row = sun && (f32)y > suny - sunr * 5 && (f32)y < suny + sunr * 5;
+        /* a pixel's shadow serves its right neighbour on the same surface
+         * (the same face level and nearly the same depth) */
+        int pair_x = -2;
+        u32 pair_lvl = 0, pair_z = 0, pair_tol = 0, pair_m = 256;
+        for (int x = 0; x < fb->width; ++x) {
+            u32 zr = z[x];
+            if (!zr) { /* the sky */
+                if (sun_row && (f32)x > sunx - sunr * 5 && (f32)x < sunx + sunr * 5) {
+                    f32 ddx = (f32)x + 0.5f - sunx, ddy = (f32)y + 0.5f - suny;
+                    f32 d = ub_sqrtf(ddx * ddx + ddy * ddy) / sunr;
+                    f32 k = d < 1 ? 1.0f : d < 5 ? (1 - (d - 1) / 4) * (1 - (d - 1) / 4) * 0.45f : 0;
+                    u32 f = (u32)(k * 256);
+                    u32 c = f ? darken_fog32(sky, 256, f > 256 ? 256 : f, sunc) : sky;
+                    if (idx8) row8[x] = ub_palette_match((int)(c >> 16) & 255, (int)(c >> 8) & 255, (int)c & 255, (x & 1) | ((y & 1) << 1));
+                    else row32[x] = c;
+                } else if (idx8) row8[x] = (x & 1) ? odd : even;
+                else row32[x] = sky;
+                continue;
+            }
+            u32 m = 256, f = 0, lvl = zr & 7;
+            /* (as a float: halved to stay signed, a cheap conversion on the x87) */
+            union { f32 f; u32 b; } fz;
+            fz.f = (f32)(i32)(zr >> 1) * 2.0f;
+            if (lvl && R.shadow_on) {
+                if (x == pair_x + 1 && lvl == pair_lvl && zr - pair_z + pair_tol <= 2 * pair_tol) {
+                    m = pair_m; /* the left neighbour's, on the same surface */
+                } else {
+                    m = shadow_at(x, fz.f, lvl, sx_base, sy_base, sd_base, sx_row, sy_row, sd_row, sx_step, sy_step, sd_step);
+                    pair_x = x;
+                    pair_lvl = lvl;
+                    pair_z = zr;
+                    pair_tol = zr >> 7;
+                    pair_m = m;
+                }
+            }
+            if (R.fog_on) {
+                u32 fi = (fz.b >> 16) - FOG_BASE;
+                f = R.fog_lut[fi < FOG_BITS ? fi : FOG_BITS - 1];
+                if (f < 6) f = 0; /* (too little to see) */
+            }
+            if (m == 256 && !f) continue;
+            if (idx8) {
+                /* between the tables' levels by an ordered dither, so gradients stay smooth */
+                static const u8 k_dith[4] = { 0, 16, 24, 8 };
+                int cell = (x & 1) | ((y & 1) << 1);
+                u32 sl = (256 - m + k_dith[cell]) >> 5, fl = (f + k_dith[cell]) >> 5;
+                row8[x] = R.remap[cell][sl > 7 ? 7 : sl][fl > 7 ? 7 : fl][row8[x]];
+            }
+            else row32[x] = darken_fog32(row32[x], m, f, R.fog_color);
+        }
+    }
+}
+
 /* Thread t draws rows of tiles t, t + threads, t + 2 * threads... */
 static void strip_job(void *unused, int t)
 {
@@ -1112,6 +1663,9 @@ static void strip_job(void *unused, int t)
         c.y0 = y0;
         c.y1 = y1;
         c.dirty = hiz ? dirty : NULL;
+        c.mips = R.quality >= 1;
+        c.w = R.fb->width;
+        c.zmask = R.shadow_on ? ~7u : ~0u;
         for (int i = 0; i < R.npolys; ++i) {
             const fpoly *fp = &R.polys[i];
             if (fp->y1 <= y0 || fp->y0 >= y1 || fp->x0 >= fp->x1) continue;
@@ -1141,9 +1695,11 @@ static void strip_job(void *unused, int t)
             c.s = fp->s;
             c.see = fp->see;
             c.subdiv = fp->subdiv;
+            c.lvl = fp->lvl;
             raster_scan(&c, R.verts + fp->first, fp->n, fp->span);
         }
-        sky_behind(y0, y1);
+        if (R.shadow_on || R.fog_on || R.quality >= 1) finish_rows(y0, y1);
+        else sky_behind(y0, y1);
     }
     R.t_pixels[t] = c.pixels;
     R.t_hidden[t] = hidden;
@@ -1164,6 +1720,10 @@ void sw_flush(void)
     R.tiles_x = (R.fb->width + TILE - 1) / TILE;
     R.threads = UB_MIN(sw_threads(), R.strips);
     if (R.threads < 1) R.threads = 1;
+    if (R.shadow_on) {
+        shadow_polys();
+        plat_parallel(shadow_job, NULL, R.threads);
+    }
     plat_parallel(strip_job, NULL, R.threads);
     for (int t = 0; t < R.threads; ++t) {
         R.st.pixels_tested += R.t_pixels[t];
@@ -1211,8 +1771,8 @@ static void span_img(rctx *c, int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
 {
     const ub_render_image *im = &g_q->img;
     u32 *zrow = R.zbuf + y * R.zw;
-    u32 zf = ub_rintu(iz * ZSCALE);
-    u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE);
+    u32 zf = (ub_rintu(iz * ZSCALE) & c->zmask) | c->lvl;
+    u32 dz = (u32)clamp_fixed(c->g.diz_dx * ZSCALE) & c->zmask;
     bool idx8 = R.fb->format == UB_PIXEL_INDEX8;
     for (int x = x0; x < x1; ++x, iz += c->g.diz_dx, uz += c->g.duz_dx, vz += c->g.dvz_dx, zf += dz) {
         if (g_q_ztest && zf <= zrow[x]) continue; /* behind a part */
@@ -1244,6 +1804,7 @@ void sw_image_quad(const ub_image_quad *q)
         a[k].z = v.z;
         a[k].u = uv[k][0];
         a[k].v = uv[k][1];
+        a[k].l = 0;
     }
     int n = 4;
     cvert *in = a, *out = b;
@@ -1262,6 +1823,7 @@ void sw_image_quad(const ub_image_quad *q)
         pv[i].iz = iz;
         pv[i].uz = in[i].u * iz;
         pv[i].vz = in[i].v * iz;
+        pv[i].l = 0;
         if (!(pv[i].sx > -1.0e5f && pv[i].sx < 1.0e5f && pv[i].sy > -1.0e5f && pv[i].sy < 1.0e5f)) return;
     }
     g_q = q;
@@ -1273,6 +1835,7 @@ void sw_image_quad(const ub_image_quad *q)
     c->dirty = NULL;
     c->y0 = 0;
     c->y1 = R.fb->height;
+    c->w = R.fb->width;
     if (poly_grads(pv, n, &c->g)) raster_scan(c, pv, n, span_img);
     g_q = NULL;
 }

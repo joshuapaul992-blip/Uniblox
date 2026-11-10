@@ -475,6 +475,7 @@ void play_draw_blob_shadow(ub_game *g)
 {
     if (!g->phys_ok || g->dead) return;
     if (ub_render_backend() == UB_BACKEND_OPENGL && ub_render_quality() != UB_QUALITY_LOW) return;
+    if (ub_render_fast() && ub_render_quality() == UB_QUALITY_HIGH) return; /* (the sun's shadows) */
     ub_phys_hit h;
     vec3 from = v3_add(g->feet, v3(0, 0.5f, 0));
     if (!ub_phys_raycast(&g->phys, from, v3(0, -1, 0), 40.0f, g->chr.body, &h) || h.normal.y < 0.6f) return;
