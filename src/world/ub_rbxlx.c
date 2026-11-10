@@ -421,6 +421,7 @@ typedef struct {
     i32 nsstr;
     char *scratch;        /* text_of() target */
     u32 scratch_cap;
+    i32 *cursor;          /* per item: the property node after the last one found (they come in order) */
 } conv;
 
 static u32 hash(const char *s, u32 n)
@@ -463,14 +464,21 @@ static i32 prop_node(const conv *c, i32 item, const char *name, u32 nl, u8 type)
 {
     i32 props = child(&c->d, c->items[item].node, "Properties");
     if (props < 0) return -1;
-    for (i32 p = c->d.n[props].first_child; p >= 0; p = c->d.n[p].next) {
-        const char *v;
-        u32 vl;
-        if (attr(&c->d.n[p], "name", &v, &vl) && vl == nl && !memcmp(v, name, nl)) {
-            u8 t = type_of(&c->d.n[p]);
-            if (t == 0x01 && type == 0x22 && tag_is(&c->d.n[p], "Content")) t = 0x22;
-            return t == type ? p : -1;
+    /* from where the last search for this item stopped, then from the start */
+    i32 from = c->cursor && c->cursor[item] >= 0 ? c->cursor[item] : c->d.n[props].first_child;
+    for (int pass = 0; pass < 2; ++pass) {
+        for (i32 p = pass ? c->d.n[props].first_child : from; p >= 0; p = c->d.n[p].next) {
+            if (pass && p == from) break;
+            const char *v;
+            u32 vl;
+            if (attr(&c->d.n[p], "name", &v, &vl) && vl == nl && !memcmp(v, name, nl)) {
+                if (c->cursor) c->cursor[item] = c->d.n[p].next;
+                u8 t = type_of(&c->d.n[p]);
+                if (t == 0x01 && type == 0x22 && tag_is(&c->d.n[p], "Content")) t = 0x22;
+                return t == type ? p : -1;
+            }
         }
+        if (from == c->d.n[props].first_child) break;
     }
     return -1;
 }
@@ -804,19 +812,25 @@ bool ub_rbxlx_to_binary(const u8 *data, u32 size, u8 **out_data, u32 *out_size)
         c.ref_s = (const char **)plat_alloc(sizeof(char *) * c.ref_cap);
         c.ref_len = (u32 *)plat_alloc(sizeof(u32) * c.ref_cap);
         c.ref_item = (i32 *)plat_alloc(sizeof(i32) * c.ref_cap);
-        ok = c.items && c.order && c.classes && c.ref_s && c.ref_len && c.ref_item;
-        i32 stack[512], parents[512];
+        c.cursor = (i32 *)plat_alloc(sizeof(i32) * (size_t)(total + 1));
+        ok = c.items && c.order && c.classes && c.ref_s && c.ref_len && c.ref_item && c.cursor;
+        for (i32 i = 0; ok && i <= total; ++i) c.cursor[i] = -1;
+        /* walk depth first, children in order: (node, parent item) on a heap stack */
+        i32 *stack = (i32 *)plat_alloc(sizeof(i32) * (size_t)(total + 1) * 2);
+        i32 *parents = stack ? stack + total + 1 : NULL;
         int sp = 0;
-        for (i32 ch = ok ? c.d.n[root].first_child : -1; ch >= 0; ch = c.d.n[ch].next)
-            if (sp < 512) { /* (pushed in reverse below) */ }
-        /* walk: (node, parent item) */
-        i32 tmpn[512];
-        int nt = 0;
-        for (i32 ch = ok ? c.d.n[root].first_child : -1; ch >= 0 && nt < 512; ch = c.d.n[ch].next)
-            if (tag_is(&c.d.n[ch], "Item")) tmpn[nt++] = ch;
-        for (int k = nt - 1; k >= 0; --k) {
-            stack[sp] = tmpn[k];
-            parents[sp++] = -1;
+        if (!stack) ok = false;
+        if (ok) {
+            int nt = 0;
+            for (i32 ch = c.d.n[root].first_child; ch >= 0; ch = c.d.n[ch].next) nt += tag_is(&c.d.n[ch], "Item");
+            int k = nt;
+            sp = nt;
+            for (i32 ch = c.d.n[root].first_child; ch >= 0; ch = c.d.n[ch].next)
+                if (tag_is(&c.d.n[ch], "Item")) {
+                    --k;
+                    stack[k] = ch;
+                    parents[k] = -1;
+                }
         }
         while (ok && sp > 0) {
             i32 node = stack[--sp], parent = parents[sp];
@@ -840,14 +854,19 @@ bool ub_rbxlx_to_binary(const u8 *data, u32 size, u8 **out_data, u32 *out_size)
             }
             c.items[it].cls = ci;
             c.classes[ci].count++;
-            nt = 0;
-            for (i32 ch = c.d.n[node].first_child; ch >= 0 && nt < 512; ch = c.d.n[ch].next)
-                if (tag_is(&c.d.n[ch], "Item")) tmpn[nt++] = ch;
-            for (int k = nt - 1; k >= 0 && sp < 512; --k) {
-                stack[sp] = tmpn[k];
-                parents[sp++] = it;
-            }
+            /* its children, last first, so the first comes off next */
+            int nt = 0;
+            for (i32 ch = c.d.n[node].first_child; ch >= 0; ch = c.d.n[ch].next) nt += tag_is(&c.d.n[ch], "Item");
+            int k = sp + nt;
+            for (i32 ch = c.d.n[node].first_child; ch >= 0; ch = c.d.n[ch].next)
+                if (tag_is(&c.d.n[ch], "Item")) {
+                    --k;
+                    stack[k] = ch;
+                    parents[k] = it;
+                }
+            sp += nt;
         }
+        plat_free(stack);
         /* group items by class */
         i32 at = 0;
         for (i32 k = 0; k < c.nclasses; ++k) {
@@ -995,6 +1014,7 @@ bool ub_rbxlx_to_binary(const u8 *data, u32 size, u8 **out_data, u32 *out_size)
     plat_free((void *)c.ref_s);
     plat_free(c.ref_len);
     plat_free(c.ref_item);
+    plat_free(c.cursor);
     plat_free(c.scratch);
     if (!ok || out.bad) {
         plat_free(out.p);

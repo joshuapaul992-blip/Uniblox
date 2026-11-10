@@ -538,6 +538,8 @@ int interact_event(i32 idx, const char *k)
 {
     int tev = tools_event(idx, k);
     if (tev >= 0) return tev;
+    tev = sound_event(idx, k);
+    if (tev >= 0) return tev;
     if (idx == VIRT_PROMPTSERVICE || (idx >= 0 && is_class(idx, "ProximityPrompt"))) {
         if (streq(k, "Triggered") || streq(k, "PromptTriggered")) return EV_TRIGGERED;
         if (streq(k, "TriggerEnded") || streq(k, "PromptTriggerEnded")) return EV_TRIGGERENDED;
@@ -565,6 +567,8 @@ lua_CFunction interact_method(i32 idx, const char *k)
 {
     lua_CFunction tf = tools_method(idx, k);
     if (tf) return tf;
+    tf = sound_method(idx, k);
+    if (tf) return tf;
     tf = teams_method(idx, k);
     if (tf) return tf;
     if (idx >= 0 && is_class(idx, "ProximityPrompt")) {
@@ -582,11 +586,13 @@ void interact_pump(lua_State *L, f32 dt)
     humanoid_pump(L);
     tools_pump(L);
     teams_pump(L);
+    sound_pump(L);
 }
 
 void interact_reset(void)
 {
     tools_reset();
+    sound_reset();
     g_hover = g_down = g_rdown = -1;
     g_np = 0;
     g_scan_t = -1;

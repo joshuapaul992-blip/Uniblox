@@ -3,6 +3,7 @@
 #include "gui/ub_gui.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
+#include "core/ub_string.h"
 #include "render/ub_mesh.h"
 #include "render/ub_texture.h"
 #include "crt/ub_crt.h"
@@ -51,6 +52,32 @@ ub_render_env play_env(const ub_world *w)
         e.sky_horizon = day > 0.3f ? 0xE0905A : 0x1C2A48;
     }
     e.fog_density = l->fog_end > 1.0f && l->fog_end < 20000.0f ? 3.0f / l->fog_end : 0.0012f;
+    /* an Atmosphere in Lighting (8C): its Color tints the horizon, Decay the
+     * sky above, Density the haze */
+    for (i32 i = 0; i < w->count; ++i) {
+        if (w->inst[i].parent < 0 || !ub_world_alive(w, i)) continue;
+        if (ub_strcmp(ub_world_str(w, w->inst[i].class_name), "Atmosphere") != 0) continue;
+        i32 par = w->inst[i].parent;
+        if (w->inst[par].cls != UB_CLASS_LIGHTING) continue;
+        const ub_value *c = ub_world_prop_named(w, i, "Color"), *dc = ub_world_prop_named(w, i, "Decay");
+        const ub_value *dn = ub_world_prop_named(w, i, "Density");
+        if (c && c->type == UB_PV_COLOR3 && day > 0.3f)
+            e.sky_horizon = ((u32)(ub_clampf(c->v.c3.r, 0, 1) * 255) << 16) | ((u32)(ub_clampf(c->v.c3.g, 0, 1) * 255) << 8) |
+                            (u32)(ub_clampf(c->v.c3.b, 0, 1) * 255);
+        if (dc && dc->type == UB_PV_COLOR3 && day > 0.3f) {
+            u32 t = e.sky_top;
+            f32 k = 0.35f;
+            u32 r = (u32)((f32)((t >> 16) & 255) * (1 - k) + ub_clampf(dc->v.c3.r, 0, 1) * 255 * k);
+            u32 g2 = (u32)((f32)((t >> 8) & 255) * (1 - k) + ub_clampf(dc->v.c3.g, 0, 1) * 255 * k);
+            u32 b2 = (u32)((f32)(t & 255) * (1 - k) + ub_clampf(dc->v.c3.b, 0, 1) * 255 * k);
+            e.sky_top = (r << 16) | (g2 << 8) | b2;
+        }
+        if (dn && dn->type == UB_PV_FLOAT && dn->v.f > 0) {
+            f32 dens = ub_clampf(dn->v.f, 0, 1) * 0.02f;
+            if (dens > e.fog_density) e.fog_density = dens;
+        }
+        break;
+    }
     return e;
 }
 

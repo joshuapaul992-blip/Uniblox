@@ -179,6 +179,8 @@ enum {
     EV_RUNNING, EV_JUMPING, EV_FREEFALLING,
     /* tools (ub_sapi_interact.c) */
     EV_EQUIPPED, EV_UNEQUIPPED, EV_DEACTIVATED,
+    /* sounds (ub_sapi_sound.c) */
+    EV_PLAYED, EV_ENDED, EV_STOPPED, EV_PAUSED, EV_RESUMED, EV_SOUNDLOADED,
     EV_COUNT
 };
 typedef char ev_count_fits[EV_COUNT <= 128 ? 1 : -1]; /* signal keys pack the event in 7 bits */
@@ -260,6 +262,14 @@ void joint_changed(lua_State *L, i32 idx);
 void joints_moved(lua_State *L, i32 root);
 bool attach_get(lua_State *L, i32 idx, const char *k);
 bool attach_set(lua_State *L, i32 idx, const char *k, int v);
+
+/* Sounds (ub_sapi_sound.c) */
+lua_CFunction sound_method(i32 idx, const char *k);
+int sound_event(i32 idx, const char *k);
+bool sound_get(lua_State *L, i32 idx, const char *k);
+bool sound_set(lua_State *L, i32 idx, const char *k, int v);
+void sound_pump(lua_State *L);
+void sound_reset(void);
 
 /* Teams (ub_sapi_interact.c): Player.Team / TeamColor / Neutral */
 bool teams_get(lua_State *L, i32 idx, const char *k);

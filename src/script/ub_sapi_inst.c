@@ -1748,6 +1748,7 @@ static int inst_index(lua_State *L)
     if (joint_get(L, idx, k)) return 1;
     if (attach_get(L, idx, k)) return 1;
     if (teams_get(L, idx, k)) return 1;
+    if (sound_get(L, idx, k)) return 1;
     if (get_class_prop(L, idx, k)) return 1;
     if (gui_get(L, idx, k)) return 1;
     lua_CFunction m = find_method(k_inst_methods, k);
@@ -2023,6 +2024,7 @@ int set_prop(lua_State *L, i32 idx, const char *k, int v)
     } else if (joint_set(L, idx, k, v)) {
     } else if (attach_set(L, idx, k, v)) {
     } else if (teams_set(L, idx, k, v)) {
+    } else if (sound_set(L, idx, k, v)) {
     } else if (set_class_prop(L, idx, k, v)) {
     } else if (gui_set(L, idx, k, v)) {
         if (ub_constraint_class(cls_of(idx))) S.g->constraints_dirty = true;

@@ -993,6 +993,44 @@ static void test_rbx_xml(void)
     CHECK(files >= 15 && bad == 0);
 }
 
+/* A big place (8C): 20,000 parts in 2,000 models, as XML, loaded and
+ * timed (the XML path is the slower one: it is converted first). */
+static void test_big_place(void)
+{
+    const int models = 2000, per = 10;
+    size_t cap = (size_t)models * per * 900 + 4096, n = 0;
+    char *x = (char *)malloc(cap);
+    if (!x) return;
+    n += (size_t)sprintf(x + n, "<roblox version=\"4\">\n<Item class=\"Workspace\" referent=\"W\"><Properties><string name=\"Name\">Workspace</string></Properties>\n");
+    int ref = 0;
+    for (int m = 0; m < models; ++m) {
+        n += (size_t)sprintf(x + n, "<Item class=\"Model\" referent=\"M%d\"><Properties><string name=\"Name\">House%d</string></Properties>\n", m, m);
+        for (int k = 0; k < per; ++k, ++ref)
+            n += (size_t)sprintf(x + n,
+                                 "<Item class=\"Part\" referent=\"P%d\"><Properties><string name=\"Name\">Wall</string>"
+                                 "<bool name=\"Anchored\">true</bool><bool name=\"CanCollide\">true</bool>"
+                                 "<CoordinateFrame name=\"CFrame\"><X>%d</X><Y>%d</Y><Z>%d</Z><R00>1</R00><R01>0</R01><R02>0</R02>"
+                                 "<R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>"
+                                 "<Vector3 name=\"size\"><X>4</X><Y>8</Y><Z>1</Z></Vector3>"
+                                 "<Color3uint8 name=\"Color3uint8\">4288914085</Color3uint8><token name=\"Material\">256</token>"
+                                 "<float name=\"Transparency\">0</float></Properties></Item>\n",
+                                 ref, (m % 50) * 20 + k * 2, 4, (m / 50) * 20);
+        n += (size_t)sprintf(x + n, "</Item>\n");
+    }
+    n += (size_t)sprintf(x + n, "</Item>\n</roblox>\n");
+    ub_world w;
+    ub_world_init(&w);
+    ub_import_stats st;
+    u64 t0 = plat_time_us();
+    ub_load_result r = ub_rbxl_load(&w, (const u8 *)x, (u32)n, &st);
+    u64 t1 = plat_time_us();
+    printf("  big XML place: %u KB, %d instances, %d parts, loaded in %u ms\n", (u32)(n / 1024), w.count, w.part_count,
+           (u32)((t1 - t0) / 1000));
+    CHECK(r == UB_LOAD_OK && w.part_count == models * per && st.parts == (u32)(models * per));
+    ub_world_free(&w);
+    free(x);
+}
+
 static void test_rbx_attributes(void);
 static void test_rbx_gui(void)
 {
@@ -1007,6 +1045,7 @@ static void test_rbx_gui(void)
     test_rbx_unions();
     test_mesh_files();
     test_rbx_xml();
+    test_big_place();
 }
 
 static i32 load_model_first(ub_world *w, const char *path, const char *cls)

@@ -110,6 +110,22 @@ local ok, err = pcall(function()
 	check(math.abs(floater.Position.Y - 25) < 1, "VectorForce holds it up " .. tostring(floater.Position))
 	local rv = spinner.CFrame.RightVector
 	check(math.abs(rv.Z) > 0.95, "AlignOrientation " .. tostring(rv))
+	-- a sound from content/777.wav (a quarter of a second, made by the test)
+	local snd = Instance.new("Sound")
+	snd.SoundId = "rbxassetid://777"
+	snd.Parent = workspace
+	check(snd.IsLoaded and math.abs(snd.TimeLength - 0.25) < 0.01, "sound loaded " .. snd.TimeLength)
+	local played, ended = false, false
+	snd.Played:Connect(function() played = true end)
+	snd.Ended:Connect(function() ended = true end)
+	snd:Play()
+	check(snd.IsPlaying and snd.Playing, "playing")
+	task.wait(0.5)
+	check(played and ended and not snd.IsPlaying, "Played and Ended")
+	local missing = Instance.new("Sound", workspace)
+	missing.SoundId = "rbxassetid://424242"
+	check(not missing.IsLoaded and missing.TimeLength == 0, "a sound that is not there")
+	missing:Play()
 	-- disabling lets go: the rope's ball drops once the rope goes
 	rope:Destroy()
 	task.wait(0.6)

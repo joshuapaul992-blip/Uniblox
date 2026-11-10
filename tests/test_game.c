@@ -758,8 +758,32 @@ static void test_character(void)
 }
 
 /* Constraints and body movers (8C). */
+static void write_wav(const char *path, u32 rate, u32 frames)
+{
+    u32 data = frames * 2, size = 44 + data;
+    u8 *b = (u8 *)calloc(1, size);
+    memcpy(b, "RIFF", 4);
+    u32 v = size - 8;
+    memcpy(b + 4, &v, 4);
+    memcpy(b + 8, "WAVEfmt ", 8);
+    v = 16; memcpy(b + 16, &v, 4);
+    u16 fmt = 1, ch = 1, align = 2, bits = 16;
+    memcpy(b + 20, &fmt, 2);
+    memcpy(b + 22, &ch, 2);
+    memcpy(b + 24, &rate, 4);
+    v = rate * 2; memcpy(b + 28, &v, 4);
+    memcpy(b + 32, &align, 2);
+    memcpy(b + 34, &bits, 2);
+    memcpy(b + 36, "data", 4);
+    memcpy(b + 40, &data, 4);
+    plat_make_dir("content");
+    plat_file_write_all(path, b, size);
+    free(b);
+}
+
 static void test_constraints(void)
 {
+    write_wav("content/777.wav", 8000, 2000);
     char *src = read_text("tests/data/scripts/constraints.lua");
     CHECK(src != NULL);
     if (!src) return;
