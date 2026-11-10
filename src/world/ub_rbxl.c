@@ -1066,6 +1066,11 @@ static ub_load_result chunk_prop(importer *im, rd *r)
                                   (type == 0x22 && name_is(pname, pl, "MeshContent")))) {
         plat_free(tmp); /* kept as a property ("MeshId", or "Mesh" from the newer Content type) */
         return data_prop(im, c, pname, pl, type, r);
+    } else if (c->k == K_SPAWN && (name_is(pname, pl, "TeamColor") || name_is(pname, pl, "Neutral") ||
+                                   name_is(pname, pl, "AllowTeamChangeOnTouch") || name_is(pname, pl, "Enabled") ||
+                                   name_is(pname, pl, "Duration"))) {
+        plat_free(tmp); /* teams (milestone 8C): kept as properties */
+        return data_prop(im, c, pname, pl, type, r);
     } else if (c->k == K_MESH && type == 0x0E && name_is(pname, pl, "InitialSize")) {
         if (rd_interleaved32x3(r, n, tmp))
             for (u32 i = 0; i < n; ++i)

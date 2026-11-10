@@ -1482,11 +1482,6 @@ static int m_objects_at(lua_State *L)
 
 static int m_noop(lua_State *L) { return 0; }
 
-static int m_true(lua_State *L)
-{
-    lua_pushboolean(L, 1);
-    return 1;
-}
 
 static int m_nil(lua_State *L)
 {
@@ -1510,6 +1505,33 @@ static int m_setcore(lua_State *L)
         lua_pop(L, 2);
     }
     return 0;
+}
+
+/* StarterGui:SetCoreGuiEnabled(type, on): the Backpack (2) and All (5) hide
+ * the hotbar; the other core GUIs Uniblox does not draw. */
+extern bool g_backpack_hidden;
+static int m_setcoregui(lua_State *L)
+{
+    int t = lua_isnumber(L, 2) ? (int)lua_tointeger(L, 2) : -1;
+    if (t < 0) {
+        lua_getfield(L, 2, "Value");
+        t = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    if (t == 2 || t == 5) g_backpack_hidden = !lua_toboolean(L, 3);
+    return 0;
+}
+
+static int m_getcoregui(lua_State *L)
+{
+    int t = lua_isnumber(L, 2) ? (int)lua_tointeger(L, 2) : -1;
+    if (t < 0) {
+        lua_getfield(L, 2, "Value");
+        t = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pushboolean(L, (t == 2 || t == 5) ? !g_backpack_hidden : 1);
+    return 1;
 }
 
 lua_CFunction gui_method(i32 idx, const char *k)
@@ -1540,8 +1562,9 @@ lua_CFunction gui_method(i32 idx, const char *k)
         if (streq(k, "GetTopbarTransparency")) return m_half;
     }
     if (streq(cls, "StarterGui")) {
-        if (streq(k, "SetCoreGuiEnabled") || streq(k, "RegisterSetCore") || streq(k, "RegisterGetCore")) return m_noop;
-        if (streq(k, "GetCoreGuiEnabled")) return m_true;
+        if (streq(k, "SetCoreGuiEnabled")) return m_setcoregui;
+        if (streq(k, "RegisterSetCore") || streq(k, "RegisterGetCore")) return m_noop;
+        if (streq(k, "GetCoreGuiEnabled")) return m_getcoregui;
         if (streq(k, "SetCore")) return m_setcore;
         if (streq(k, "GetCore")) return m_nil;
     }

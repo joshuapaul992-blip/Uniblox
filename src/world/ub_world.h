@@ -29,6 +29,7 @@ enum {
     UB_PART_PLACEHOLDER = 1 << 2,  /* stands in for a mesh we cannot load */
     UB_PART_GLOW        = 1 << 3,  /* neon: lit at full brightness */
     UB_PART_REMOVED     = 1 << 4,  /* its instance was destroyed (only while running) */
+    UB_PART_CARRIED     = 1 << 5,  /* moved by the game (character rig, welded at run time): not simulated */
 };
 
 /* Shapes and materials use the renderer's numbering (ub_shape, ub_material). */

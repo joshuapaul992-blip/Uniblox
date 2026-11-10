@@ -42,6 +42,27 @@ enum {
     UB_CHANGE_PHYS = 2,   /* position, size, anchored, solid: physics */
 };
 
+/* A joint of the character's rig (Motor6D), in Roblox's axes:
+ * part1 = part0 * C0 * Transform * C1:Inverse(). */
+typedef struct {
+    i32 motor, part0, part1;   /* instances */
+    vec3 c0p, c1p, tp;
+    mat3 c0r, c1r, tr;
+    u8 swing;                  /* walking moves it: 1 left leg, 2 right leg, 3 left arm, 4 right arm */
+} ub_joint;
+
+/* A part carried by another (welded at run time, or part of a custom
+ * character): each frame it is put at `follow` times the offset. Carried
+ * parts are not simulated themselves. */
+typedef struct {
+    i32 part, follow;          /* instances */
+    i32 joint;                 /* the Weld/Motor6D/WeldConstraint that does it, -1 the character's own */
+    vec3 p;                    /* offset in follow's space (Uniblox axes) */
+    mat3 r;
+} ub_carry;
+
+#define UB_RIG_JOINTS 20
+
 typedef struct ub_game {
     ub_world world;
     ub_physics phys;
@@ -69,6 +90,16 @@ typedef struct ub_game {
     f32 respawn_timer;
     i32 last_ground_part;
     vec3 feet;                  /* where to draw the character this frame */
+
+    /* the character's rig (milestone 8C): R15 or R6 parts, posed each frame */
+    bool r15;
+    ub_joint joints[UB_RIG_JOINTS];
+    int joint_count;
+    ub_carry *carry;
+    i32 carry_count, carry_cap;
+    f32 pose_facing, pose_phase, pose_amount, pose_fallen; /* set by the app (or from the movement) */
+    bool pose_from_app;
+    u32 spawn_count;            /* times the character has (re)spawned: tools refill */
 
     /* parts drawn every frame instead of in the static set: moving ones,
      * and any a script has changed */
@@ -112,6 +143,24 @@ void ub_game_set_gravity(ub_game *g, f32 gravity);
 /* The character. */
 void ub_game_set_health(ub_game *g, f32 health);
 void ub_game_teleport(ub_game *g, vec3 feet);
+/* Chooses where the player appears next (RespawnLocation, team spawns). */
+void ub_game_pick_spawn(ub_game *g);
+
+/* --- the rig and carried parts (game/ub_rig.c) --- */
+void ub_rig_build(ub_game *g);
+/* Puts the rig's parts and carried parts where they are this frame. */
+void ub_rig_pose(ub_game *g, f32 dt);
+/* A rig joint by its Motor6D instance, or NULL. */
+ub_joint *ub_rig_joint(ub_game *g, i32 motor);
+/* Is it one of the character's parts (its root, its rig, or carried by them)? */
+bool ub_rig_is_character_part(const ub_game *g, i32 inst);
+/* `part` follows `follow` from now on, keeping offset (Uniblox axes);
+ * `joint` is the instance that joins them (-1 none). Replaces an earlier
+ * carry of the same part. */
+bool ub_game_carry(ub_game *g, i32 part, i32 follow, vec3 p, const mat3 *r, i32 joint);
+/* Stops carries made by `joint` (or of `part` if joint is -1). */
+void ub_game_uncarry(ub_game *g, i32 part, i32 joint);
+bool ub_game_is_carried(const ub_game *g, i32 part);
 void ub_game_set_walk_speed(ub_game *g, f32 speed);
 void ub_game_set_jump_height(ub_game *g, f32 height);
 vec3 ub_game_root_position(const ub_game *g); /* HumanoidRootPart's centre */

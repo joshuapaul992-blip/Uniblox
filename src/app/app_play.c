@@ -197,6 +197,12 @@ void play_view_update(ub_play_view *v, ub_game *g, f32 dt)
     bool walking = v->moving && hspeed > 2.0f && !g->dead;
     v->walk_amount = ub_clampf(v->walk_amount + (walking ? dt : -dt) * 6.0f, 0.0f, 1.0f);
     if (walking) v->walk_phase = ub_wrap_angle(v->walk_phase + dt * 10.0f * hspeed / UB_CHAR_WALK_SPEED);
+    /* the game poses the character's rig with these */
+    g->pose_from_app = true;
+    g->pose_facing = v->facing;
+    g->pose_phase = v->walk_phase;
+    g->pose_amount = v->walk_amount;
+    g->pose_fallen = v->death_t;
 }
 
 ub_camera play_view_camera(const ub_play_view *v, const ub_game *g)
@@ -226,10 +232,7 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
         ub_game_part_pose(g, pi, &d.pos, &d.rot);
         ub_render_part(&d);
     }
-    if (character) {
-        play_draw_character(g->feet.x, g->feet.y, g->feet.z, v->facing, v->walk_phase, v->walk_amount, v->death_t);
-        play_draw_blob_shadow(g);
-    }
+    if (character) play_draw_blob_shadow(g); /* (the character itself is its rig's parts, drawn above) */
 }
 
 /* A soft round shadow on the ground under the character, for when the

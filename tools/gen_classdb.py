@@ -37,7 +37,12 @@ CLASSES = [
     "ColorCorrectionEffect", "SunRaysEffect", "DepthOfFieldEffect", "Animation", "SelectionBox", "Dialog",
     "SpecialMesh", "BlockMesh", "CylinderMesh", "Explosion", "ForceField", "Accessory", "Hat", "Shirt", "Pants",
     "ShirtGraphic", "BodyColors", "HumanoidDescription", "StarterGear",
+    # milestone 8C: the place's character settings
+    "StarterPlayer",
 ]
+
+# properties scripts cannot see that Uniblox still keeps from files
+KEEP_HIDDEN = {("StarterPlayer", "GameSettingsAvatar")}
 
 EXTRA_ENUMS = [
     "KeyCode", "UserInputType", "UserInputState", "MouseBehavior", "CoreGuiType", "NormalId", "FontWeight",
@@ -156,7 +161,9 @@ def main(path):
         first = len(props)
         for pn in sorted(c["Properties"]):
             p = c["Properties"][pn]
-            if pn in SKIP_PROPS or "NotScriptable" in p["Tags"] or p["Scriptability"] not in ("ReadWrite", "Read"):
+            hidden_kept = (name, pn) in KEEP_HIDDEN
+            if not hidden_kept and (pn in SKIP_PROPS or "NotScriptable" in p["Tags"] or
+                                    p["Scriptability"] not in ("ReadWrite", "Read")):
                 continue
             if "Alias" in p["Kind"]:
                 continue
@@ -164,8 +171,8 @@ def main(path):
             if not t:
                 continue
             ser = p["Kind"]["Canonical"]["Serialization"]
-            readonly = p["Scriptability"] == "Read"
-            stored = not readonly and (ser == "Serializes" or isinstance(ser, dict) or pn == "Font")
+            readonly = p["Scriptability"] == "Read" or hidden_kept
+            stored = (not readonly or hidden_kept) and (ser == "Serializes" or isinstance(ser, dict) or pn == "Font")
             flags = []
             if readonly:
                 flags.append("UB_CDB_READONLY")

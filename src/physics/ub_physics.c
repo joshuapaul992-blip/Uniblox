@@ -359,7 +359,7 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
     }
     for (i32 i = 0; i < w->count; ++i) {
         i32 p = w->inst[i].part;
-        if (p >= 0 && p < np && ub_world_is_descendant(w, i, w->workspace)) {
+        if (p >= 0 && p < np && ub_world_is_descendant(w, i, w->workspace) && !(w->parts[p].flags & UB_PART_CARRIED)) {
             flags[p] = 1;
             inst_of[p] = i;
         }
@@ -714,7 +714,7 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
         ph->part_count = w->part_count;
     }
     const ub_part *p = &w->parts[part];
-    alive = alive && !(p->flags & UB_PART_REMOVED);
+    alive = alive && !(p->flags & (UB_PART_REMOVED | UB_PART_CARRIED));
     bool collide = alive && (p->flags & UB_PART_CAN_COLLIDE);
     bool touch = alive && sensor && !collide;
     bool anchored = (p->flags & UB_PART_ANCHORED) != 0;

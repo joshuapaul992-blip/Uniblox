@@ -463,7 +463,7 @@ typedef struct {
 static void push_key(lua_State *L, i32 inst, int ev, const char *prop)
 {
     if (prop && prop[0]) lua_pushfstring(L, "%d:%d:%s", (int)inst, ev, prop);
-    else lua_pushnumber(L, ((f64)inst + 1000000.0) * 64.0 + ev);
+    else lua_pushnumber(L, ((f64)inst + 1000000.0) * 128.0 + ev);
 }
 
 void push_signal(lua_State *L, i32 inst, int ev, const char *prop)
@@ -509,7 +509,7 @@ void forget_instances(lua_State *L, const u8 *marked, i32 n)
             lua_pop(L, 1);
             i32 inst = -1;
             if (lua_type(L, -1) == LUA_TNUMBER) {
-                inst = (i32)floor(lua_tonumber(L, -1) / 64.0) - 1000000;
+                inst = (i32)floor(lua_tonumber(L, -1) / 128.0) - 1000000;
             } else if (lua_type(L, -1) == LUA_TSTRING) {
                 const char *k = lua_tostring(L, -1);
                 int v = 0, sign = 1;

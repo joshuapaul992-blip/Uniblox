@@ -177,9 +177,11 @@ enum {
     /* prompts and the humanoid (ub_sapi_interact.c) */
     EV_TRIGGERED, EV_TRIGGERENDED, EV_PROMPTSHOWN, EV_PROMPTHIDDEN, EV_HOLDBEGAN, EV_HOLDENDED, EV_STATECHANGED,
     EV_RUNNING, EV_JUMPING, EV_FREEFALLING,
+    /* tools (ub_sapi_interact.c) */
+    EV_EQUIPPED, EV_UNEQUIPPED, EV_DEACTIVATED,
     EV_COUNT
 };
-typedef char ev_count_fits[EV_COUNT <= 64 ? 1 : -1]; /* signal keys pack the event in 6 bits */
+typedef char ev_count_fits[EV_COUNT <= 128 ? 1 : -1]; /* signal keys pack the event in 7 bits */
 /* A signal of an instance (or a tween: inst = -1000 - tween id). For
  * GetPropertyChangedSignal, `prop` names the property (else NULL). */
 void push_signal(lua_State *L, i32 inst, int ev, const char *prop);
@@ -248,6 +250,18 @@ int humanoid_state(void);                                    /* HumanoidStateTyp
 bool offline_index(lua_State *L, i32 idx, const char *k);  /* Policy/Badge/Localization/Pathfinding... */
 i32 gui_mouse_target(vec3 *hit);                             /* the part under the mouse (hit in Roblox axes) */
 int gui_vk_of(int keycode);                                  /* a KeyCode value's key, -1 if none */
+
+/* Joints (ub_sapi_joint.c): Weld, Motor6D, WeldConstraint... */
+bool is_joint_class(const char *cls);
+bool joint_get(lua_State *L, i32 idx, const char *k);
+bool joint_set(lua_State *L, i32 idx, const char *k, int v);
+void joint_changed(lua_State *L, i32 idx);
+/* A subtree was moved: its joints join or let go. */
+void joints_moved(lua_State *L, i32 root);
+
+/* Teams (ub_sapi_interact.c): Player.Team / TeamColor / Neutral */
+bool teams_get(lua_State *L, i32 idx, const char *k);
+bool teams_set(lua_State *L, i32 idx, const char *k, int v);
 
 /* Errors as Roblox words them. */
 int sapi_error(lua_State *L, const char *fmt, ...);

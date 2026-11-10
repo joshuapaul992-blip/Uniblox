@@ -695,6 +695,68 @@ static void test_mesh_collision(void)
     ub_game_stop(&g_g);
 }
 
+/* Characters, joints, tools and teams (8C). */
+static void test_character(void)
+{
+    char *src = read_text("tests/data/scripts/character.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    i32 ws = ub_world_workspace(&w);
+    /* teams and their spawns (the door_world's spawn stays neutral) */
+    i32 teams = ub_world_add(&w, -1, UB_CLASS_OTHER, "Teams", "Teams");
+    i32 red = add_gui(&w, teams, "Team", "Red"), blue = add_gui(&w, teams, "Team", "Blue");
+    ub_value c;
+    memset(&c, 0, sizeof c);
+    c.type = UB_PV_BRICKCOLOR;
+    c.v.i = 21;
+    ub_world_set_prop_named(&w, red, "TeamColor", &c);
+    c.v.i = 23;
+    ub_world_set_prop_named(&w, blue, "TeamColor", &c);
+    ub_value no = ub_vbool(false);
+    ub_world_set_prop_named(&w, blue, "AutoAssignable", &no);
+    for (int k = 0; k < 2; ++k) {
+        ub_part sp;
+        memset(&sp, 0, sizeof sp);
+        sp.pos = v3(k ? -20.0f : 20.0f, 0.05f, 0);
+        sp.rot = mat3_identity();
+        sp.size = v3(4, 0.1f, 4);
+        sp.flags = UB_PART_ANCHORED | UB_PART_CAN_COLLIDE;
+        i32 s = ub_world_add_part(&w, ws, UB_CLASS_SPAWN, "SpawnLocation", k ? "BlueSpawn" : "RedSpawn", &sp);
+        c.v.i = k ? 23 : 21;
+        ub_world_set_prop_named(&w, s, "TeamColor", &c);
+        ub_world_set_prop_named(&w, s, "Neutral", &no);
+    }
+    /* a sword in StarterPack */
+    i32 pack = ub_world_add(&w, -1, UB_CLASS_OTHER, "StarterPack", "StarterPack");
+    i32 tool = add_gui(&w, pack, "Tool", "Sword");
+    add_box(&w, tool, "Handle", v3(0, -100, 0), v3(0.4f, 4, 0.4f), 0xC0C0C0);
+    w.parts[w.inst[ub_world_find_child(&w, tool, "Handle")].part].flags = 0; /* loose, not solid */
+    /* a post and a flag */
+    add_box(&w, ws, "Post", v3(8, 3, 30), v3(1, 6, 1), 0x806040);
+    i32 flag = add_box(&w, ws, "Flag", v3(9.5f, 5, 30), v3(2, 1, 0.2f), 0xFF0000);
+    w.parts[w.inst[flag].part].flags = UB_PART_CAN_COLLIDE;
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Char", src);
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    int ready = -1;
+    for (int i = 0; i < 1200 && find_result(&g_g, "char done") < 0; ++i) {
+        if (ready < 0 && find_result(&g_g, "char ready") >= 0) ready = i;
+        int k = ready >= 0 ? i - ready : -1;
+        gui_frame(&g_g, 400, 400, k == 20, k == 21, (k == 5 || k == 40) ? '1' : 0, i / 60.0);
+    }
+    CHECK(find_result(&g_g, "char done") >= 0);
+    bool ok = find_result(&g_g, "char ok") >= 0;
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* ------------------------------------------ the wider 2022 API (8B) */
 
 /* A frame with the camera behind the spawn point looking at workspace.Button:
@@ -780,6 +842,7 @@ void test_game(void)
     test_gui_api();
     test_api2022();
     test_mesh_collision();
+    test_character();
     test_hostile();
     test_reuse();
     test_death();
