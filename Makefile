@@ -52,9 +52,9 @@ CORE_SRCS := \
 	src/world/ub_query.c \
 	src/physics/ub_hull.c \
 	src/physics/ub_collide.c \
-	src/physics/ub_physics.c \
+	src/physics/ub_physics.c src/physics/ub_pjoint.c \
 	src/physics/ub_character.c \
-	src/game/ub_game.c src/game/ub_rig.c \
+	src/game/ub_game.c src/game/ub_rig.c src/game/ub_constraints.c \
 	src/game/ub_demo_place.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \

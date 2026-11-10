@@ -334,6 +334,7 @@ void ub_game_part_changed(ub_game *g, i32 part, u32 what)
         return;
     }
     make_live(g, part);
+    if (what & UB_CHANGE_PHYS) g->constraints_dirty = true; /* (its body may have changed) */
     if ((what & UB_CHANGE_PHYS) && g->phys_ok)
         ub_phys_sync_part(&g->phys, part, in_workspace(g, inst), part_watched(g, part));
 }
@@ -342,6 +343,7 @@ void ub_game_subtree_changed(ub_game *g, i32 inst)
 {
     ub_world *w = &g->world;
     if (inst < 0 || inst >= w->count) return;
+    g->constraints_dirty = true;
     /* walk the subtree (destroyed instances keep their children linked) */
     i32 cap = 64, sp = 0;
     i32 *stack = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap);
@@ -417,6 +419,7 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
     g->feet = g->spawn;
     ub_rig_build(g);
     g->spawn_count = 1;
+    g->constraints_dirty = true;
     {
         i32 added[64];
         ub_game_fill_player_gui(g, true, added, 64);
@@ -456,6 +459,7 @@ void ub_game_stop(ub_game *g)
     plat_free(g->live_flag);
     plat_free(g->live);
     plat_free(g->carry);
+    plat_free(g->movers);
     ub_world_free(&g->world);
     memset(g, 0, sizeof *g);
 }
@@ -496,6 +500,7 @@ void ub_game_update(ub_game *g, f32 dt, vec3 move, bool jump)
         int steps = 0;
         while (g->accum >= UB_PHYS_DT && steps < UB_GAME_MAX_STEPS) {
             g->time += UB_PHYS_DT;
+            ub_constraints_step(g);
             ub_char_before_step(&g->chr, &g->phys, move, jump);
             ub_phys_step(&g->phys);
             ub_char_after_step(&g->chr, &g->phys);

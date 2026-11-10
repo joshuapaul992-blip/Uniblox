@@ -101,6 +101,13 @@ typedef struct ub_game {
     bool pose_from_app;
     u32 spawn_count;            /* times the character has (re)spawned: tools refill */
 
+    /* constraints and movers (game/ub_constraints.c) */
+    bool constraints_dirty;
+    i32 joint_inst[512];        /* the constraint instance of each physics joint */
+    i32 pjoint_count;
+    i32 *movers;
+    i32 mover_count, mover_cap;
+
     /* parts drawn every frame instead of in the static set: moving ones,
      * and any a script has changed */
     u8 *live_flag;
@@ -161,6 +168,13 @@ bool ub_game_carry(ub_game *g, i32 part, i32 follow, vec3 p, const mat3 *r, i32 
 /* Stops carries made by `joint` (or of `part` if joint is -1). */
 void ub_game_uncarry(ub_game *g, i32 part, i32 joint);
 bool ub_game_is_carried(const ub_game *g, i32 part);
+
+/* --- constraints and movers (game/ub_constraints.c) --- */
+void ub_constraints_rebuild(ub_game *g);
+void ub_constraints_step(ub_game *g);   /* before each physics step */
+bool ub_constraint_class(const char *cls); /* changing one rebuilds the joints */
+/* HingeConstraint.CurrentAngle (degrees) / PrismaticConstraint.CurrentPosition */
+bool ub_constraint_reading(const ub_game *g, i32 inst, f32 *value);
 void ub_game_set_walk_speed(ub_game *g, f32 speed);
 void ub_game_set_jump_height(ub_game *g, f32 height);
 vec3 ub_game_root_position(const ub_game *g); /* HumanoidRootPart's centre */

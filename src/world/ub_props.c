@@ -104,6 +104,7 @@ void ub_value_free(ub_value *v)
     if (v->type == UB_PV_STRING) plat_free(v->v.str.s);
     else if (v->type == UB_PV_NUMSEQ || v->type == UB_PV_COLORSEQ) plat_free(v->v.seq.k);
     else if (v->type == UB_PV_FONT) plat_free(v->v.font.family);
+    else if (v->type == UB_PV_CFRAME) plat_free(v->v.cf.m);
     v->type = UB_PV_NONE;
 }
 
@@ -140,6 +141,16 @@ bool ub_value_copy(ub_value *dst, const ub_value *src)
             return false;
         }
         memcpy(dst->v.seq.k, src->v.seq.k, bytes);
+    } else if (src->type == UB_PV_CFRAME) {
+        dst->v.cf.m = (f32 *)plat_alloc(sizeof(f32) * 12);
+        if (!dst->v.cf.m) {
+            dst->type = UB_PV_NONE;
+            return false;
+        }
+        for (int k = 0; k < 12; ++k) { /* never NaN in the world */
+            f32 x = src->v.cf.m ? src->v.cf.m[k] : (k == 3 || k == 7 || k == 11 ? 1.0f : 0.0f);
+            dst->v.cf.m[k] = x == x ? x : 0;
+        }
     } else if (src->type == UB_PV_FONT) {
         const char *f = src->v.font.family ? src->v.font.family : "";
         u32 n = (u32)ub_strlen(f);
@@ -181,6 +192,7 @@ bool ub_value_equal(const ub_value *a, const ub_value *b)
     case UB_PV_NUMSEQ: case UB_PV_COLORSEQ:
         return a->v.seq.n == b->v.seq.n &&
                memcmp(a->v.seq.k, b->v.seq.k, sizeof(f32) * a->v.seq.n * (u32)seq_stride(a->type)) == 0;
+    case UB_PV_CFRAME: return memcmp(a->v.cf.m, b->v.cf.m, sizeof(f32) * 12) == 0;
     case UB_PV_FONT:
         return a->v.font.weight == b->v.font.weight && a->v.font.style == b->v.font.style &&
                streq(a->v.font.family ? a->v.font.family : "", b->v.font.family ? b->v.font.family : "");

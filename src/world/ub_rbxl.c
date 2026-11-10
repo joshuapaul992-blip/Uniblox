@@ -639,6 +639,32 @@ static ub_load_result data_prop(importer *im, cls *c, const u8 *pname, u32 pl, u
                 for (u32 f = 0; f < stride; ++f) im->seq[im->seq_len++] = u2f(le32(q + (k * fields + f) * 4));
         }
         break;
+    case 0x10: { /* CFrame: each one's rotation (an id, or 9 floats by rows), then the positions (x3 interleaved) */
+        if (!grow_buf((void **)&im->seq, &im->seq_cap, im->seq_len + n * 12, sizeof(f32))) { res = UB_LOAD_NO_MEMORY; break; }
+        u32 first = im->seq_len;
+        for (u32 i = 0; i < n && !r->bad; ++i) {
+            f32 *m = im->seq + first + i * 12;
+            u32 sid = rd_u8(r);
+            if (sid == 0) {
+                if (!need(r, 36)) break;
+                for (int k = 0; k < 9; ++k) m[3 + k] = u2f(le32(r->p + r->pos + (u32)k * 4));
+                r->pos += 36;
+            } else if (!ub_rbxl_special_rotation(sid, m + 3)) {
+                r->bad = true;
+            }
+        }
+        if (r->bad || !rd_interleaved32x3(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        im->seq_len += n * 12;
+        for (u32 i = 0; i < n; ++i) {
+            f32 *m = im->seq + first + i * 12;
+            m[0] = roblox_float(tmp[i]);
+            m[1] = roblox_float(tmp[n + i]);
+            m[2] = roblox_float(tmp[2 * n + i]);
+            NEWP(i, UB_PV_CFRAME);
+            p->a[0] = first + i * 12;
+        }
+        break;
+    }
     case 0x20: /* Font: family, weight (u16), style (u8), cached face id */
         for (u32 i = 0; i < n; ++i) {
             u32 fl, cl;
@@ -718,6 +744,7 @@ static ub_load_result apply_props(importer *im, ub_world *w, const i32 *made)
             v.v.seq.k = im->seq + p->a[0];
             v.v.seq.n = p->a[1];
             break;
+        case UB_PV_CFRAME: v.v.cf.m = im->seq + p->a[0]; break;
         case UB_PV_FONT:
             v.v.font.family = im->names + p->a[0];
             v.v.font.weight = (u16)p->a[1];

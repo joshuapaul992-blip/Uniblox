@@ -39,6 +39,11 @@ CLASSES = [
     "ShirtGraphic", "BodyColors", "HumanoidDescription", "StarterGear",
     # milestone 8C: the place's character settings
     "StarterPlayer",
+    # milestone 8C: constraints and movers
+    "BallSocketConstraint", "HingeConstraint", "PrismaticConstraint", "CylindricalConstraint", "RopeConstraint",
+    "RodConstraint", "SpringConstraint", "WeldConstraint", "NoCollisionConstraint", "AlignPosition",
+    "AlignOrientation", "LinearVelocity", "AngularVelocity", "VectorForce", "Torque", "LineForce",
+    "BodyVelocity", "BodyPosition", "BodyGyro", "BodyForce", "BodyAngularVelocity", "BodyThrust",
 ]
 
 # properties scripts cannot see that Uniblox still keeps from files
@@ -64,6 +69,7 @@ TYPES = {
     "Vector2": "UB_PV_VECTOR2", "Vector3": "UB_PV_VECTOR3", "UDim": "UB_PV_UDIM", "UDim2": "UB_PV_UDIM2",
     "Rect": "UB_PV_RECT", "NumberRange": "UB_PV_NUMRANGE", "NumberSequence": "UB_PV_NUMSEQ",
     "ColorSequence": "UB_PV_COLORSEQ", "Ref": "UB_PV_REF", "Font": "UB_PV_FONT", "BrickColor": "UB_PV_BRICKCOLOR",
+    "CFrame": "UB_PV_CFRAME",
 }
 
 WEIGHTS = {"Thin": 100, "ExtraLight": 200, "Light": 300, "Regular": 400, "Medium": 500, "SemiBold": 600,
@@ -130,6 +136,8 @@ def default_values(t, v):
         return [-1, 0, 0, 0], None
     if kind == "Font":
         return [WEIGHTS.get(val["weight"], 400), 1 if val["style"] == "Italic" else 0, 0, 0], val["family"]
+    if kind == "CFrame":  # only the position; every default has no rotation
+        return list(val["position"]) + [0], None
     raise ValueError(kind)
 
 

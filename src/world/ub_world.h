@@ -94,6 +94,7 @@ typedef enum {
     UB_PV_REF,            /* an instance, -1 = nil */
     UB_PV_FONT,           /* family (a content id), weight 100..900, style 0 normal / 1 italic */
     UB_PV_BRICKCOLOR,     /* a BrickColor number */
+    UB_PV_CFRAME,         /* 12 floats in Roblox's axes: x y z, then the rotation by rows (as GetComponents) */
     UB_PV_COUNT
 } ub_ptype;
 
@@ -116,6 +117,7 @@ typedef struct {
         struct { f32 lo, hi; } range;
         struct { f32 *k; u32 n; } seq;            /* n keypoints, 3 (NUMSEQ) or 4 (COLORSEQ) floats each */
         struct { char *family; u16 weight; u8 style; } font;
+        struct { f32 *m; } cf;
     } v;
 } ub_value;
 

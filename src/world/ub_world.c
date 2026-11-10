@@ -587,6 +587,9 @@ static void save_props(const ub_world *w, buf *b, const i32 *order, i32 n, const
                 for (u32 j = 0; j < v->v.seq.n * stride; ++j) put_f32(b, v->v.seq.k[j]);
                 break;
             }
+            case UB_PV_CFRAME:
+                for (int j = 0; j < 12; ++j) put_f32(b, v->v.cf.m[j]);
+                break;
             case UB_PV_FONT: {
                 const char *f = v->v.font.family ? v->v.font.family : "";
                 u32 len = (u32)ub_strlen(f);
@@ -963,6 +966,10 @@ static ub_load_result load_props(ub_world *w, const u8 *p, u32 len, u32 inst_cou
             }
             break;
         }
+        case UB_PV_CFRAME:
+            for (int j = 0; j < 12; ++j) seq[j] = get_fin(&r);
+            v.v.cf.m = seq;
+            break;
         case UB_PV_FONT: {
             v.v.font.weight = (u16)get_u16(&r);
             v.v.font.style = (u8)get_u8(&r);

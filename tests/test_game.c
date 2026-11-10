@@ -757,6 +757,30 @@ static void test_character(void)
     ub_game_stop(&g_g);
 }
 
+/* Constraints and body movers (8C). */
+static void test_constraints(void)
+{
+    char *src = read_text("tests/data/scripts/constraints.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    add_box(&w, ub_world_workspace(&w), "BigFloor", v3(0, -1.5f, 0), v3(400, 1, 400), 0x406040);
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Con", src);
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    for (int i = 0; i < 600 && find_result(&g_g, "con done") < 0; ++i) ub_game_update(&g_g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    CHECK(find_result(&g_g, "con done") >= 0);
+    bool ok = find_result(&g_g, "con ok") >= 0;
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* ------------------------------------------ the wider 2022 API (8B) */
 
 /* A frame with the camera behind the spawn point looking at workspace.Button:
@@ -843,6 +867,7 @@ void test_game(void)
     test_api2022();
     test_mesh_collision();
     test_character();
+    test_constraints();
     test_hostile();
     test_reuse();
     test_death();

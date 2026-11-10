@@ -1034,6 +1034,15 @@ void push_pvalue(lua_State *L, const ub_value *v, int enum_type)
     case UB_PV_COLORSEQ: push_cseq(L, v->v.seq.k, v->v.seq.n); break;
     case UB_PV_REF: push_inst(L, ub_world_alive(W, v->v.ref) ? v->v.ref : -1); break;
     case UB_PV_FONT: push_font(L, v->v.font.family, v->v.font.weight, v->v.font.style); break;
+    case UB_PV_CFRAME: {
+        const f32 *m = v->v.cf.m;
+        mat3 r;
+        r.x = v3(m[3], m[6], m[9]); /* columns from the rows */
+        r.y = v3(m[4], m[7], m[10]);
+        r.z = v3(m[5], m[8], m[11]);
+        push_cf(L, v3(m[0], m[1], m[2]), &r);
+        break;
+    }
     case UB_PV_BRICKCOLOR: push_brickcolor(L, brickcolor_number_rgb(v->v.e)); break;
     default: lua_pushnil(L); break;
     }
@@ -1043,7 +1052,7 @@ static const char *ptype_name(u8 t)
 {
     static const char *const n[UB_PV_COUNT] = { "nil", "bool", "int", "float", "double", "string", "EnumItem",
                                                 "Color3", "Vector2", "Vector3", "UDim", "UDim2", "Rect", "NumberRange",
-                                                "NumberSequence", "ColorSequence", "Object", "Font", "BrickColor" };
+                                                "NumberSequence", "ColorSequence", "Object", "Font", "BrickColor", "CFrame" };
     return t < UB_PV_COUNT ? n[t] : "?";
 }
 
@@ -1185,6 +1194,15 @@ bool to_pvalue(lua_State *L, int i, u8 type, int enum_type, ub_value *out, f32 *
         out->v.font.family = f->family;
         out->v.font.weight = f->weight;
         out->v.font.style = f->style;
+        return true;
+    }
+    case UB_PV_CFRAME: {
+        if (!is_cf(L, i)) break;
+        scf *c = check_cf(L, i);
+        f32 m[12] = { c->p.x, c->p.y, c->p.z, c->r.x.x, c->r.y.x, c->r.z.x, c->r.x.y, c->r.y.y, c->r.z.y,
+                      c->r.x.z, c->r.y.z, c->r.z.z };
+        memcpy(seq, m, sizeof m);
+        out->v.cf.m = seq;
         return true;
     }
     case UB_PV_BRICKCOLOR:

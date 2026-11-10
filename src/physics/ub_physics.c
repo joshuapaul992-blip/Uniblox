@@ -551,6 +551,8 @@ done:
 
 void ub_phys_free(ub_physics *ph)
 {
+    plat_free(ph->joints);
+    plat_free(ph->force); /* (torque, the drives share it) */
     plat_free(ph->free_body);
     plat_free(ph->bodies);
     plat_free(ph->shapes);
@@ -1401,6 +1403,11 @@ static void write_back(ub_physics *ph, ub_body *b)
     }
 }
 
+void ub_pjoints_solve(ub_physics *ph, f32 h);          /* ub_pjoint.c */
+void ub_pforces_apply(ub_physics *ph, f32 h);
+void ub_pforces_clear(ub_physics *ph);
+void ub_pjoints_keep_awake(ub_physics *ph);
+
 void ub_phys_step(ub_physics *ph)
 {
     const f32 dt = UB_PHYS_DT, h = dt / (f32)SUBSTEPS;
@@ -1431,15 +1438,19 @@ void ub_phys_step(ub_physics *ph)
     narrowphase(ph);
 
     soft sf = make_soft(h);
+    ub_pjoints_keep_awake(ph);
     prepare(ph);
     for (int sub = 0; sub < SUBSTEPS; ++sub) {
         integrate_velocities(ph, h);
+        ub_pforces_apply(ph, h);
         warm_start(ph);
         solve_contacts(ph, &sf, true);
+        ub_pjoints_solve(ph, h);
         integrate_positions(ph, h);
         solve_contacts(ph, &sf, false);
     }
     restitution(ph);
+    ub_pforces_clear(ph);
 
     i32 fallen = 0, kin = 0;
     for (i32 i = 1; i < ph->body_count; ++i) {

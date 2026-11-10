@@ -1746,6 +1746,7 @@ static int inst_index(lua_State *L)
     if (streq(k, "Archivable")) { lua_pushboolean(L, 1); return 1; }
     if (is_part(idx) && get_part_prop(L, idx, k)) return 1;
     if (joint_get(L, idx, k)) return 1;
+    if (attach_get(L, idx, k)) return 1;
     if (teams_get(L, idx, k)) return 1;
     if (get_class_prop(L, idx, k)) return 1;
     if (gui_get(L, idx, k)) return 1;
@@ -2020,9 +2021,11 @@ int set_prop(lua_State *L, i32 idx, const char *k, int v)
         return sapi_error(L, "ClassName cannot be assigned to");
     } else if (is_part(idx) && set_part_prop(L, idx, k, v)) {
     } else if (joint_set(L, idx, k, v)) {
+    } else if (attach_set(L, idx, k, v)) {
     } else if (teams_set(L, idx, k, v)) {
     } else if (set_class_prop(L, idx, k, v)) {
     } else if (gui_set(L, idx, k, v)) {
+        if (ub_constraint_class(cls_of(idx))) S.g->constraints_dirty = true;
     } else {
         set_extra(L, idx, k, v); /* kept, so scripts for things Uniblox lacks still run */
     }

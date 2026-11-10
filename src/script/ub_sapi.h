@@ -258,6 +258,8 @@ bool joint_set(lua_State *L, i32 idx, const char *k, int v);
 void joint_changed(lua_State *L, i32 idx);
 /* A subtree was moved: its joints join or let go. */
 void joints_moved(lua_State *L, i32 root);
+bool attach_get(lua_State *L, i32 idx, const char *k);
+bool attach_set(lua_State *L, i32 idx, const char *k, int v);
 
 /* Teams (ub_sapi_interact.c): Player.Team / TeamColor / Neutral */
 bool teams_get(lua_State *L, i32 idx, const char *k);
