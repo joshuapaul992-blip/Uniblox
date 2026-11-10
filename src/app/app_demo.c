@@ -19,6 +19,7 @@
  * scripts. */
 #include "app/app.h"
 #include "app/app_play.h"
+#include "gui/ub_gui.h"
 #include "app/app_settings.h"
 #include "audio/ub_mixer.h"
 #include "core/ub_log.h"
@@ -67,6 +68,8 @@ static char g_status[160];            /* last load/save message for the overlay 
 #define g_pitch g_view.pitch
 #define g_zoom g_view.zoom
 static f32 g_time;
+static ub_camera g_last_cam;      /* last frame's camera (the GUI places billboards with it) */
+static bool g_have_cam;
 #define g_muted g_set.muted
 #define g_colors_cfg g_set.colors
 #define g_prefs g_set.prefs
@@ -569,10 +572,27 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_win_h = frame->height;
     }
 
-    /* --- text entry first: while it is open, keys do not move us --- */
-    bool typed = !g_bench && handle_typing(in);
+    /* --- the place's GUI first: it may take the mouse, the wheel or the
+     * keyboard (a TextBox), and then the game does not get them --- */
+    bool gui_keys = g_game.gui && ub_gui_keyboard_taken(g_game.gui);
+    if (g_game.gui) {
+        if (!g_menu_open && !g_bench && !g_typing) {
+            play_gui_input(&g_game, frame, in, g_have_cam ? &g_last_cam : NULL, in->mouse_captured, g_time);
+        } else {
+            int sw, sh;
+            play_gui_screen_size(frame, &sw, &sh);
+            ub_gui_update(g_game.gui, GW, sw, sh, g_have_cam ? &g_last_cam : NULL, NULL, g_time);
+        }
+        gui_keys = gui_keys || ub_gui_keyboard_taken(g_game.gui);
+    }
+    bool gui_mouse = g_game.gui && ub_gui_mouse_taken(g_game.gui);
+    ub_input pin = *in; /* what the camera and movement see */
+    if (g_game.gui && ub_gui_wheel_taken(g_game.gui)) pin.wheel = 0;
+
+    /* --- text entry: while it is open, keys do not move us --- */
+    bool typed = !g_bench && !gui_keys && handle_typing(in);
     bool menu_was_open = g_menu_open;
-    bool play_keys = !typed && !g_typing && !g_bench && !g_menu_open;
+    bool play_keys = !typed && !g_typing && !gui_keys && !g_bench && !g_menu_open;
 
     /* --- function keys --- */
     if (play_keys && in->key_pressed[UB_KEY_F3]) g_hide_overlay = !g_hide_overlay;
@@ -615,7 +635,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     /* --- camera controls and movement --- */
     vec3 move;
     bool jump;
-    play_view_input(&g_view, in, dt, play_keys, !g_bench && !g_menu_open, &move, &jump);
+    play_view_input(&g_view, &pin, dt, play_keys, !g_bench && !g_menu_open, &move, &jump);
 
     /* --- the game: scripts, physics in fixed steps, the character --- */
     ub_game_update(&g_game, dt, move, jump);
@@ -639,7 +659,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         apply_volume();
         ub_debug("mute %s", g_muted ? "on" : "off");
     }
-    if (!g_bench && in->mouse_pressed[UB_MOUSE_LEFT]) {
+    if (!g_bench && in->mouse_pressed[UB_MOUSE_LEFT] && !gui_mouse) {
         ub_play_params p = ub_play_default();
         p.pan = (f32)(in->mouse_x * 2 - frame->width) / (f32)frame->width;
         p.pitch = 2.0f - 1.5f * (f32)in->mouse_y / (f32)frame->height;
@@ -679,7 +699,11 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     ub_render_env env = play_env(GW);
     ub_render_begin(frame, &cam, &env);
     play_view_draw(&g_view, &g_game, !g_bench);
+    play_gui_draw_world(&g_game, &cam);
     ub_render_end_scene();
+    play_gui_draw_screen(&g_game);
+    g_last_cam = cam;
+    g_have_cam = true;
 
     /* --- overlay --- */
     g_fps_frames++;
@@ -719,13 +743,19 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
                      g_game.phys.stats.awake, g_game.phys.stats.contacts, phys10 / 10, phys10 % 10,
                      g_game.chr.grounded ? "" : "  (in the air)");
             }
+            if (g_game.gui) {
+                ub_gui_stats gs;
+                ub_gui_get_stats(g_game.gui, &gs);
+                if (gs.layers)
+                    LINE("GUI: %u layer(s), %u objects; layout %u.%u ms, drawing %u.%u ms", gs.layers, gs.objects,
+                         gs.layout_us / 1000u, gs.layout_us / 100u % 10u, gs.drawn_us / 1000u, gs.drawn_us / 100u % 10u);
+            }
             if (g_game.scripts) {
                 ub_script_stats st;
                 ub_script_get_stats(&st);
                 u32 s10 = g_game.script_us / 100u;
-                LINE("Scripts: %u running, %u waiting, %u KB, %u.%u ms%s%s", st.scripts, st.threads, st.memory_kb,
-                     s10 / 10, s10 % 10, st.errors ? "  - errors below" : "",
-                     st.skipped_client ? "  (LocalScripts not run yet)" : "");
+                LINE("Scripts: %u running, %u waiting, %u KB, %u.%u ms%s", st.scripts, st.threads, st.memory_kb,
+                     s10 / 10, s10 % 10, st.errors ? "  - errors below" : "");
                 const char *out[UB_SCRIPT_OUTPUT_LINES];
                 bool err[UB_SCRIPT_OUTPUT_LINES];
                 int n = ub_script_output(out, err, 4);

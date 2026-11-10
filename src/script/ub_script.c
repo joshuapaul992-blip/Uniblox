@@ -1294,20 +1294,39 @@ static bool start_code(lua_State *L, i32 inst, const char *src, const char *chun
     return true;
 }
 
-static bool runs_here(const ub_world *w, i32 i, i32 sss)
-{
-    const ub_instance *in = &w->inst[i];
-    if (in->source == UB_NO_STRING || (in->flags & (UB_INST_DISABLED | UB_INST_DESTROYED))) return false;
-    const char *cls = ub_world_str(w, in->class_name);
-    if (strcmp(cls, "Script") != 0 || (in->flags & UB_INST_CLIENT)) return false;
-    return ub_world_is_descendant(w, i, w->workspace) || (sss >= 0 && ub_world_is_descendant(w, i, sss));
-}
-
 static i32 find_service(const ub_world *w, const char *cls)
 {
     for (i32 i = 0; i < w->count; ++i)
         if (w->inst[i].parent < 0 && strcmp(ub_world_str(w, w->inst[i].class_name), cls) == 0) return i;
     return -1;
+}
+
+/* Where a script runs. Uniblox is one machine, so both sides run here:
+ *   Scripts: in the Workspace, ServerScriptService and under Players (as
+ *   Roblox's server runs them);
+ *   LocalScripts: in the player's PlayerGui, Backpack and PlayerScripts,
+ *   the character and ReplicatedFirst; Scripts with RunContext Client
+ *   also in the Workspace and ReplicatedStorage. */
+static bool runs_here(const ub_world *w, i32 i, i32 sss)
+{
+    const ub_instance *in = &w->inst[i];
+    if (in->source == UB_NO_STRING || (in->flags & (UB_INST_DISABLED | UB_INST_DESTROYED))) return false;
+    const char *cls = ub_world_str(w, in->class_name);
+    bool local = strcmp(cls, "LocalScript") == 0, script = strcmp(cls, "Script") == 0;
+    if (!local && !script) return false;
+    const ub_game *g = S.g;
+    bool in_player = g->player >= 0 && ub_world_is_descendant(w, i, g->player);
+    bool in_char = g->char_model >= 0 && ub_world_is_descendant(w, i, g->char_model);
+    if (script && !(in->flags & UB_INST_CLIENT))
+        return ub_world_is_descendant(w, i, w->workspace) || (sss >= 0 && ub_world_is_descendant(w, i, sss)) ||
+               (g->players >= 0 && ub_world_is_descendant(w, i, g->players));
+    i32 rf = find_service(w, "ReplicatedFirst");
+    if (in_player || in_char || (rf >= 0 && ub_world_is_descendant(w, i, rf))) return true;
+    if (script) { /* RunContext = Client */
+        i32 rs = find_service(w, "ReplicatedStorage");
+        return ub_world_is_descendant(w, i, w->workspace) || (rs >= 0 && ub_world_is_descendant(w, i, rs));
+    }
+    return false;
 }
 
 static int start_in(lua_State *L)
@@ -1377,6 +1396,7 @@ bool ub_script_init(ub_game *g)
     open_signals(L);
     open_types(L);
     open_instances(L);
+    open_gui(L);
     /* every thread made from now on inherits the time-limit hook */
     lua_sethook(L, hook, LUA_MASKCOUNT, HOOK_EVERY);
     return true;
@@ -1395,20 +1415,41 @@ void ub_script_shutdown(void)
     memset(&S, 0, sizeof S);
 }
 
+static bool is_client(const ub_world *w, i32 i)
+{
+    return (w->inst[i].flags & UB_INST_CLIENT) || strcmp(ub_world_str(w, w->inst[i].class_name), "LocalScript") == 0;
+}
+
+/* LocalScripts: on the first frame, when the player's screen is known */
+static void start_clients(lua_State *L)
+{
+    ub_world *w = &S.g->world;
+    i32 sss = find_service(w, "ServerScriptService");
+    S.clients_started = true;
+    for (i32 i = 0; i < w->count; ++i) {
+        if (!is_client(w, i) || !runs_here(w, i, sss) || !mark_started(i)) continue;
+        char name[192], chunk[200];
+        snprintf(chunk, sizeof chunk, "=%s", script_name(L, i, name, sizeof name));
+        start_code(L, i, ub_world_source(w, i), chunk);
+    }
+}
+
 static int e_start(lua_State *L)
 {
     ub_world *w = &S.g->world;
     i32 sss = find_service(w, "ServerScriptService");
     for (i32 i = 0; i < w->count; ++i) {
         const ub_instance *in = &w->inst[i];
-        if (in->source != UB_NO_STRING && (in->flags & UB_INST_CLIENT)) S.stats.skipped_client++;
-        if (!runs_here(w, i, sss) || !mark_started(i)) continue;
+        bool runs = runs_here(w, i, sss);
+        if (in->source != UB_NO_STRING && (in->flags & UB_INST_CLIENT) && !runs) S.stats.skipped_client++;
+        if (runs && is_client(w, i)) continue; /* their turn comes with the first frame */
+        if (!runs || !mark_started(i)) continue;
         char name[192], chunk[200];
         snprintf(chunk, sizeof chunk, "=%s", script_name(L, i, name, sizeof name));
         start_code(L, i, ub_world_source(w, i), chunk);
     }
     if (S.stats.skipped_client)
-        ub_info("scripts: %u LocalScript(s) not run (scripts for the player's side come later)", S.stats.skipped_client);
+        ub_info("scripts: %u LocalScript(s) in places they do not run (StarterGui, ReplicatedStorage...)", S.stats.skipped_client);
     /* the player joins */
     push_inst(L, S.g->player);
     fire_signal(L, S.g->players, EV_PLAYERADDED, NULL, 1);
@@ -1454,6 +1495,8 @@ static f32 g_frame_dt;
 
 static int e_begin(lua_State *L)
 {
+    if (!S.clients_started) start_clients(L);
+    gui_pump(L); /* clicks, keys and GUI changes first, as Roblox does */
     run_due(L);
     lua_pushnumber(L, script_time());
     lua_pushnumber(L, g_frame_dt);
@@ -1522,6 +1565,7 @@ void ub_script_died(void) { report(lua_cpcall(S.L, e_died, NULL)); }
 
 static int e_respawned(lua_State *L)
 {
+    gui_respawned(L);
     push_inst(L, S.g->char_model);
     fire_signal(L, S.g->player, EV_CHARACTERADDED, NULL, 1);
     return 0;

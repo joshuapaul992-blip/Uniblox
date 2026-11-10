@@ -1,0 +1,92 @@
+Bold Denk|Active|bool|0
+Bold Denk|AnchorPoint|vector2|0.0 0.0
+Bold Denk|AutoLocalize|bool|1
+Bold Denk|AutomaticSize|enum|0
+Bold Denk|BackgroundColor3|color3|0.639215708 0.635294139 0.647058845
+Bold Denk|BackgroundTransparency|float|0.0
+Bold Denk|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+Bold Denk|BorderMode|enum|0
+Bold Denk|BorderSizePixel|int|1
+Bold Denk|ClipsDescendants|bool|0
+Bold Denk|Draggable|bool|0
+Bold Denk|FontFace|font|700 0 rbxasset://fonts/families/DenkOne.json
+Bold Denk|LayoutOrder|int|0
+Bold Denk|LineHeight|float|1.0
+Bold Denk|MaxVisibleGraphemes|int|-1
+Bold Denk|NextSelectionDown|ref|
+Bold Denk|NextSelectionLeft|ref|
+Bold Denk|NextSelectionRight|ref|
+Bold Denk|NextSelectionUp|ref|
+Bold Denk|Position|udim2|0.0 0 0.0 0
+Bold Denk|RichText|bool|0
+Bold Denk|RootLocalizationTable|ref|
+Bold Denk|Rotation|float|0.0
+Bold Denk|Selectable|bool|0
+Bold Denk|SelectionBehaviorDown|enum|0
+Bold Denk|SelectionBehaviorLeft|enum|0
+Bold Denk|SelectionBehaviorRight|enum|0
+Bold Denk|SelectionBehaviorUp|enum|0
+Bold Denk|SelectionGroup|bool|0
+Bold Denk|SelectionImageObject|ref|
+Bold Denk|SelectionOrder|int|0
+Bold Denk|Size|udim2|0.0 0 0.0 0
+Bold Denk|SizeConstraint|enum|0
+Bold Denk|Text|string|Example
+Bold Denk|TextColor3|color3|0.105882362 0.164705887 0.207843155
+Bold Denk|TextScaled|bool|0
+Bold Denk|TextSize|float|8.0
+Bold Denk|TextStrokeColor3|color3|0.0 0.0 0.0
+Bold Denk|TextStrokeTransparency|float|1.0
+Bold Denk|TextTransparency|float|0.0
+Bold Denk|TextTruncate|enum|0
+Bold Denk|TextWrapped|bool|0
+Bold Denk|TextXAlignment|enum|2
+Bold Denk|TextYAlignment|enum|1
+Bold Denk|Visible|bool|1
+Bold Denk|ZIndex|int|1
+Italic Merriweather|Active|bool|0
+Italic Merriweather|AnchorPoint|vector2|0.0 0.0
+Italic Merriweather|AutoLocalize|bool|1
+Italic Merriweather|AutomaticSize|enum|0
+Italic Merriweather|BackgroundColor3|color3|0.639215708 0.635294139 0.647058845
+Italic Merriweather|BackgroundTransparency|float|0.0
+Italic Merriweather|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+Italic Merriweather|BorderMode|enum|0
+Italic Merriweather|BorderSizePixel|int|1
+Italic Merriweather|ClipsDescendants|bool|0
+Italic Merriweather|Draggable|bool|0
+Italic Merriweather|FontFace|font|400 1 rbxasset://fonts/families/Merriweather.json
+Italic Merriweather|LayoutOrder|int|0
+Italic Merriweather|LineHeight|float|1.0
+Italic Merriweather|MaxVisibleGraphemes|int|-1
+Italic Merriweather|NextSelectionDown|ref|
+Italic Merriweather|NextSelectionLeft|ref|
+Italic Merriweather|NextSelectionRight|ref|
+Italic Merriweather|NextSelectionUp|ref|
+Italic Merriweather|Position|udim2|0.0 0 0.0 0
+Italic Merriweather|RichText|bool|0
+Italic Merriweather|RootLocalizationTable|ref|
+Italic Merriweather|Rotation|float|0.0
+Italic Merriweather|Selectable|bool|0
+Italic Merriweather|SelectionBehaviorDown|enum|0
+Italic Merriweather|SelectionBehaviorLeft|enum|0
+Italic Merriweather|SelectionBehaviorRight|enum|0
+Italic Merriweather|SelectionBehaviorUp|enum|0
+Italic Merriweather|SelectionGroup|bool|0
+Italic Merriweather|SelectionImageObject|ref|
+Italic Merriweather|SelectionOrder|int|0
+Italic Merriweather|Size|udim2|0.0 0 0.0 0
+Italic Merriweather|SizeConstraint|enum|0
+Italic Merriweather|Text|string|Example
+Italic Merriweather|TextColor3|color3|0.105882362 0.164705887 0.207843155
+Italic Merriweather|TextScaled|bool|0
+Italic Merriweather|TextSize|float|8.0
+Italic Merriweather|TextStrokeColor3|color3|0.0 0.0 0.0
+Italic Merriweather|TextStrokeTransparency|float|1.0
+Italic Merriweather|TextTransparency|float|0.0
+Italic Merriweather|TextTruncate|enum|0
+Italic Merriweather|TextWrapped|bool|0
+Italic Merriweather|TextXAlignment|enum|2
+Italic Merriweather|TextYAlignment|enum|1
+Italic Merriweather|Visible|bool|1
+Italic Merriweather|ZIndex|int|1

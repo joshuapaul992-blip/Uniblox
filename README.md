@@ -115,6 +115,13 @@ converts a Roblox file into a `.ubx`.
   `Ambient`, `OutdoorAmbient`, `FogEnd` and `FogColor`. The sun's position
   follows the clock time.
 - Uncompressed, LZ4 and Zstandard chunks. Uniblox has its own decoders.
+- GUIs, with every property: ScreenGuis, Frames, labels, buttons, text
+  boxes, images, ScrollingFrames, layouts and constraints, UICorner,
+  UIStroke, UIGradient, BillboardGuis and SurfaceGuis (see "GUIs" below).
+- Scripts with their code, LocalScripts and ModuleScripts; value objects
+  (`IntValue`, `StringValue`, `ObjectValue`...); RemoteEvents,
+  RemoteFunctions and bindables. Files from 2024 on, which store image
+  addresses in the newer Content type, work too.
 
 **What it doesn't read yet:**
 
@@ -124,7 +131,7 @@ converts a Roblox file into a `.ubx`.
 - Terrain is counted but skipped.
 - Hinges, springs, ropes and other constraints are ignored, so parts that
   rely on them fall loose.
-- Textures, decals, scripts and GUIs are ignored.
+- Textures and decals on parts are ignored.
 - Partly see-through parts are drawn solid.
 - The old XML format (`.rbxlx`) isn't supported. Studio can save the
   binary format.
@@ -190,16 +197,25 @@ end)
 - **Language:** Lua 5.1, plus the Luau additions scripts use most:
   `+= -= *= /= %= ^= ..=`, `continue`, `typeof`, `table.find`/`clear`/`pack`,
   `string.split`, `math.clamp`/`sign`/`round`, and `pcall` that can wait.
-- **Scripts that run:** every `Script` in the Workspace or
-  ServerScriptService that isn't disabled. ModuleScripts load with
-  `require`. LocalScripts don't run yet.
+- **Scripts that run:** every `Script` in the Workspace,
+  ServerScriptService or under Players that isn't disabled; every
+  `LocalScript` in the player's PlayerGui, Backpack, PlayerScripts or
+  character, or in ReplicatedFirst. Uniblox is one machine, so both sides
+  run here, and a RemoteEvent fired from a LocalScript reaches the server
+  script straight away. ModuleScripts load with `require`.
 - **The API:** instances with their properties, methods and events
   (`Touched`, `Changed`, `ChildAdded`, `GetPropertyChangedSignal`...),
   `Instance.new`, `Clone`, `Destroy`, attributes, `game:GetService`,
   `Players` and the player's character with its `Humanoid` (health, walk
   speed, jump power, `Died`), `RunService` events, `TweenService`, `Debris`,
-  `workspace:Raycast`, `Lighting`. The types are `Vector3`, `CFrame`,
-  `Color3`, `BrickColor`, `Enum`, `TweenInfo`, `Ray` and `RaycastParams`.
+  `workspace:Raycast`, `Lighting`, the GUI (below), `UserInputService`,
+  `Player:GetMouse()`, `workspace.CurrentCamera` (its CFrame, ViewportSize,
+  FieldOfView, WorldToViewportPoint and rays), `GuiService`,
+  `TextService:GetTextSize`, remotes and bindables. The types are
+  `Vector3`, `Vector2`, `CFrame`, `Color3`, `BrickColor`, `UDim`, `UDim2`,
+  `Rect`, `NumberRange`, `NumberSequence`, `ColorSequence`, `Font`,
+  `InputObject`, `TweenInfo`, `Ray` and `RaycastParams`, and every one of
+  Roblox's enums (`Enum.KeyCode`, `Enum.Font`...).
   Scheduling uses `wait`, `task.wait`/`spawn`/`defer`/`delay`/`cancel`,
   `spawn` and `delay`. Positions use Roblox's axes, so coordinates copied
   from Studio mean the same thing.
@@ -224,6 +240,62 @@ The demo place's door, spinning block, glowing lava strip and green button
 the chat line to try one more. Parts with a `Transparency` between 0 and 1
 are drawn see-through, with a dither pattern that works in both renderers
 and in 256 colours.
+
+## GUIs
+
+Places can have Roblox's GUIs, made in Studio or by scripts. What is in
+StarterGui is copied into the player's PlayerGui when they join (and again
+after a respawn, unless `ResetOnSpawn` is off), and its LocalScripts run.
+
+- **Objects:** ScreenGui, Frame, TextLabel, TextButton, TextBox,
+  ImageLabel, ImageButton, ScrollingFrame, BillboardGui (over a part) and
+  SurfaceGui (on a part's face). Every property is kept, read and saved;
+  setting one checks the type as Roblox does.
+- **Layout, worked out as Roblox does:** Size and Position (scale and
+  offset), AnchorPoint, SizeConstraint, Rotation, ZIndex in both
+  ZIndexBehavior modes, Visible, ClipsDescendants, AutomaticSize, the
+  36-pixel bar at the top that ScreenGuis start below (IgnoreGuiInset),
+  UIListLayout, UIGridLayout, UIPageLayout, UIPadding, UIScale,
+  UIAspectRatioConstraint, UISizeConstraint and UITextSizeConstraint.
+  Scripts read the results: AbsolutePosition, AbsoluteSize,
+  AbsoluteRotation, TextBounds, AbsoluteContentSize, AbsoluteCanvasSize,
+  and their changed signals fire.
+- **Drawing:** rounded corners (UICorner), outlines (UIStroke), gradients
+  (UIGradient), borders, see-through backgrounds, images (stretched,
+  9-slice, tiled, fitted, cropped, ImageRectOffset/Size), scrollbars.
+  The same drawing code serves both renderers, so a GUI looks the same in
+  OpenGL, in software and in 256 colours. BillboardGuis and SurfaceGuis
+  are hidden by parts in front of them unless AlwaysOnTop.
+- **Text:** TextSize, TextScaled, TextWrapped, alignment, LineHeight,
+  TextTruncate, MaxVisibleGraphemes, the text stroke, and rich text
+  (`<b>`, `<i>`, `<u>`, `<s>`, `<font color size face weight
+  transparency>`, `<stroke>`, `<br/>`, `<uppercase>`, `<smallcaps>`,
+  comments and `&lt;`-style escapes). Uniblox ships no fonts: Roblox's
+  fonts are drawn with the nearest one Windows has (Arial for the sans
+  fonts, Times New Roman, Courier New, Comic Sans MS where installed, Arial
+  Black for the heaviest). Text is anti-aliased by Uniblox itself, the
+  same way on NT 3.51 as on Windows 11.
+- **Input:** hovering, clicking (MouseEnter/Leave, MouseButton1Click,
+  Activated, InputBegan...), AutoButtonColor, text boxes (click to type,
+  Enter, Esc, arrows, Home, End, Delete; FocusLost), the mouse wheel and
+  dragging scrollbars. GUI that takes the mouse keeps it from the world, a
+  text box keeps the keyboard from the character, and scripts are told
+  (`gameProcessedEvent`).
+- **Images** are never downloaded. Put your own pictures in a `content`
+  folder next to `uniblox.exe`: `rbxassetid://123` (or a roblox.com asset
+  link) is read from `content\123.png` or `content\123.bmp`, and
+  `rbxasset://textures/x.png` from `content\textures\x.png`. PNG (every
+  kind) and BMP work. A missing picture draws nothing, like one still
+  loading in Roblox, and is noted once in the log.
+- **Not yet:** 3D inside a ViewportFrame, videos, CanvasGroup's group
+  transparency, UITableLayout (laid out as a list), gamepad selection,
+  rich text's `<mark>`, and clicking buttons on BillboardGuis and
+  SurfaceGuis.
+
+The demo place has a panel in the top right (a count of door openings and
+a "Back to the start" button that asks a server script, through a
+RemoteEvent, to move you), messages that slide up from the bottom, a
+SurfaceGui sign by the spawn and a BillboardGui over the door.
 
 ## The editor
 
@@ -338,7 +410,28 @@ fallback.
   (`tools/gen_rbx_expected.py`), so the binary reader is checked against an
   independent source. `tools/make_test_rbxl.py` builds the castle test
   place, which uses all three chunk encodings. Both the loader and the
-  decoders are also fuzzed with random and cut-off data.
+  decoders are also fuzzed with random and cut-off data. Fifteen GUI and
+  value-object models from the same project check the GUI import: every
+  property in each model's XML copy (`<name>.props.expected`, from
+  `tools/gen_rbx_props_expected.py`) must come out of the binary file with
+  the same value, and survive a `.ubx` round trip. The deflate decoder
+  (for PNG) is checked against Python's zlib with stored, fixed, dynamic,
+  Huffman-only and RLE blocks.
+
+  The GUI tests draw with the rasteriser and check pixels (corners,
+  outlines, clipping, gradients, rotation), decode PNGs of every filter,
+  plain and interlaced, and fuzz the decoder. They lay out text with known
+  glyph sizes (wrapping, rich text, TextScaled, truncation). They check
+  Roblox's layout rules number by number: anchors, the top inset, lists,
+  grids, padding, constraints, UIScale, AutomaticSize, scrolling and both
+  ZIndex modes. Input is checked too: hovering, clicks through
+  non-Active frames, an Active frame taking them, and typing in a text
+  box. The GUI script test (`tests/data/scripts/gui.lua`) is a LocalScript
+  that has to be copied from StarterGui to run. It checks the new types
+  and enums, defaults, type errors, AbsoluteSize and its signal,
+  TextBounds, fonts, layouts, tweens, value objects, a RemoteEvent and
+  RemoteFunction round trip with a server Script, bindables, text-box
+  focus, and a real click and key press sent through the GUI.
 
   The physics tests drop single parts and towers of 5 to 20 parts and
   check that they come to rest upright, asleep, at the right height. They
@@ -359,7 +452,10 @@ fallback.
   seconds, and the game, its door and an innocent script must carry on.
   Another test makes and destroys 300,000 instances and checks that the
   world and physics stay small. A last one plays the demo place: the door,
-  the button, the lava and the chat commands.
+  the button, the lava, the chat commands, and its GUI. The panel must
+  count the door, survive a death, and be drawn, along with the sign and
+  the door's label. The door's label is also drawn by the software
+  renderer over the real scene, to check it sits in front of the wall.
 
   The editor tests build an obstacle course with editor actions only (no
   code written): a lava floor, platforms over gaps, a checkpoint and a
@@ -397,7 +493,9 @@ fallback.
   tools/wine_smoke.sh winxp opengl
   ```
 
-  It also opens the menu with Esc, changes the frame rate cap there and
+  It photographs the demo's GUI at the start, clicks the panel's button
+  and checks that a server script got the RemoteEvent and that the panel's
+  LocalScript ran. It also opens the menu with Esc, changes the frame rate cap there and
   checks that it took effect and was saved, and quits from the menu. It
   checks that the demo's loose parts settle and fall asleep, walks
   into the scripted door and checks the script opened it, checks that no
@@ -427,6 +525,7 @@ fallback.
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
 | `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, camera, `scripts` and `place` |
 | `places/` | Places saved with F7 in the game or from the editor (`autosave.ubx`: the editor's unsaved changes when it was closed) |
+| `content/` | Optional. Your own pictures for places' GUIs: `content\<asset id>.png` (or `.bmp`) for `rbxassetid://<asset id>`, and paths under it for `rbxasset://` addresses |
 | `ubedit.log`, `ubedit.cfg` | The editor's log and settings (`renderer`, `quality`, `gl_shaders`, `fps_cap`, window size, `sw_height`, grid size) |
 | `sounds/jump.wav`, `sounds/land.wav`, `sounds/click.wav` | Optional. Replace the built-in sounds; any PCM 8/16-bit mono/stereo WAV works |
 
@@ -466,5 +565,9 @@ GPLv3. See [LICENSE](LICENSE).
 
 The Roblox test files in `tests/data/rbx/` come from
 [rojo-rbx/rbx-test-files](https://github.com/rojo-rbx/rbx-test-files)
-under the MIT License; see the README in that folder. Uniblox isn't
-affiliated with Roblox.
+under the MIT License; see the README in that folder.
+`src/world/ub_classdb.inc` (the GUI classes' properties, their defaults
+and Roblox's enums) is generated by `tools/gen_classdb.py` from the
+reflection database of [rojo-rbx/rbx-dom](https://github.com/rojo-rbx/rbx-dom)
+(MIT License), whose description of the binary format the importer also
+follows. Uniblox isn't affiliated with Roblox.

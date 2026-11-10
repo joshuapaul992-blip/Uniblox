@@ -1,6 +1,9 @@
 #include "game/ub_game.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
+#include "core/ub_string.h"
+#include "gui/ub_gui.h"
+#include "world/ub_classes.h"
 #include "platform/platform.h"
 #include "script/ub_script.h"
 #include "crt/ub_crt.h"
@@ -102,6 +105,64 @@ static void make_player(ub_game *g)
     g->health = g->max_health = 100;
     g->walk_speed = UB_CHAR_WALK_SPEED;
     g->jump_height = UB_CHAR_JUMP_HEIGHT;
+    /* where the player's GUI, tools and own scripts live */
+    g->player_gui = g->backpack = g->player_scripts = -1;
+    if (g->player >= 0) {
+        g->player_gui = ub_world_add(w, g->player, UB_CLASS_OTHER, "PlayerGui", "PlayerGui");
+        g->backpack = ub_world_add(w, g->player, UB_CLASS_FOLDER, "Backpack", "Backpack");
+        g->player_scripts = ub_world_add(w, g->player, UB_CLASS_FOLDER, "PlayerScripts", "PlayerScripts");
+        if (g->player_gui >= 0) ub_cdb_fill_defaults(w, g->player_gui, "PlayerGui");
+    }
+}
+
+/* Is it a GUI to copy again after a respawn? (Everything but the
+ * LayerCollectors that have ResetOnSpawn off.) */
+static bool resets(const ub_world *w, i32 i)
+{
+    if (!ub_cdb_is_a(ub_world_str(w, w->inst[i].class_name), "LayerCollector")) return true;
+    const ub_value *v = ub_world_prop_named(w, i, "ResetOnSpawn");
+    return !v || v->type != UB_PV_BOOL || v->v.b;
+}
+
+int ub_game_fill_player_gui(ub_game *g, bool initial, i32 *added, int max)
+{
+    ub_world *w = &g->world;
+    int n = 0;
+    i32 sg = find_root_by_class(w, "StarterGui");
+    if (sg < 0 || g->player_gui < 0) return 0;
+    /* clone first: the list of children must not change while walking it */
+    i32 kids[1024];
+    int nk = 0;
+    for (i32 c = w->inst[sg].first_child; c >= 0 && nk < 1024; c = w->inst[c].next_sibling)
+        if (ub_world_alive(w, c) && (initial || resets(w, c))) kids[nk++] = c;
+    for (int k = 0; k < nk; ++k) {
+        i32 copy = ub_world_clone(w, kids[k]);
+        if (copy < 0) break;
+        w->inst[copy].flags |= UB_INST_RUNTIME;
+        ub_world_set_parent(w, copy, g->player_gui);
+        if (n < max) added[n++] = copy;
+    }
+    if (initial) { /* StarterPlayerScripts: once, into PlayerScripts; StarterCharacterScripts: into the character */
+        i32 sp = find_root_by_class(w, "StarterPlayer");
+        for (i32 c = sp >= 0 ? w->inst[sp].first_child : -1; c >= 0; c = w->inst[c].next_sibling) {
+            const char *cn = ub_world_str(w, w->inst[c].class_name);
+            i32 dest = !ub_strcmp(cn, "StarterPlayerScripts") ? g->player_scripts
+                     : !ub_strcmp(cn, "StarterCharacterScripts") ? g->char_model : -1;
+            if (dest < 0) continue;
+            i32 sk[256];
+            int ns = 0;
+            for (i32 q = w->inst[c].first_child; q >= 0 && ns < 256; q = w->inst[q].next_sibling)
+                if (ub_world_alive(w, q)) sk[ns++] = q;
+            for (int k = 0; k < ns; ++k) {
+                i32 copy = ub_world_clone(w, sk[k]);
+                if (copy < 0) break;
+                w->inst[copy].flags |= UB_INST_RUNTIME;
+                ub_world_set_parent(w, copy, dest);
+                if (n < max) added[n++] = copy;
+            }
+        }
+    }
+    return n;
 }
 
 vec3 ub_game_root_position(const ub_game *g)
@@ -167,7 +228,20 @@ static void respawn(ub_game *g)
     if (g->phys_ok) g->chr.walk_speed = g->walk_speed;
     g->respawned = true;
     ub_info("the player respawned");
-    if (g->scripts) ub_script_respawned();
+    /* the GUIs that reset on spawn are copied from StarterGui again (with
+     * scripts running, the script engine does it, so events fire) */
+    if (g->scripts) {
+        ub_script_respawned();
+    } else if (g->player_gui >= 0) {
+        ub_world *w = &g->world;
+        for (i32 c = w->inst[g->player_gui].first_child; c >= 0;) {
+            i32 next = w->inst[c].next_sibling;
+            if (resets(w, c)) ub_world_destroy(w, c);
+            c = next;
+        }
+        i32 added[64];
+        ub_game_fill_player_gui(g, false, added, 64);
+    }
 }
 
 /* ------------------------------------------------------ script changes */
@@ -263,6 +337,12 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
     g->feet = g->spawn;
     g->last_ground_part = -1;
     make_player(g);
+    {
+        i32 added[64];
+        ub_game_fill_player_gui(g, true, added, 64);
+    }
+    g->gui = ub_gui_new();
+    if (g->gui) ub_gui_set_root(g->gui, g->player_gui);
     if (g->phys_ok && !ub_char_init(&g->chr, &g->phys, g->spawn)) {
         ub_error("physics: out of memory adding the character");
         ub_phys_free(&g->phys);
@@ -291,6 +371,7 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
 void ub_game_stop(ub_game *g)
 {
     if (g->scripts) ub_script_shutdown();
+    ub_gui_free(g->gui);
     if (g->phys_ok) ub_phys_free(&g->phys);
     plat_free(g->live_flag);
     plat_free(g->live);

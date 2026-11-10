@@ -14,3 +14,24 @@ independent source.
 | `three-unique-parts.rbxm` | `models/three-unique-parts` | Plain parts with distinct properties |
 | `weldconstraint.rbxm` | `models/weldconstraint` | Two loose parts joined by a WeldConstraint |
 | `modulescript.rbxm` | `models/default-inserted-modulescript` | A script with its code (Source) |
+
+### GUI objects and value objects (milestone 8A)
+
+These `.rbxm` files are the same project's `models/<name>/binary.rbxm`.
+`tools/gen_rbx_props_expected.py` copies them and writes each
+`<name>.props.expected` from the project's XML copy of the same model: every
+property of a class Uniblox keeps, with its value. The importer must
+produce all of them.
+
+| File | Why |
+|---|---|
+| `three-unique-frames.rbxm` | Frames with every GuiObject property set differently |
+| `three-screengui.rbxm` | ScreenGui settings |
+| `three-uigradients.rbxm` | ColorSequence and NumberSequence values |
+| `three-uigridlayouts.rbxm` | Grid layouts (UDim2 cell sizes, enums) |
+| `two-imagebuttons.rbxm` | Images, Rect slice centres |
+| `text-label-with-font.rbxm`, `font.rbxm` | FontFace (the Font type) |
+| `gui-inset-and-font-migration.rbxm` | ScreenGui, TextLabel, TextButton and TextBox together |
+| `imagelabel-content.rbxm` | The newer Content type (`ImageContent`) |
+| `funny-uipadding.rbxm` | UDim values |
+| `three-intvalues.rbxm`, `funny-numbervalue.rbxm`, `three-brickcolorvalues.rbxm`, `three-color3values.rbxm`, `three-vector3values.rbxm` | Value objects (Int64, Float64, BrickColor, Color3, Vector3 with inf and NaN) |

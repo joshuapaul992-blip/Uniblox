@@ -1,0 +1,46 @@
+TextLabel|Active|bool|0
+TextLabel|AnchorPoint|vector2|0.0 0.0
+TextLabel|AutoLocalize|bool|1
+TextLabel|AutomaticSize|enum|0
+TextLabel|BackgroundColor3|color3|1.0 1.0 1.0
+TextLabel|BackgroundTransparency|float|0.0
+TextLabel|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+TextLabel|BorderMode|enum|0
+TextLabel|BorderSizePixel|int|1
+TextLabel|ClipsDescendants|bool|0
+TextLabel|Draggable|bool|0
+TextLabel|FontFace|font|700 1 rbxasset://fonts/families/RobotoMono.json
+TextLabel|LayoutOrder|int|0
+TextLabel|LineHeight|float|1.0
+TextLabel|MaxVisibleGraphemes|int|-1
+TextLabel|NextSelectionDown|ref|
+TextLabel|NextSelectionLeft|ref|
+TextLabel|NextSelectionRight|ref|
+TextLabel|NextSelectionUp|ref|
+TextLabel|Position|udim2|0.0 0 0.0 0
+TextLabel|RichText|bool|0
+TextLabel|RootLocalizationTable|ref|
+TextLabel|Rotation|float|0.0
+TextLabel|Selectable|bool|0
+TextLabel|SelectionBehaviorDown|enum|0
+TextLabel|SelectionBehaviorLeft|enum|0
+TextLabel|SelectionBehaviorRight|enum|0
+TextLabel|SelectionBehaviorUp|enum|0
+TextLabel|SelectionGroup|bool|0
+TextLabel|SelectionImageObject|ref|
+TextLabel|SelectionOrder|int|0
+TextLabel|Size|udim2|0.0 200 0.0 50
+TextLabel|SizeConstraint|enum|0
+TextLabel|Text|string|My Text
+TextLabel|TextColor3|color3|0.0 0.0 0.0
+TextLabel|TextScaled|bool|0
+TextLabel|TextSize|float|14.0
+TextLabel|TextStrokeColor3|color3|0.0 0.0 0.0
+TextLabel|TextStrokeTransparency|float|1.0
+TextLabel|TextTransparency|float|0.0
+TextLabel|TextTruncate|enum|0
+TextLabel|TextWrapped|bool|0
+TextLabel|TextXAlignment|enum|2
+TextLabel|TextYAlignment|enum|1
+TextLabel|Visible|bool|1
+TextLabel|ZIndex|int|1

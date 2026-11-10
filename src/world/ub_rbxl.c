@@ -1,4 +1,5 @@
 #include "world/ub_rbxl.h"
+#include "world/ub_classes.h"
 #include "core/ub_compress.h"
 #include "core/ub_log.h"
 #include "core/ub_string.h"
@@ -156,6 +157,7 @@ typedef enum {
     K_SCRIPT, K_LOCALSCRIPT, K_MODULESCRIPT,
     K_JOINT,             /* Weld, Snap, Motor6D...: Part0 + Part1 */
     K_WELD_CONSTRAINT,   /* WeldConstraint: Part0Internal + Part1Internal */
+    K_DATA,              /* a class in the class table (GUI, values...): all its properties are kept */
 } kind;
 
 typedef struct {
@@ -189,9 +191,24 @@ typedef struct {
     u8 run_context;      /* scripts: 0 legacy, 1 server, 2 client */
 } rec;
 
+/* A property of a K_DATA instance, kept until the world is built. */
+typedef struct {
+    u32 rec;             /* record index */
+    u32 name;            /* offset of the property name in the name pool */
+    u8 type;             /* ub_ptype */
+    u8 from_content;     /* a Content value (2024 files): applied last, if not empty */
+    u32 a[4];            /* the value: numbers as bits; strings (offset, length) in the name pool;
+                            sequences (offset, keypoints) in seq; fonts (family, weight, style);
+                            references the referent */
+} iprop;
+
 typedef struct {
     cls *classes;
     u32 class_count, class_cap;
+    iprop *props;
+    u32 prop_count, prop_cap;
+    f32 *seq;
+    u32 seq_len, seq_cap;
     rec *recs;
     u32 rec_count, rec_cap;   /* rec_cap = the header's instance count */
     i32 *map_keys, *map_vals;   /* referent -> record index (open addressing) */
@@ -322,6 +339,7 @@ static ub_load_result chunk_inst(importer *im, rd *r)
     u32 cn = nl < sizeof c->name - 1 ? nl : (u32)sizeof c->name - 1;
     for (u32 i = 0; i < cn; ++i) c->name[i] = (char)name[i];
     c->k = classify(c->name);
+    if (c->k == K_OTHER && ub_cdb_class(c->name) >= 0) c->k = K_DATA;
     c->count = count;
 
     /* records are allocated up front for the header's instance count */
@@ -359,6 +377,339 @@ static ub_load_result chunk_inst(importer *im, rd *r)
         im->rec_count++;
     }
     plat_free(refs);
+    return UB_LOAD_OK;
+}
+
+/* ------------------------------------------------- properties as data */
+
+static bool grow_buf(void **p, u32 *cap, u32 need, size_t elem)
+{
+    if (need <= *cap) return true;
+    u32 nc = *cap ? *cap * 2 : 256;
+    while (nc < need) nc *= 2;
+    void *np = plat_alloc((size_t)nc * elem);
+    if (!np) return false;
+    if (*p) {
+        memcpy(np, *p, (size_t)*cap * elem);
+        plat_free(*p);
+    }
+    *p = np;
+    *cap = nc;
+    return true;
+}
+
+static iprop *new_prop(importer *im, u32 ri, u32 name, u8 type)
+{
+    if (!grow_buf((void **)&im->props, &im->prop_cap, im->prop_count + 1, sizeof(iprop))) return NULL;
+    iprop *p = &im->props[im->prop_count++];
+    memset(p, 0, sizeof *p);
+    p->rec = ri;
+    p->name = name;
+    p->type = type;
+    return p;
+}
+
+static u32 f2u(f32 f)
+{
+    u32 u;
+    memcpy(&u, &f, 4);
+    return u;
+}
+
+static f32 u2f(u32 u)
+{
+    f32 f;
+    memcpy(&f, &u, 4);
+    return f;
+}
+
+/* Interleaved big-endian 64-bit values, zig-zag transformed (Int64). */
+static bool rd_interleaved64(rd *r, u32 count, f64 *out)
+{
+    if (count > (r->len - r->pos) / 8 || !need(r, count * 8)) {
+        r->bad = true;
+        return false;
+    }
+    const u8 *q = r->p + r->pos;
+    for (u32 i = 0; i < count; ++i) {
+        u64 v = 0;
+        for (u32 b = 0; b < 8; ++b) v = (v << 8) | q[b * count + i];
+        i64 sv = (i64)((v >> 1) ^ (0u - (v & 1)));
+        out[i] = (f64)sv;
+    }
+    r->pos += count * 8;
+    return true;
+}
+
+/* Properties Uniblox keeps elsewhere or that mean nothing to it. */
+static bool skip_data_prop(const u8 *s, u32 n)
+{
+    static const char *const skip[] = { "AttributesSerialize", "Tags", "SourceAssetId", "UniqueId", "HistoryId",
+                                        "Capabilities", "DefinesCapabilities", "Sandboxed", "SerializedOverrides",
+                                        "Archivable", NULL };
+    for (int i = 0; skip[i]; ++i)
+        if (name_is(s, n, skip[i])) return true;
+    return false;
+}
+
+static ub_load_result data_prop(importer *im, cls *c, const u8 *pname, u32 pl, u32 type, rd *r)
+{
+    if (skip_data_prop(pname, pl)) return UB_LOAD_OK;
+    u32 n = c->count, base = (u32)c->first_rec;
+    if (!n) return UB_LOAD_OK;
+    /* The Content type (2024 files) replaced ContentId properties such as
+     * Image with ImageContent: keep the address under the old name. */
+    u32 keep = pl;
+    if (type == 0x22) {
+        if (pl <= 7 || !name_is(pname + pl - 7, 7, "Content")) return UB_LOAD_OK;
+        keep = pl - 7;
+    }
+    u32 name = add_name(im, pname, keep);
+    if (name == 0xFFFFFFFFu) return UB_LOAD_NO_MEMORY;
+    u32 *tmp = (u32 *)plat_alloc(sizeof(u32) * ((size_t)n * 4 + 1));
+    if (!tmp) return UB_LOAD_NO_MEMORY;
+    ub_load_result res = UB_LOAD_OK;
+#define NEWP(i, t) iprop *p = new_prop(im, base + (i), name, (t)); if (!p) { res = UB_LOAD_NO_MEMORY; break; }
+    switch (type) {
+    case 0x01: /* String */
+        for (u32 i = 0; i < n; ++i) {
+            u32 sl;
+            const u8 *str = rd_str(r, &sl);
+            if (!str) { res = UB_LOAD_CORRUPT; break; }
+            NEWP(i, UB_PV_STRING);
+            p->a[0] = add_text(im, str, sl, false);
+            p->a[1] = sl;
+            if (p->a[0] == 0xFFFFFFFFu) { res = UB_LOAD_NO_MEMORY; break; }
+        }
+        break;
+    case 0x02: /* Bool */
+        if (!need(r, n)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_BOOL); p->a[0] = r->p[r->pos + i] != 0; }
+        r->pos += n;
+        break;
+    case 0x03: /* Int32 */
+        if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_INT); p->a[0] = (u32)untransform(tmp[i]); }
+        break;
+    case 0x04: /* Float32 */
+        if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_FLOAT); p->a[0] = f2u(roblox_float(tmp[i])); }
+        break;
+    case 0x05: /* Float64 */
+        if (!need(r, n * 8)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_DOUBLE);
+            memcpy(p->a, r->p + r->pos + i * 8, 8);
+        }
+        r->pos += n * 8;
+        break;
+    case 0x1B: { /* Int64 */
+        f64 *d = (f64 *)plat_alloc(sizeof(f64) * n);
+        if (!d) { res = UB_LOAD_NO_MEMORY; break; }
+        if (!rd_interleaved64(r, n, d)) res = UB_LOAD_CORRUPT;
+        for (u32 i = 0; i < n && res == UB_LOAD_OK; ++i) {
+            iprop *p = new_prop(im, base + i, name, UB_PV_DOUBLE);
+            if (!p) res = UB_LOAD_NO_MEMORY;
+            else memcpy(p->a, &d[i], 8);
+        }
+        plat_free(d);
+        break;
+    }
+    case 0x06: /* UDim: scales, then offsets */
+        if (!rd_interleaved32(r, n, tmp) || !rd_interleaved32(r, n, tmp + n)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_UDIM);
+            p->a[0] = f2u(roblox_float(tmp[i]));
+            p->a[1] = (u32)untransform(tmp[n + i]);
+        }
+        break;
+    case 0x07: /* UDim2: X.Scale, Y.Scale, X.Offset, Y.Offset */
+        if (!rd_interleaved32x3(r, n, tmp) || !rd_interleaved32(r, n, tmp + 3 * n)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_UDIM2);
+            p->a[0] = f2u(roblox_float(tmp[i]));
+            p->a[1] = (u32)untransform(tmp[2 * n + i]);
+            p->a[2] = f2u(roblox_float(tmp[n + i]));
+            p->a[3] = (u32)untransform(tmp[3 * n + i]);
+        }
+        break;
+    case 0x0B: /* BrickColor */
+        if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_BRICKCOLOR); p->a[0] = tmp[i]; }
+        break;
+    case 0x0C: /* Color3 */
+    case 0x0E: /* Vector3 */
+        if (!rd_interleaved32x3(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, type == 0x0C ? UB_PV_COLOR3 : UB_PV_VECTOR3);
+            for (int k = 0; k < 3; ++k) p->a[k] = f2u(roblox_float(tmp[k * n + i]));
+        }
+        break;
+    case 0x0D: /* Vector2 */
+        if (!rd_interleaved32(r, n, tmp) || !rd_interleaved32(r, n, tmp + n)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_VECTOR2);
+            p->a[0] = f2u(roblox_float(tmp[i]));
+            p->a[1] = f2u(roblox_float(tmp[n + i]));
+        }
+        break;
+    case 0x18: /* Rect: Min.X, Min.Y, Max.X, Max.Y */
+        if (!rd_interleaved32x3(r, n, tmp) || !rd_interleaved32(r, n, tmp + 3 * n)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_RECT);
+            for (int k = 0; k < 4; ++k) p->a[k] = f2u(roblox_float(tmp[k * n + i]));
+        }
+        break;
+    case 0x1A: /* Color3uint8: R..., G..., B... */
+        if (!need(r, n * 3)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_COLOR3);
+            for (int k = 0; k < 3; ++k) p->a[k] = f2u(r->p[r->pos + (u32)k * n + i] / 255.0f);
+        }
+        r->pos += n * 3;
+        break;
+    case 0x12: /* Enum */
+        if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_ENUM); p->a[0] = tmp[i]; }
+        break;
+    case 0x13: { /* Referent: deltas */
+        if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        i32 acc = 0;
+        for (u32 i = 0; i < n; ++i) {
+            acc += untransform(tmp[i]);
+            NEWP(i, UB_PV_REF);
+            p->a[0] = (u32)acc;
+        }
+        break;
+    }
+    case 0x17: /* NumberRange */
+        if (!need(r, n * 8)) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n; ++i) {
+            NEWP(i, UB_PV_NUMRANGE);
+            p->a[0] = le32(r->p + r->pos + i * 8);
+            p->a[1] = le32(r->p + r->pos + i * 8 + 4);
+        }
+        r->pos += n * 8;
+        break;
+    case 0x15: /* NumberSequence: count, then (time, value, envelope) */
+    case 0x16: /* ColorSequence: count, then (time, r, g, b, envelope) */
+        for (u32 i = 0; i < n; ++i) {
+            u32 kp = rd_u32(r), fields = type == 0x15 ? 3 : 5;
+            if (r->bad || kp > 1000 || !need(r, kp * fields * 4)) { res = UB_LOAD_CORRUPT; break; }
+            const u8 *q = r->p + r->pos;
+            r->pos += kp * fields * 4;
+            if (kp < 2 || kp > UB_SEQ_MAX_KEYS) continue; /* not a value Roblox makes: drop it */
+            u32 stride = type == 0x15 ? 3 : 4;
+            if (!grow_buf((void **)&im->seq, &im->seq_cap, im->seq_len + kp * stride, sizeof(f32))) {
+                res = UB_LOAD_NO_MEMORY;
+                break;
+            }
+            NEWP(i, type == 0x15 ? UB_PV_NUMSEQ : UB_PV_COLORSEQ);
+            p->a[0] = im->seq_len;
+            p->a[1] = kp;
+            for (u32 k = 0; k < kp; ++k)
+                for (u32 f = 0; f < stride; ++f) im->seq[im->seq_len++] = u2f(le32(q + (k * fields + f) * 4));
+        }
+        break;
+    case 0x20: /* Font: family, weight (u16), style (u8), cached face id */
+        for (u32 i = 0; i < n; ++i) {
+            u32 fl, cl;
+            const u8 *fam = rd_str(r, &fl);
+            u32 wlo = rd_u8(r), whi = rd_u8(r), style = rd_u8(r);
+            const u8 *cached = rd_str(r, &cl);
+            if (!fam || !cached || r->bad) { res = UB_LOAD_CORRUPT; break; }
+            NEWP(i, UB_PV_FONT);
+            p->a[0] = add_text(im, fam, fl > 1000 ? 1000 : fl, false);
+            p->a[1] = wlo | (whi << 8);
+            p->a[2] = style;
+            if (p->a[0] == 0xFFFFFFFFu) { res = UB_LOAD_NO_MEMORY; break; }
+        }
+        break;
+    case 0x22: { /* Content: source types, then the addresses of those that are URIs (docs/binary.md in rbx-dom) */
+        if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
+        u32 uris = rd_u32(r), used = 0;
+        if (r->bad || uris > n) { res = UB_LOAD_CORRUPT; break; }
+        for (u32 i = 0; i < n && used < uris; ++i) {
+            if (untransform(tmp[i]) != 1) continue; /* zig-zag, like Int32: 1 = Uri; 0 None, 2 an object */
+            u32 sl;
+            const u8 *str = rd_str(r, &sl);
+            if (!str) { res = UB_LOAD_CORRUPT; break; }
+            used++;
+            NEWP(i, UB_PV_STRING);
+            p->from_content = 1;
+            p->a[0] = add_text(im, str, sl, false);
+            p->a[1] = sl;
+            if (p->a[0] == 0xFFFFFFFFu) { res = UB_LOAD_NO_MEMORY; break; }
+        }
+        break; /* object references follow; not used */
+    }
+    default: break; /* types Uniblox does not keep (CFrame, Faces...) */
+    }
+#undef NEWP
+    plat_free(tmp);
+    return res;
+}
+
+/* Sets the kept properties on the instances made from the records. */
+static ub_load_result apply_props(importer *im, ub_world *w, const i32 *made)
+{
+    u32 last_name = 0xFFFFFFFFu, key = UB_NO_STRING;
+    for (u32 n = 0; n < im->prop_count * 2; ++n) {
+        /* first pass: everything else; second: Content values over empty addresses */
+        const iprop *p = &im->props[n % im->prop_count];
+        if ((n < im->prop_count) == (p->from_content != 0)) continue;
+        i32 wi = made[p->rec];
+        if (wi < 0) continue;
+        if (p->from_content && !im->names[p->a[0]]) continue;
+        if (p->name != last_name) {
+            key = ub_world_key(w, im->names + p->name);
+            last_name = p->name;
+            if (key == UB_NO_STRING) return UB_LOAD_NO_MEMORY;
+        }
+        ub_value v;
+        memset(&v, 0, sizeof v);
+        v.type = p->type;
+        switch (p->type) {
+        case UB_PV_STRING:
+            v.v.str.s = im->names + p->a[0];
+            v.v.str.len = (u32)ub_strlen(v.v.str.s);
+            break;
+        case UB_PV_BOOL: v.v.b = p->a[0] != 0; break;
+        case UB_PV_INT: case UB_PV_ENUM: case UB_PV_BRICKCOLOR: v.v.i = (i32)p->a[0]; break;
+        case UB_PV_DOUBLE: memcpy(&v.v.d, p->a, 8); if (!(v.v.d == v.v.d)) v.v.d = 0; break;
+        case UB_PV_FLOAT: v.v.f = u2f(p->a[0]); break;
+        case UB_PV_REF: {
+            i32 rr = map_get(im, (i32)p->a[0]);
+            v.v.ref = rr >= 0 ? made[rr] : -1;
+            break;
+        }
+        case UB_PV_NUMSEQ: case UB_PV_COLORSEQ:
+            v.v.seq.k = im->seq + p->a[0];
+            v.v.seq.n = p->a[1];
+            break;
+        case UB_PV_FONT:
+            v.v.font.family = im->names + p->a[0];
+            v.v.font.weight = (u16)p->a[1];
+            v.v.font.style = (u8)p->a[2];
+            break;
+        default: /* plain floats: Color3, Vector2/3, UDim, UDim2, Rect, NumberRange */
+            memcpy(&v.v, p->a, sizeof p->a);
+            break;
+        }
+        /* NaN never reaches the world (it would poison layout) */
+        if (v.type == UB_PV_FLOAT && !(v.v.f == v.v.f)) v.v.f = 0;
+        if (v.type == UB_PV_COLOR3 || v.type == UB_PV_VECTOR2 || v.type == UB_PV_VECTOR3 || v.type == UB_PV_RECT ||
+            v.type == UB_PV_NUMRANGE) {
+            f32 *f = (f32 *)&v.v;
+            for (int k = 0; k < 4; ++k) if (!(f[k] == f[k])) f[k] = 0;
+        }
+        if ((v.type == UB_PV_UDIM || v.type == UB_PV_UDIM2) && !(v.v.ud2.sx == v.v.ud2.sx)) v.v.ud2.sx = 0;
+        if (v.type == UB_PV_UDIM2 && !(v.v.ud2.sy == v.v.ud2.sy)) v.v.ud2.sy = 0;
+        if (v.type == UB_PV_NUMSEQ || v.type == UB_PV_COLORSEQ)
+            for (u32 k = 0; k < v.v.seq.n * (v.type == UB_PV_NUMSEQ ? 3u : 4u); ++k)
+                if (!(v.v.seq.k[k] == v.v.seq.k[k])) v.v.seq.k[k] = 0;
+        if (!ub_world_set_prop(w, wi, key, &v)) return UB_LOAD_NO_MEMORY;
+    }
     return UB_LOAD_OK;
 }
 
@@ -408,6 +759,7 @@ static ub_load_result chunk_prop(importer *im, rd *r)
         }
         return UB_LOAD_OK;
     }
+    if (c->k == K_DATA) return data_prop(im, c, pname, pl, type, r);
     if (!part && !light && !joint && !ws) return UB_LOAD_OK;
 
     /* scratch for interleaved arrays: up to three values per instance */
@@ -684,6 +1036,14 @@ static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st
             }
         }
     }
+    /* the properties of GUI objects, values... then whatever older files lack */
+    if (res == UB_LOAD_OK) res = apply_props(im, w, made);
+    for (u32 i = 0; i < im->rec_count && res == UB_LOAD_OK; ++i) {
+        const cls *c = &im->classes[im->recs[i].cls];
+        if (c->k != K_DATA || made[i] < 0) continue;
+        if (!ub_cdb_fill_defaults(w, made[i], c->name)) res = UB_LOAD_NO_MEMORY;
+        if (ub_cdb_is_a(c->name, "GuiBase2d")) st->gui++;
+    }
     /* joints become welds between the two parts they name */
     for (u32 i = 0; i < im->rec_count && res == UB_LOAD_OK; ++i) {
         const rec *e = &im->recs[i];
@@ -798,5 +1158,7 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
     plat_free(im.map_keys);
     plat_free(im.map_vals);
     plat_free(im.names);
+    plat_free(im.props);
+    plat_free(im.seq);
     return res;
 }

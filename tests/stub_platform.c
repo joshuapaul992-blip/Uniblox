@@ -52,6 +52,39 @@ int plat_display_modes(ub_display_mode *out, int max)
 void plat_set_fullscreen_mode(int w, int h) { (void)w; (void)h; }
 void *plat_gl_proc(const char *name) { (void)name; return NULL; }
 bool plat_font_atlas(int px, ub_font_atlas *out) { (void)px; (void)out; return false; }
+
+/* GUI fonts for the tests: every character is a box half an em wide
+ * (spaces a quarter), ascent 0.8 em, descent 0.2 em, so layouts can be
+ * checked exactly. Bold boxes are a little wider. */
+bool plat_face_metrics(ub_typeface f, f32 *ascent, f32 *descent)
+{
+    (void)f;
+    *ascent = 0.8f;
+    *descent = 0.2f;
+    return true;
+}
+
+f32 plat_glyph_advance(ub_typeface f, u32 cp)
+{
+    if (cp == ' ') return 0.25f;
+    return f.weight >= 7 ? 0.625f : 0.5f;
+}
+
+bool plat_glyph(ub_typeface f, u32 cp, f32 em_px, u8 *out, int cap, int *x0, int *y0, int *w, int *h)
+{
+    *x0 = *y0 = *w = *h = 0;
+    if (cp == ' ' || cp == '\n') return true;
+    int gw = (int)(em_px * (f.weight >= 7 ? 0.5f : 0.4f)), gh = (int)(em_px * 0.6f);
+    if (gw < 1) gw = 1;
+    if (gh < 1) gh = 1;
+    if (gw * gh > cap) return false;
+    for (int i = 0; i < gw * gh; ++i) out[i] = 255;
+    *x0 = (int)(em_px * 0.05f);
+    *y0 = -gh;
+    *w = gw;
+    *h = gh;
+    return true;
+}
 bool plat_command_line_arg(char *out, int cap) { (void)out; (void)cap; return false; }
 void plat_set_title(const char *t) { (void)t; }
 

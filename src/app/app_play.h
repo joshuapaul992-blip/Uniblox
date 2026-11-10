@@ -43,6 +43,18 @@ ub_part_draw play_part_draw(const ub_part *p);
 /* Roblox-style lighting -> the renderer's sky, sun and fog. */
 ub_render_env play_env(const ub_world *w);
 void play_draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amount, f32 fallen);
+
+/* The game's GUI (ScreenGuis, BillboardGuis, SurfaceGuis).
+ * play_gui_input: before ub_game_update, with the frame's input; `look`
+ * says the mouse turns the camera (no hovering then). Afterwards the GUI
+ * says what it took: ub_gui_mouse_taken, _wheel_taken, _keyboard_taken.
+ * play_gui_draw_world: between ub_render_begin and the end of the scene.
+ * play_gui_draw_screen: after the scene, before text. */
+void play_gui_input(ub_game *g, const ub_frame *frame, const ub_input *in, const ub_camera *cam, bool look, f64 time);
+void play_gui_draw_world(ub_game *g, const ub_camera *cam);
+void play_gui_draw_screen(ub_game *g);
+/* The GUI's screen: the frame (software: its render resolution). */
+void play_gui_screen_size(const ub_frame *frame, int *w, int *h);
 void play_draw_blob_shadow(ub_game *g);
 
 #endif

@@ -6,6 +6,8 @@
 #include "core/ub_types.h"
 
 size_t ub_strlen(const char *s);
+/* <0, 0 or >0, comparing bytes as unsigned (like strcmp). */
+int ub_strcmp(const char *a, const char *b);
 
 /* Tiny snprintf subset: %d %i %u %x %X %s %c %%, optional zero-pad and
  * width (e.g. %08x, %5d), and the 'l' length modifier (ignored: int and long

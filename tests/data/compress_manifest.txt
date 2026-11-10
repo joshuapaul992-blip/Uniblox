@@ -16,3 +16,11 @@ mixed.l1.zst 48500 77ce6e8f962259bc
 mixed.l19.zst 48500 77ce6e8f962259bc
 mixed.l-5.zst 48500 77ce6e8f962259bc
 mixed.lz4 48500 77ce6e8f962259bc
+text32k.l0.zlib 32768 79d43669fd1ef327
+text32k.l9.zlib 32768 79d43669fd1ef327
+text32k.fixed.zlib 32768 79d43669fd1ef327
+text32k.huff.zlib 32768 79d43669fd1ef327
+struct300k.l1.zlib 307200 1e10f3e805aee82d
+struct300k.rle.zlib 307200 1e10f3e805aee82d
+random4k.l6.zlib 4096 3fbe0b6fcbe8b063
+tiny.l6.zlib 1 af63dc4c8601ec8c

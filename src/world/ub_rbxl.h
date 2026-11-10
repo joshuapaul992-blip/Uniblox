@@ -37,6 +37,7 @@ typedef struct {
     u32 welds;            /* joints imported as welds */
     u32 joints_skipped;   /* disabled, or naming something that is not a part */
     u32 scripts;          /* Script, LocalScript and ModuleScript, with their code */
+    u32 gui;              /* GUI objects (ScreenGui, Frame, TextLabel...) with their properties */
     char compression[32]; /* e.g. "zstd+lz4" */
 } ub_import_stats;
 

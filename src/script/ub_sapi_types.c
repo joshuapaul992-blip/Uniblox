@@ -7,6 +7,7 @@
 
 #include "script/ub_sapi.h"
 #include "physics/ub_pmath.h"
+#include "world/ub_classes.h"
 #include "render/ub_texture.h"
 
 static const char *const LOCKED = "The metatable is locked";
@@ -716,6 +717,15 @@ static int nearest_brick(u32 rgb)
     return best;
 }
 
+u32 brickcolor_number_rgb(u32 number)
+{
+    for (int i = 0; i < (int)(sizeof k_bricks / sizeof k_bricks[0]); ++i)
+        if (k_bricks[i].number == number) return k_bricks[i].rgb;
+    return 0xA3A2A5; /* Medium stone grey */
+}
+
+u32 brickcolor_rgb_number(u32 rgb) { return k_bricks[nearest_brick(rgb)].number; }
+
 void push_brickcolor(lua_State *L, u32 rgb)
 {
     i32 *p = (i32 *)lua_newuserdata(L, sizeof(i32));
@@ -853,12 +863,46 @@ typedef struct {
 
 static char REG_ENUMITEMS;
 
+static int m_enum_isa(lua_State *L);
+
+/* Types below EN_COUNT are the tables above; EN_COUNT + i is enum i of
+ * the class table (world/ub_classes.h: Roblox's own list). */
+static bool is_gen(int t) { return t >= EN_COUNT; }
+
+static const char *etype_name(int t)
+{
+    if (is_gen(t)) return ub_enum_name(t - EN_COUNT);
+    return t >= 0 && t < EN_COUNT ? k_enums[t].name : "?";
+}
+
+int enum_type_named(const char *name)
+{
+    /* KeyCode: Roblox's full list rather than the few keys above */
+    int g = ub_enum_find(name);
+    if (g >= 0 && !strcmp(name, "KeyCode")) return EN_COUNT + g;
+    for (int t = 0; t < EN_COUNT; ++t)
+        if (!strcmp(k_enums[t].name, name)) return t;
+    return g >= 0 ? EN_COUNT + g : -1;
+}
+
 const char *enum_item_name(int type, int value)
 {
+    if (is_gen(type)) {
+        const char *n = ub_enum_name_of_value(type - EN_COUNT, value);
+        return n ? n : "?";
+    }
     if (type < 0 || type >= EN_COUNT) return "?";
     for (const enum_item *e = k_enums[type].items; e->name; ++e)
         if (e->value == value) return e->name;
     return "?";
+}
+
+static int enum_value_named(int type, const char *n)
+{
+    if (is_gen(type)) return ub_enum_value_of(type - EN_COUNT, n);
+    for (const enum_item *it = k_enums[type].items; it->name; ++it)
+        if (!strcmp(it->name, n)) return it->value;
+    return -1;
 }
 
 void push_enum(lua_State *L, int type, int value)
@@ -866,7 +910,7 @@ void push_enum(lua_State *L, int type, int value)
     /* one userdata per item, so they work as table keys */
     lua_pushlightuserdata(L, &REG_ENUMITEMS);
     lua_rawget(L, LUA_REGISTRYINDEX);
-    lua_rawgeti(L, -1, type * 65536 + value);
+    lua_rawgeti(L, -1, type * 65536 + (value & 0xFFFF));
     if (lua_isnil(L, -1)) {
         lua_pop(L, 1);
         senum *e = (senum *)lua_newuserdata(L, sizeof(senum));
@@ -874,9 +918,15 @@ void push_enum(lua_State *L, int type, int value)
         e->value = (u16)value;
         set_meta(L, "EnumItem");
         lua_pushvalue(L, -1);
-        lua_rawseti(L, -3, type * 65536 + value);
+        lua_rawseti(L, -3, type * 65536 + (value & 0xFFFF));
     }
     lua_remove(L, -2);
+}
+
+bool is_enum_of(lua_State *L, int i, int type)
+{
+    senum *e = (senum *)test_udata(L, i, "EnumItem");
+    return e && e->type == type;
 }
 
 int check_enum(lua_State *L, int i, int type)
@@ -888,9 +938,8 @@ int check_enum(lua_State *L, int i, int type)
     }
     if (lua_type(L, i) == LUA_TNUMBER) return (int)lua_tointeger(L, i);
     if (lua_type(L, i) == LUA_TSTRING) {
-        const char *n = lua_tostring(L, i);
-        for (const enum_item *it = k_enums[type].items; it->name; ++it)
-            if (!strcmp(it->name, n)) return it->value;
+        int v = enum_value_named(type, lua_tostring(L, i));
+        if (v >= 0) return v;
     }
     return luaL_argerror(L, i, "expected an Enum item"), 0;
 }
@@ -905,14 +954,23 @@ static int enumitem_index(lua_State *L)
         u16 *t = (u16 *)lua_newuserdata(L, sizeof(u16));
         *t = e->type;
         set_meta(L, "EnumType");
+    } else if (!strcmp(k, "IsA")) {
+        lua_pushcfunction(L, m_enum_isa);
     } else return sapi_error(L, "%s is not a valid member of EnumItem", k);
+    return 1;
+}
+
+static int m_enum_isa(lua_State *L)
+{
+    senum *e = (senum *)luaL_checkudata(L, 1, "EnumItem");
+    lua_pushboolean(L, !strcmp(etype_name(e->type), luaL_checkstring(L, 2)));
     return 1;
 }
 
 static int enumitem_tostring(lua_State *L)
 {
     senum *e = (senum *)luaL_checkudata(L, 1, "EnumItem");
-    lua_pushfstring(L, "Enum.%s.%s", k_enums[e->type].name, enum_item_name(e->type, e->value));
+    lua_pushfstring(L, "Enum.%s.%s", etype_name(e->type), enum_item_name(e->type, e->value));
     return 1;
 }
 
@@ -921,6 +979,13 @@ static int enumtype_items(lua_State *L)
     u16 t = *(u16 *)luaL_checkudata(L, 1, "EnumType");
     lua_newtable(L);
     int n = 0;
+    if (is_gen(t)) {
+        for (int i = 0; i < ub_enum_item_count(t - EN_COUNT); ++i) {
+            push_enum(L, t, ub_enum_item_value(t - EN_COUNT, i));
+            lua_rawseti(L, -2, ++n);
+        }
+        return 1;
+    }
     for (const enum_item *it = k_enums[t].items; it->name; ++it) {
         push_enum(L, t, it->value);
         lua_rawseti(L, -2, ++n);
@@ -936,31 +1001,57 @@ static int enumtype_index(lua_State *L)
         lua_pushcfunction(L, enumtype_items);
         return 1;
     }
-    for (const enum_item *it = k_enums[t].items; it->name; ++it)
-        if (!strcmp(it->name, k)) {
-            push_enum(L, t, it->value);
-            return 1;
-        }
-    return sapi_error(L, "%s is not a valid member of \"Enum.%s\"", k, k_enums[t].name);
+    int v = enum_value_named(t, k);
+    if (v >= 0) {
+        push_enum(L, t, v);
+        return 1;
+    }
+    return sapi_error(L, "%s is not a valid member of \"Enum.%s\"", k, etype_name(t));
 }
 
 static int enumtype_tostring(lua_State *L)
 {
-    lua_pushstring(L, k_enums[*(u16 *)luaL_checkudata(L, 1, "EnumType")].name);
+    lua_pushstring(L, etype_name(*(u16 *)luaL_checkudata(L, 1, "EnumType")));
     return 1;
 }
+
+static int enumtype_eq(lua_State *L)
+{
+    lua_pushboolean(L, *(u16 *)luaL_checkudata(L, 1, "EnumType") == *(u16 *)luaL_checkudata(L, 2, "EnumType"));
+    return 1;
+}
+
+static int enums_getenums(lua_State *L);
 
 static int enums_index(lua_State *L)
 {
     const char *k = luaL_checkstring(L, 2);
-    for (int t = 0; t < EN_COUNT; ++t)
-        if (!strcmp(k_enums[t].name, k)) {
-            u16 *p = (u16 *)lua_newuserdata(L, sizeof(u16));
-            *p = (u16)t;
-            set_meta(L, "EnumType");
-            return 1;
-        }
+    if (!strcmp(k, "GetEnums")) {
+        lua_pushcfunction(L, enums_getenums);
+        return 1;
+    }
+    int t = enum_type_named(k);
+    if (t >= 0) {
+        u16 *p = (u16 *)lua_newuserdata(L, sizeof(u16));
+        *p = (u16)t;
+        set_meta(L, "EnumType");
+        return 1;
+    }
     return sapi_error(L, "%s is not a valid EnumItem", k);
+}
+
+static int enums_getenums(lua_State *L)
+{
+    lua_newtable(L);
+    int n = 0;
+    for (int t = 0; t < EN_COUNT + ub_enum_count(); ++t) {
+        if (is_gen(t) && enum_type_named(ub_enum_name(t - EN_COUNT)) != t) continue; /* shadowed */
+        u16 *p = (u16 *)lua_newuserdata(L, sizeof(u16));
+        *p = (u16)t;
+        set_meta(L, "EnumType");
+        lua_rawseti(L, -2, ++n);
+    }
+    return 1;
 }
 
 static int enums_tostring(lua_State *L)
@@ -1072,6 +1163,14 @@ typedef struct {
     vec3 origin, dir;
 } sray;
 
+void push_ray(lua_State *L, vec3 origin, vec3 dir)
+{
+    sray *r = (sray *)lua_newuserdata(L, sizeof(sray));
+    r->origin = origin;
+    r->dir = dir;
+    set_meta(L, "Ray");
+}
+
 static int ray_new(lua_State *L)
 {
     sray *r = (sray *)lua_newuserdata(L, sizeof(sray));
@@ -1116,7 +1215,9 @@ const char *ub_typeof(lua_State *L, int i)
 {
     static const char *const names[] = { "Vector3", "Color3", "CFrame", "BrickColor", "EnumItem", "EnumType",
                                          "Enums", "TweenInfo", "Ray", "Instance", "RBXScriptSignal",
-                                         "RBXScriptConnection", "RaycastParams", NULL };
+                                         "RBXScriptConnection", "RaycastParams", "UDim", "UDim2", "Vector2",
+                                         "Rect", "NumberRange", "NumberSequence", "NumberSequenceKeypoint",
+                                         "ColorSequence", "ColorSequenceKeypoint", "Font", "InputObject", NULL };
     int t = lua_type(L, i);
     if (t != LUA_TUSERDATA && t != LUA_TTABLE) return lua_typename(L, t);
     if (!lua_getmetatable(L, i)) return lua_typename(L, t);
@@ -1207,6 +1308,7 @@ void open_types(lua_State *L)
     meta(L, "EnumItem", enumitem_index, enumitem_tostring);
     lua_pop(L, 1);
     meta(L, "EnumType", enumtype_index, enumtype_tostring);
+    op(L, "__eq", enumtype_eq);
     lua_pop(L, 1);
     meta(L, "Enums", enums_index, enums_tostring);
     lua_pop(L, 1);

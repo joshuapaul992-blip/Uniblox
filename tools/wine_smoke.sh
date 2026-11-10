@@ -68,6 +68,13 @@ stop_game() {
 
 # Run 1: exercise input, then quit (which saves uniblox.cfg).
 start_game
+eval "$(xdotool getwindowgeometry --shell "$WIN")"
+sleep 0.5
+import -window root "${SHOT%.png}-gui.png"              # the GUI: the panel, the sign, the door's label
+# the panel's "Back to the start" button: top right, below the title and the count
+xdotool mousemove $((X + WIDTH - 12 - 105)) $((Y + 36 + 12 + 10 + 22 + 6 + 18 + 6 + 15)); sleep 0.3
+xdotool click 1; sleep 0.5
+xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT * 3 / 4)); sleep 0.2
 xdotool keydown w; sleep 1.3                            # walk into the scripted door...
 import -window root "${SHOT%.png}-door.png"              # (open: see-through)
 sleep 0.3; xdotool keyup w                              # ...and through it
@@ -147,6 +154,8 @@ expect "$CFG" "place=places/castle-generated.ubx" "place= kept when settings are
 expect "$RUN1" "script(s) running" "the demo's scripts started"
 expect "$RUN1" "script: Welcome, Player1" "a script greeted the player (PlayerAdded)"
 expect "$RUN1" "script: Player1 opened the door" "walking into the door opened it (Touched)"
+expect "$RUN1" "script: The demo panel is ready" "the demo's GUI started (a LocalScript from StarterGui)"
+expect "$RUN1" "script: Player1 went back to the start" "clicking a GUI button reached a server script (RemoteEvent)"
 if grep -E "script: .*(attempt to|is not a valid|was stopped|error)" "$RUN1" "$RUN2" "$LOG"; then
     echo "  FAIL  a script failed"; fail=1
 else echo "  ok    no script errors"; fi
@@ -177,6 +186,6 @@ expect "$CFG" "zoom=14" "mouse wheel zoomed in 3 notches (22 -> 14)"
 if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
 else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
 grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$RUN1" | sed 's/^/  /' || true
-echo "Screenshots: $SHOT, ${SHOT%.png}-door.png, ${SHOT%.png}-fullscreen.png"
+echo "Screenshots: $SHOT, ${SHOT%.png}-gui.png, ${SHOT%.png}-door.png, ${SHOT%.png}-fullscreen.png"
 echo "Logs:       $RUN1, $RUN2, $LOG"
 exit $fail

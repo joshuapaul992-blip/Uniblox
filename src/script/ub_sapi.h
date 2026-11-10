@@ -20,6 +20,7 @@ typedef struct {
     bool out_of_memory;      /* the running script used up the memory (stopped like a timeout) */
     i32 base_live;           /* instances when scripts started (scripts may add UB_SCRIPT_MAX_INSTANCES) */
     bool need_gc;            /* a full collection is owed (after running out of memory) */
+    bool clients_started;    /* LocalScripts start on the first frame, once the screen is known */
     u32 next_conn_id;
     u8 *touch_watch;         /* per instance: Touched connections */
     i32 touch_watch_cap;
@@ -74,6 +75,10 @@ enum {
     EN_HUMANOIDSTATE, EN_KEYCODE, EN_SURFACETYPE, EN_COUNT
 };
 void push_enum(lua_State *L, int type, int value);
+/* The type id of an enum by name (Enum.<name>), -1 if unknown. Types from
+ * EN_COUNT on are the class table's (world/ub_classes.h). */
+int enum_type_named(const char *name);
+bool is_enum_of(lua_State *L, int i, int type);
 int check_enum(lua_State *L, int i, int type);              /* also accepts the name or number */
 const char *enum_item_name(int type, int value);
 u8 material_to_ub(int rbx_value);
@@ -98,13 +103,57 @@ enum {
     VIRT_GAME = -2, VIRT_RUNSERVICE = -3, VIRT_DEBRIS = -4, VIRT_TWEENSERVICE = -5, VIRT_HTTP = -6,
     VIRT_USERINPUT = -7, VIRT_MARKETPLACE = -8, VIRT_DATASTORE = -9, VIRT_CHAT = -10, VIRT_TELEPORT = -11,
     VIRT_SOUNDSERVICE = -12, VIRT_PHYSICSSERVICE = -13, VIRT_COLLECTION = -14, VIRT_TEXTSERVICE = -15,
-    VIRT_LAST = -15
+    VIRT_GUISERVICE = -16, VIRT_MOUSE = -17, VIRT_CAMERA = -18, VIRT_CONTENTPROVIDER = -19,
+    VIRT_LAST = -19
 };
 void push_inst(lua_State *L, i32 idx);                      /* nil for -1 */
 i32 check_inst(lua_State *L, int i);
 i32 opt_inst(lua_State *L, int i);                          /* -1 for nil */
 bool is_inst(lua_State *L, int i);
 void open_instances(lua_State *L);
+/* Changed and GetPropertyChangedSignal(prop) of an instance. */
+void prop_changed(lua_State *L, i32 idx, const char *prop);
+/* Sets a property as a script would (instance at idx, value at stack index v). */
+int set_prop(lua_State *L, i32 idx, const char *k, int v);
+
+/* ------------------------------------------- GUI, input (ub_sapi_gui.c) */
+void open_gui(lua_State *L);
+/* World property values <-> Lua. enum_type: enum_type_named(...) or -1. */
+void push_pvalue(lua_State *L, const ub_value *v, int enum_type);
+/* Converts the Lua value at i to a property of the given type; false (and
+ * a message in err) if it is the wrong kind. Sequences use `seq`
+ * (UB_SEQ_MAX_KEYS * 4 floats); strings point into Lua. */
+bool to_pvalue(lua_State *L, int i, u8 type, int enum_type, ub_value *out, f32 *seq, const char **err);
+/* Properties of classes in the class table (GUI, value objects, remotes):
+ * pushed and true, or false if not one. */
+bool gui_get(lua_State *L, i32 idx, const char *k);
+/* Sets one; false if the class table does not have it. Raises on a value
+ * of the wrong type or a read-only property. */
+bool gui_set(lua_State *L, i32 idx, const char *k, int v);
+lua_CFunction gui_method(i32 idx, const char *k);
+int gui_event(i32 idx, const char *k);
+/* Virtual services and objects: GuiService, Mouse, Camera, UserInputService... */
+bool gui_virtual_index(lua_State *L, i32 idx, const char *k);
+bool gui_virtual_newindex(lua_State *L, i32 idx, const char *k, int v);
+/* Instance.new for a class of the class table; -1 if not one. */
+i32 gui_instance_new(const char *cls);
+/* Each frame, before scripts run: GUI events, UserInputService, Mouse. */
+void gui_pump(lua_State *L);
+/* After a respawn: GUIs that reset on spawn are copied again. */
+void gui_respawned(lua_State *L);
+/* Tweens of UDim2 / Vector2 / UDim values: their floats (4, 2, 2). */
+bool is_udim2(lua_State *L, int i);
+bool is_vector2(lua_State *L, int i);
+bool is_udim(lua_State *L, int i);
+void get_udim2(lua_State *L, int i, f32 *out);
+void push_udim2(lua_State *L, f32 sx, f32 ox, f32 sy, f32 oy);
+void get_vector2(lua_State *L, int i, f32 *out);
+void push_vector2(lua_State *L, f32 x, f32 y);
+void get_udim(lua_State *L, int i, f32 *out);
+void push_udim(lua_State *L, f32 s, f32 o);
+u32 brickcolor_number_rgb(u32 number);
+void push_ray(lua_State *L, vec3 origin, vec3 dir);  /* Roblox axes */
+u32 brickcolor_rgb_number(u32 rgb);
 
 /* ------------------------------------------------------------ signals */
 
@@ -112,7 +161,13 @@ enum {
     EV_TOUCHED, EV_TOUCHENDED, EV_CHANGED, EV_CHILDADDED, EV_CHILDREMOVED, EV_DESCENDANTADDED,
     EV_DESCENDANTREMOVING, EV_DESTROYING, EV_ANCESTRYCHANGED, EV_DIED, EV_HEALTHCHANGED, EV_PLAYERADDED,
     EV_PLAYERREMOVING, EV_CHARACTERADDED, EV_CHARACTERREMOVING, EV_CHATTED, EV_HEARTBEAT, EV_STEPPED,
-    EV_RENDERSTEPPED, EV_COMPLETED, EV_PROPCHANGED, EV_COUNT
+    EV_RENDERSTEPPED, EV_COMPLETED, EV_PROPCHANGED,
+    /* GUI and input (ub_sapi_gui.c) */
+    EV_MOUSEENTER, EV_MOUSELEAVE, EV_MOUSEMOVED, EV_WHEELFORWARD, EV_WHEELBACKWARD, EV_INPUTBEGAN, EV_INPUTENDED,
+    EV_INPUTCHANGED, EV_ACTIVATED, EV_B1CLICK, EV_B1DOWN, EV_B1UP, EV_B2CLICK, EV_B2DOWN, EV_B2UP, EV_FOCUSED,
+    EV_FOCUSLOST, EV_SERVEREVENT, EV_CLIENTEVENT, EV_BINDABLE, EV_TEXTBOXFOCUSED, EV_TEXTBOXRELEASED,
+    EV_JUMPREQUEST, EV_MOVE, EV_KEYDOWN, EV_KEYUP, EV_NEVER,
+    EV_COUNT
 };
 /* A signal of an instance (or a tween: inst = -1000 - tween id). For
  * GetPropertyChangedSignal, `prop` names the property (else NULL). */

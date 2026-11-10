@@ -1,0 +1,76 @@
+ImageButton|Active|bool|1
+ImageButton|AnchorPoint|vector2|0.0 0.0
+ImageButton|AutoButtonColor|bool|1
+ImageButton|AutoLocalize|bool|1
+ImageButton|AutomaticSize|enum|0
+ImageButton|BackgroundColor3|color3|1.0 1.0 1.0
+ImageButton|BackgroundTransparency|float|0.0
+ImageButton|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+ImageButton|BorderMode|enum|0
+ImageButton|BorderSizePixel|int|1
+ImageButton|ClipsDescendants|bool|0
+ImageButton|Draggable|bool|0
+ImageButton|Image|string|rbxasset://textures/ui/GuiImagePlaceholder.png
+ImageButton|ImageColor3|color3|1.0 1.0 1.0
+ImageButton|ImageRectOffset|vector2|0.0 0.0
+ImageButton|ImageRectSize|vector2|0.0 0.0
+ImageButton|ImageTransparency|float|0.0
+ImageButton|LayoutOrder|int|0
+ImageButton|Modal|bool|0
+ImageButton|NextSelectionDown|ref|
+ImageButton|NextSelectionLeft|ref|
+ImageButton|NextSelectionRight|ref|
+ImageButton|NextSelectionUp|ref|
+ImageButton|Position|udim2|0.0 0 0.0 0
+ImageButton|RootLocalizationTable|ref|
+ImageButton|Rotation|float|0.0
+ImageButton|ScaleType|enum|1
+ImageButton|Selectable|bool|1
+ImageButton|Selected|bool|0
+ImageButton|SelectionImageObject|ref|
+ImageButton|Size|udim2|0.0 100 0.0 100
+ImageButton|SizeConstraint|enum|0
+ImageButton|SliceCenter|rect|-1.0 -10.0 8.0 9.0
+ImageButton|SliceScale|float|1.0
+ImageButton|Style|enum|0
+ImageButton|TileSize|udim2|1.0 0 1.0 0
+ImageButton|Visible|bool|1
+ImageButton|ZIndex|int|1
+ImageButton|Active|bool|1
+ImageButton|AnchorPoint|vector2|0.0 0.0
+ImageButton|AutoButtonColor|bool|1
+ImageButton|AutoLocalize|bool|1
+ImageButton|AutomaticSize|enum|0
+ImageButton|BackgroundColor3|color3|1.0 1.0 1.0
+ImageButton|BackgroundTransparency|float|0.0
+ImageButton|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+ImageButton|BorderMode|enum|0
+ImageButton|BorderSizePixel|int|1
+ImageButton|ClipsDescendants|bool|0
+ImageButton|Draggable|bool|0
+ImageButton|Image|string|rbxasset://textures/ui/GuiImagePlaceholder.png
+ImageButton|ImageColor3|color3|1.0 1.0 1.0
+ImageButton|ImageRectOffset|vector2|0.0 0.0
+ImageButton|ImageRectSize|vector2|0.0 0.0
+ImageButton|ImageTransparency|float|0.0
+ImageButton|LayoutOrder|int|0
+ImageButton|Modal|bool|0
+ImageButton|NextSelectionDown|ref|
+ImageButton|NextSelectionLeft|ref|
+ImageButton|NextSelectionRight|ref|
+ImageButton|NextSelectionUp|ref|
+ImageButton|Position|udim2|0.0 0 0.0 0
+ImageButton|RootLocalizationTable|ref|
+ImageButton|Rotation|float|0.0
+ImageButton|ScaleType|enum|1
+ImageButton|Selectable|bool|1
+ImageButton|Selected|bool|0
+ImageButton|SelectionImageObject|ref|
+ImageButton|Size|udim2|0.0 100 0.0 100
+ImageButton|SizeConstraint|enum|0
+ImageButton|SliceCenter|rect|0.0 1.0 5.0 6.0
+ImageButton|SliceScale|float|1.0
+ImageButton|Style|enum|0
+ImageButton|TileSize|udim2|1.0 0 1.0 0
+ImageButton|Visible|bool|1
+ImageButton|ZIndex|int|1

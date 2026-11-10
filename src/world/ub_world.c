@@ -39,8 +39,11 @@ void ub_world_init(ub_world *w)
     ub_fmt(w->name, sizeof w->name, "Untitled");
 }
 
+void ub_world_free_props(ub_world *w); /* ub_props.c */
+
 void ub_world_free(ub_world *w)
 {
+    ub_world_free_props(w);
     plat_free(w->inst);
     plat_free(w->parts);
     plat_free(w->strings);
@@ -107,6 +110,8 @@ static u32 add_string(ub_world *w, const char *s)
     return off;
 }
 
+u32 ub_world_add_string_internal(ub_world *w, const char *s) { return add_string(w, s); }
+
 const char *ub_world_str(const ub_world *w, u32 offset)
 {
     return offset < w->str_len ? w->strings + offset : "";
@@ -140,7 +145,9 @@ i32 ub_world_add(ub_world *w, i32 parent, ub_class cls, const char *class_name, 
     in->class_name = cn;
     in->part = -1;
     in->source = UB_NO_STRING;
+    if (idx < w->props_cap) ub_world_clear_props(w, idx); /* a reused slot starts empty */
     link_child(w, parent, idx);
+    w->epoch++;
     if (cls == UB_CLASS_WORKSPACE && w->workspace < 0) w->workspace = idx;
     return idx;
 }
@@ -193,6 +200,7 @@ bool ub_world_set_parent(ub_world *w, i32 inst, i32 parent)
     if (w->inst[inst].parent == parent) return true;
     unlink_child(w, inst);
     link_child(w, parent, inst);
+    w->epoch++;
     if (parent >= 0) w->inst[inst].flags &= (u16)~UB_INST_DETACHED;
     else w->inst[inst].flags |= UB_INST_DETACHED;
     return true;
@@ -202,6 +210,7 @@ void ub_world_destroy(ub_world *w, i32 inst)
 {
     if (!ub_world_alive(w, inst)) return;
     ub_world_set_parent(w, inst, -1);
+    w->epoch++;
     /* flag the whole subtree (children stay linked, so walk it) */
     i32 stack_small[64];
     i32 *stack = stack_small, cap = 64, sp = 0;
@@ -259,6 +268,7 @@ void ub_world_reclaim(ub_world *w, i32 inst)
     in->part = -1;
     in->source = UB_NO_STRING;
     in->flags = UB_INST_DESTROYED | UB_INST_FREE;
+    ub_world_clear_props(w, inst);
     w->free_inst[w->free_inst_count++] = inst;
 }
 
@@ -294,6 +304,7 @@ i32 ub_world_clone(ub_world *w, i32 inst)
         d->class_name = src.class_name;
         d->source = src.source;
         d->flags = (u16)(src.flags & UB_INST_SAVED_FLAGS);
+        if (!ub_world_copy_props(w, ni, i)) break;
         map[i] = ni;
         if (root < 0) {
             root = ni;
@@ -307,6 +318,16 @@ i32 ub_world_clone(ub_world *w, i32 inst)
         for (i32 c = src.first_child; c >= 0; c = w->inst[c].next_sibling, ++k) {
             stack[base + 2 * (kids - 1 - k)] = c;
             stack[base + 2 * (kids - 1 - k) + 1] = ni;
+        }
+    }
+    /* references inside the copy point at the copies (as Roblox clones) */
+    for (i32 i = 0; i < old_count; ++i) {
+        if (map[i] < 0) continue;
+        int np = ub_world_prop_count(w, map[i]);
+        for (int k = 0; k < np; ++k) {
+            ub_prop *p = (ub_prop *)ub_world_prop_at(w, map[i], k);
+            if (p->val.type == UB_PV_REF && p->val.v.ref >= 0 && p->val.v.ref < old_count && map[p->val.v.ref] >= 0)
+                p->val.v.ref = map[p->val.v.ref];
         }
     }
     /* welds whose two parts were both copied */
@@ -326,6 +347,7 @@ bool ub_world_set_name(ub_world *w, i32 inst, const char *name)
     u32 n = add_string(w, name ? name : "");
     if (n == 0xFFFFFFFFu) return false;
     w->inst[inst].name = n;
+    w->epoch++;
     return true;
 }
 
@@ -489,6 +511,83 @@ static i32 save_order(const ub_world *w, i32 *order, i32 *remap, i32 *stack)
     return n;
 }
 
+/* PROP: the names of the keys used (in order of first use), then
+ * (instance, key, type, value) for every property of a saved instance. */
+static void save_props(const ub_world *w, buf *b, const i32 *order, i32 n, const i32 *remap)
+{
+    i32 *local = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->key_count + 1));
+    if (!local) {
+        b->failed = true;
+        return;
+    }
+    for (i32 k = 0; k < w->key_count; ++k) local[k] = -1;
+    u32 nkeys = 0, entries = 0;
+    for (i32 k = 0; k < n; ++k)
+        for (int i = 0; i < ub_world_prop_count(w, order[k]); ++i) {
+            const ub_prop *p = ub_world_prop_at(w, order[k], i);
+            if (local[p->key] < 0) local[p->key] = (i32)nkeys++;
+            entries++;
+        }
+    if (!entries) {
+        plat_free(local);
+        return;
+    }
+    u32 c = chunk_begin(b, "PROP");
+    put_u32(b, nkeys);
+    for (u32 j = 0; j < nkeys; ++j) /* key names: offsets into STRS */
+        for (i32 k = 0; k < w->key_count; ++k)
+            if (local[k] == (i32)j) put_u32(b, w->keys[k]);
+    put_u32(b, entries);
+    for (i32 k = 0; k < n; ++k)
+        for (int i = 0; i < ub_world_prop_count(w, order[k]); ++i) {
+            const ub_prop *p = ub_world_prop_at(w, order[k], i);
+            const ub_value *v = &p->val;
+            put_u32(b, (u32)k);
+            put_u32(b, (u32)local[p->key]);
+            put_u8(b, v->type);
+            switch (v->type) {
+            case UB_PV_BOOL: put_u8(b, v->v.b ? 1 : 0); break;
+            case UB_PV_INT: case UB_PV_ENUM: case UB_PV_BRICKCOLOR: put_u32(b, (u32)v->v.i); break;
+            case UB_PV_REF:
+                put_u32(b, (u32)(v->v.ref >= 0 && v->v.ref < w->count ? remap[v->v.ref] : -1));
+                break;
+            case UB_PV_FLOAT: put_f32(b, v->v.f); break;
+            case UB_PV_DOUBLE: put(b, &v->v.d, 8); break;
+            case UB_PV_STRING: put_u32(b, v->v.str.len); put(b, v->v.str.s, v->v.str.len); break;
+            case UB_PV_COLOR3: put_f32(b, v->v.c3.r); put_f32(b, v->v.c3.g); put_f32(b, v->v.c3.b); break;
+            case UB_PV_VECTOR3: put_f32(b, v->v.v3.x); put_f32(b, v->v.v3.y); put_f32(b, v->v.v3.z); break;
+            case UB_PV_VECTOR2: put_f32(b, v->v.v2.x); put_f32(b, v->v.v2.y); break;
+            case UB_PV_UDIM: put_f32(b, v->v.ud.s); put_u32(b, (u32)v->v.ud.o); break;
+            case UB_PV_UDIM2:
+                put_f32(b, v->v.ud2.sx); put_u32(b, (u32)v->v.ud2.ox);
+                put_f32(b, v->v.ud2.sy); put_u32(b, (u32)v->v.ud2.oy);
+                break;
+            case UB_PV_RECT:
+                put_f32(b, v->v.rect.x0); put_f32(b, v->v.rect.y0); put_f32(b, v->v.rect.x1); put_f32(b, v->v.rect.y1);
+                break;
+            case UB_PV_NUMRANGE: put_f32(b, v->v.range.lo); put_f32(b, v->v.range.hi); break;
+            case UB_PV_NUMSEQ: case UB_PV_COLORSEQ: {
+                u32 stride = v->type == UB_PV_NUMSEQ ? 3 : 4;
+                put_u32(b, v->v.seq.n);
+                for (u32 j = 0; j < v->v.seq.n * stride; ++j) put_f32(b, v->v.seq.k[j]);
+                break;
+            }
+            case UB_PV_FONT: {
+                const char *f = v->v.font.family ? v->v.font.family : "";
+                u32 len = (u32)ub_strlen(f);
+                put_u16(b, v->v.font.weight);
+                put_u8(b, v->v.font.style);
+                put_u32(b, len);
+                put(b, f, len);
+                break;
+            }
+            default: break;
+            }
+        }
+    chunk_end(b, c);
+    plat_free(local);
+}
+
 bool ub_world_save_remap(const ub_world *w, i32 *remap)
 {
     i32 *order = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
@@ -600,6 +699,8 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
     }
     chunk_end(&b, c);
 
+    save_props(w, &b, order, n, remap);
+
     c = chunk_begin(&b, "END ");
     chunk_end(&b, c);
 
@@ -669,6 +770,112 @@ void ub_part_sanitize(ub_part *p)
         }
 }
 
+static f32 get_fin(rd *r) /* not NaN (infinity is a real value: BillboardGui.MaxDistance) */
+{
+    f32 v = get_f32(r);
+    return v == v ? v : 0;
+}
+
+u32 ub_world_key_at(ub_world *w, u32 off); /* ub_props.c */
+
+static ub_load_result load_props(ub_world *w, const u8 *p, u32 len, u32 inst_count)
+{
+    rd r = { p, len, 0, false };
+    u32 nkeys = get_u32(&r);
+    if (r.bad || nkeys > len / 4) return UB_LOAD_CORRUPT;
+    u32 *keys = (u32 *)plat_alloc(sizeof(u32) * (nkeys + 1));
+    if (!keys) return UB_LOAD_NO_MEMORY;
+    ub_load_result res = UB_LOAD_OK;
+    char name[256];
+    for (u32 i = 0; i < nkeys && res == UB_LOAD_OK; ++i) {
+        u32 off = get_u32(&r);
+        keys[i] = r.bad ? UB_NO_STRING : ub_world_key_at(w, off);
+        if (keys[i] == UB_NO_STRING) res = UB_LOAD_CORRUPT;
+    }
+    u32 entries = res == UB_LOAD_OK ? get_u32(&r) : 0;
+    if (r.bad) res = UB_LOAD_CORRUPT;
+    f32 seq[UB_SEQ_MAX_KEYS * 4];
+    for (u32 e = 0; e < entries && res == UB_LOAD_OK; ++e) {
+        u32 at = get_u32(&r), key = get_u32(&r), type = get_u8(&r);
+        if (r.bad || at >= inst_count || key >= nkeys) {
+            res = UB_LOAD_CORRUPT;
+            break;
+        }
+        ub_value v;
+        memset(&v, 0, sizeof v);
+        v.type = (u8)type;
+        switch (type) {
+        case UB_PV_BOOL: v.v.b = get_u8(&r) != 0; break;
+        case UB_PV_INT: case UB_PV_ENUM: case UB_PV_BRICKCOLOR: v.v.i = (i32)get_u32(&r); break;
+        case UB_PV_REF: {
+            i32 ref = (i32)get_u32(&r);
+            v.v.ref = ref >= 0 && (u32)ref < inst_count ? ref : -1;
+            break;
+        }
+        case UB_PV_FLOAT: v.v.f = get_fin(&r); break;
+        case UB_PV_DOUBLE:
+            if (r.len - r.pos < 8) r.bad = true;
+            else {
+                memcpy(&v.v.d, r.p + r.pos, 8);
+                r.pos += 8;
+                if (!(v.v.d >= -1.0e300 && v.v.d <= 1.0e300)) v.v.d = 0;
+            }
+            break;
+        case UB_PV_STRING: {
+            u32 n = get_u32(&r);
+            if (r.bad || n > r.len - r.pos) r.bad = true;
+            else {
+                v.v.str.s = (char *)(r.p + r.pos); /* copied by set_prop */
+                v.v.str.len = n;
+                r.pos += n;
+            }
+            break;
+        }
+        case UB_PV_COLOR3: v.v.c3.r = get_fin(&r); v.v.c3.g = get_fin(&r); v.v.c3.b = get_fin(&r); break;
+        case UB_PV_VECTOR3: v.v.v3.x = get_fin(&r); v.v.v3.y = get_fin(&r); v.v.v3.z = get_fin(&r); break;
+        case UB_PV_VECTOR2: v.v.v2.x = get_fin(&r); v.v.v2.y = get_fin(&r); break;
+        case UB_PV_UDIM: v.v.ud.s = get_fin(&r); v.v.ud.o = (i32)get_u32(&r); break;
+        case UB_PV_UDIM2:
+            v.v.ud2.sx = get_fin(&r); v.v.ud2.ox = (i32)get_u32(&r);
+            v.v.ud2.sy = get_fin(&r); v.v.ud2.oy = (i32)get_u32(&r);
+            break;
+        case UB_PV_RECT:
+            v.v.rect.x0 = get_fin(&r); v.v.rect.y0 = get_fin(&r); v.v.rect.x1 = get_fin(&r); v.v.rect.y1 = get_fin(&r);
+            break;
+        case UB_PV_NUMRANGE: v.v.range.lo = get_fin(&r); v.v.range.hi = get_fin(&r); break;
+        case UB_PV_NUMSEQ: case UB_PV_COLORSEQ: {
+            u32 n = get_u32(&r), stride = type == UB_PV_NUMSEQ ? 3 : 4;
+            if (r.bad || n < 2 || n > UB_SEQ_MAX_KEYS) r.bad = true;
+            else {
+                for (u32 j = 0; j < n * stride; ++j) seq[j] = get_fin(&r);
+                v.v.seq.k = seq;
+                v.v.seq.n = n;
+            }
+            break;
+        }
+        case UB_PV_FONT: {
+            v.v.font.weight = (u16)get_u16(&r);
+            v.v.font.style = (u8)get_u8(&r);
+            u32 n = get_u32(&r);
+            if (r.bad || n >= sizeof name || n > r.len - r.pos) r.bad = true;
+            else {
+                memcpy(name, r.p + r.pos, n);
+                name[n] = 0;
+                r.pos += n;
+                v.v.font.family = name;
+            }
+            break;
+        }
+        default: r.bad = true; break;
+        }
+        if (r.bad) res = UB_LOAD_CORRUPT;
+        else if (!ub_world_set_prop(w, (i32)at, keys[key], &v)) res = UB_LOAD_NO_MEMORY;
+    }
+    if (res == UB_LOAD_OK && r.pos != r.len) res = UB_LOAD_CORRUPT;
+    plat_free(keys);
+    return res;
+}
+
 ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
 {
     if (size < 12 || memcmp(data, "UBXPLACE", 8) != 0) return UB_LOAD_BAD_FORMAT;
@@ -680,8 +887,8 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
     u32 inst_count = 0, part_count = 0;
     const u8 *inst_p = NULL;
     u32 inst_len = 0;
-    const u8 *weld_p = NULL, *src_p = NULL;
-    u32 weld_count = 0, src_len = 0;
+    const u8 *weld_p = NULL, *src_p = NULL, *prop_p = NULL;
+    u32 weld_count = 0, src_len = 0, prop_len = 0;
     while (!ended) {
         if (top.len - top.pos < 8) return UB_LOAD_CORRUPT;
         const u8 *tag = top.p + top.pos;
@@ -752,6 +959,9 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
         } else if (memcmp(tag, "SRCS", 4) == 0) {
             src_p = r.p;
             src_len = len;
+        } else if (memcmp(tag, "PROP", 4) == 0) {
+            prop_p = r.p;
+            prop_len = len;
         } else if (memcmp(tag, "END ", 4) == 0) {
             ended = true;
         }
@@ -819,6 +1029,11 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
             if (at >= inst_count || off >= w->str_len || (off > 0 && w->strings[off - 1] != 0)) return UB_LOAD_CORRUPT;
             w->inst[at].source = off;
         }
+    }
+
+    if (prop_p) {
+        ub_load_result pr = load_props(w, prop_p, prop_len, inst_count);
+        if (pr != UB_LOAD_OK) return pr;
     }
 
     /* welds last: they refer to instances by index */

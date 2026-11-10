@@ -3,10 +3,12 @@
 #include <stdlib.h>
 
 #include "physics/ub_physics.h"
+#include "platform/platform.h"
 #include "render/ub_mesh.h"
 #include "render/ub_texture.h"
 #include "world/ub_query.h"
 #include "world/ub_rbxl.h"
+#include "world/ub_classes.h"
 #include "world/ub_world.h"
 #include "test.h"
 
@@ -584,8 +586,280 @@ static void test_mutation(void)
     }
 }
 
+/* ---- rbx-test-files GUI models: every property the XML copy has must
+ * be imported with the same value (tests/data/rbx/<name>.props.expected) */
+
+static void inst_path(const ub_world *w, i32 i, char *buf, int cap)
+{
+    i32 chain[64];
+    int n = 0;
+    for (i32 k = i; k >= 0 && n < 64; k = w->inst[k].parent) chain[n++] = k;
+    buf[0] = 0;
+    int len = 0;
+    for (int j = n - 2; j >= 0; --j) { /* skip the Workspace a model file is put in */
+        const char *nm = ub_world_str(w, w->inst[chain[j]].name);
+        len += snprintf(buf + len, (size_t)(cap - len), "%s%s", len ? "/" : "", nm);
+        if (len >= cap) break;
+    }
+}
+
+static int parse_nums(const char *s, double *out, int max)
+{
+    int n = 0;
+    char *end;
+    while (n < max) {
+        double v = strtod(s, &end);
+        if (end == s) break;
+        out[n++] = v;
+        s = end;
+    }
+    return n;
+}
+
+/* NaN is imported as 0 on purpose: it would poison layout */
+static bool near(double a, double b)
+{
+    if (b != b) return a == 0;
+    return fabs(a - b) <= 1e-5 * (fabs(b) > 1 ? fabs(b) : 1) || (a == b);
+}
+
+/* Does the instance's value match the expected line's type and text? */
+static bool value_matches(const ub_world *w, const ub_value *v, const char *type, const char *text)
+{
+    double n[64];
+    int k = 0;
+    if (!strcmp(type, "string")) return v->type == UB_PV_STRING && strcmp(v->v.str.s, text) == 0;
+    if (!strcmp(type, "ref")) {
+        if (v->type != UB_PV_REF) return false;
+        if (!text[0]) return v->v.ref == -1;
+        char path[512];
+        if (v->v.ref < 0) return false;
+        inst_path(w, v->v.ref, path, sizeof path);
+        return strcmp(path, text) == 0;
+    }
+    if (!strcmp(type, "font")) {
+        k = parse_nums(text, n, 2);
+        const char *fam = strchr(strchr(text, ' ') + 1, ' ') + 1;
+        return v->type == UB_PV_FONT && k == 2 && v->v.font.weight == n[0] && v->v.font.style == n[1] &&
+               strcmp(v->v.font.family, fam) == 0;
+    }
+    k = parse_nums(text, n, 64);
+    if (!strcmp(type, "bool")) return v->type == UB_PV_BOOL && v->v.b == (n[0] != 0);
+    if (!strcmp(type, "int")) /* the XML writes BrickColorValue.Value as a plain number */
+        return (v->type == UB_PV_INT || v->type == UB_PV_BRICKCOLOR) && v->v.i == (i32)n[0];
+    if (!strcmp(type, "enum")) return v->type == UB_PV_ENUM && v->v.e == (u32)n[0];
+    if (!strcmp(type, "brickcolor")) return v->type == UB_PV_BRICKCOLOR && v->v.e == (u32)n[0];
+    if (!strcmp(type, "double")) return v->type == UB_PV_DOUBLE && near(v->v.d, n[0]);
+    if (!strcmp(type, "float")) return v->type == UB_PV_FLOAT && (near(v->v.f, n[0]) || (isinf(n[0]) && isinf(v->v.f)));
+    if (!strcmp(type, "udim")) return v->type == UB_PV_UDIM && near(v->v.ud.s, n[0]) && v->v.ud.o == (i32)n[1];
+    if (!strcmp(type, "udim2"))
+        return v->type == UB_PV_UDIM2 && near(v->v.ud2.sx, n[0]) && v->v.ud2.ox == (i32)n[1] &&
+               near(v->v.ud2.sy, n[2]) && v->v.ud2.oy == (i32)n[3];
+    if (!strcmp(type, "numseq") || !strcmp(type, "colorseq")) {
+        u8 t = type[0] == 'n' ? UB_PV_NUMSEQ : UB_PV_COLORSEQ;
+        int stride = t == UB_PV_NUMSEQ ? 3 : 4;
+        if (v->type != t || (int)v->v.seq.n * stride != k) return false;
+        for (int j = 0; j < k; ++j)
+            if (!near(v->v.seq.k[j], n[j])) return false;
+        return true;
+    }
+    const struct { const char *name; u8 t; int count; } vec[] = {
+        { "color3", UB_PV_COLOR3, 3 }, { "vector2", UB_PV_VECTOR2, 2 }, { "vector3", UB_PV_VECTOR3, 3 },
+        { "rect", UB_PV_RECT, 4 }, { "numrange", UB_PV_NUMRANGE, 2 },
+    };
+    for (int j = 0; j < (int)(sizeof vec / sizeof vec[0]); ++j)
+        if (!strcmp(type, vec[j].name)) {
+            if (v->type != vec[j].t || k != vec[j].count) return false;
+            const f32 *f = (const f32 *)&v->v;
+            for (int q = 0; q < k; ++q)
+                if (!near(f[q], n[q])) return false;
+            return true;
+        }
+    return false;
+}
+
+static void check_rbx_props(const char *name)
+{
+    char path[256];
+    snprintf(path, sizeof path, "tests/data/rbx/%s.rbxm", name);
+    u32 size = 0;
+    u8 *data = load_file(path, &size);
+    CHECK(data != NULL);
+    if (!data) return;
+    ub_world w;
+    ub_world_init(&w);
+    ub_import_stats st;
+    ub_load_result r = ub_rbxl_load(&w, data, size, &st);
+    CHECK(r == UB_LOAD_OK);
+    snprintf(path, sizeof path, "tests/data/rbx/%s.props.expected", name);
+    FILE *f = fopen(path, "rb");
+    CHECK(f != NULL);
+    int lines = 0, bad = 0;
+    char line[4096];
+    while (f && fgets(line, sizeof line, f)) {
+        line[strcspn(line, "\r\n")] = 0;
+        char *a = strchr(line, '|'), *b = a ? strchr(a + 1, '|') : NULL, *c = b ? strchr(b + 1, '|') : NULL;
+        if (!c) continue;
+        *a = *b = *c = 0;
+        lines++;
+        /* any instance with this path that has the property with this value */
+        bool found = false;
+        for (i32 i = 0; i < w.count && !found; ++i) {
+            char ip[512];
+            inst_path(&w, i, ip, sizeof ip);
+            if (strcmp(ip, line) != 0) continue;
+            const ub_value *v = ub_world_prop_named(&w, i, a + 1);
+            found = v && value_matches(&w, v, b + 1, c + 1);
+        }
+        if (!found) {
+            if (bad < 5) printf("    %s: %s.%s is not %s %s\n", name, line, a + 1, b + 1, c + 1);
+            bad++;
+        }
+    }
+    if (f) fclose(f);
+    printf("  %s: %d properties checked, %u GUI objects\n", name, lines, st.gui);
+    CHECK(lines > 0 && bad == 0);
+    /* and they survive .ubx */
+    u8 *a1, *b1;
+    u32 na, nb;
+    CHECK(ub_ubx_save(&w, &a1, &na));
+    ub_world w2;
+    ub_world_init(&w2);
+    CHECK(ub_ubx_load(&w2, a1, na) == UB_LOAD_OK);
+    CHECK(ub_ubx_save(&w2, &b1, &nb) && na == nb && memcmp(a1, b1, na) == 0);
+    plat_free(a1);
+    plat_free(b1);
+    ub_world_free(&w2);
+    ub_world_free(&w);
+    free(data);
+}
+
+static void test_rbx_gui(void)
+{
+    static const char *const models[] = {
+        "three-unique-frames", "three-screengui", "three-uigradients", "three-uigridlayouts", "two-imagebuttons",
+        "text-label-with-font", "gui-inset-and-font-migration", "imagelabel-content", "funny-uipadding",
+        "three-intvalues", "three-brickcolorvalues", "funny-numbervalue", "three-color3values",
+        "three-vector3values", "font",
+    };
+    for (int i = 0; i < (int)(sizeof models / sizeof models[0]); ++i) check_rbx_props(models[i]);
+}
+
+/* Typed properties: storing, copying with Clone, saving in .ubx, and the
+ * class table's defaults and enums. */
+static void test_props(void)
+{
+    ub_world w;
+    ub_world_init(&w);
+    i32 gui = ub_world_add(&w, -1, UB_CLASS_OTHER, "ScreenGui", "Hud");
+    i32 label = ub_world_add(&w, gui, UB_CLASS_OTHER, "TextLabel", "Score");
+    i32 link = ub_world_add(&w, gui, UB_CLASS_OTHER, "ObjectValue", "Target");
+    CHECK(ub_cdb_fill_defaults(&w, label, "TextLabel"));
+    CHECK(ub_cdb_fill_defaults(&w, link, "ObjectValue"));
+    /* defaults of a new TextLabel, as Roblox has them */
+    const ub_value *v = ub_world_prop_named(&w, label, "Text");
+    CHECK(v && v->type == UB_PV_STRING && strcmp(v->v.str.s, "Label") == 0);
+    v = ub_world_prop_named(&w, label, "TextSize");
+    CHECK(v && v->type == UB_PV_FLOAT && v->v.f == 8);
+    v = ub_world_prop_named(&w, label, "BorderSizePixel");
+    CHECK(v && v->type == UB_PV_INT && v->v.i == 1);
+    v = ub_world_prop_named(&w, label, "TextXAlignment");
+    CHECK(v && v->type == UB_PV_ENUM && v->v.e == 2); /* Center */
+    v = ub_world_prop_named(&w, label, "FontFace");
+    CHECK(v && v->type == UB_PV_FONT && v->v.font.weight == 400 && strstr(v->v.font.family, "LegacyArial"));
+    v = ub_world_prop_named(&w, link, "Value");
+    CHECK(v && v->type == UB_PV_REF && v->v.ref == -1);
+    CHECK(ub_cdb_is_a("TextButton", "GuiButton") && ub_cdb_is_a("TextButton", "GuiObject") &&
+          ub_cdb_is_a("ScreenGui", "LayerCollector") && !ub_cdb_is_a("Frame", "GuiButton"));
+    const ub_cdb_prop *pd = ub_cdb_find_prop(ub_cdb_class("TextButton"), "Size");
+    CHECK(pd && pd->type == UB_PV_UDIM2 && (pd->flags & UB_CDB_STORED));
+    pd = ub_cdb_find_prop(ub_cdb_class("Frame"), "AbsoluteSize");
+    CHECK(pd && (pd->flags & UB_CDB_READONLY));
+    int font = ub_enum_find("Font"), key = ub_enum_find("KeyCode");
+    CHECK(font >= 0 && ub_enum_value_of(font, "Legacy") == 0 && ub_enum_value_of(font, "SourceSansBold") == 4);
+    CHECK(key >= 0 && ub_enum_value_of(key, "W") == 119 && ub_enum_value_of(key, "LeftShift") == 304);
+
+    /* setting: strings and sequences are copied */
+    char text[16] = "Hello";
+    ub_value s = ub_vstr(text, 5);
+    CHECK(ub_world_set_prop_named(&w, label, "Text", &s));
+    text[0] = 'J';
+    CHECK(strcmp(ub_world_prop_named(&w, label, "Text")->v.str.s, "Hello") == 0);
+    f32 keys[12] = { 0, 1, 0, 0, 0.5f, 0.25f, 0.5f, 0, 1, 0, 0, 1 };
+    ub_value seq;
+    seq.type = UB_PV_COLORSEQ;
+    seq.v.seq.k = keys;
+    seq.v.seq.n = 3;
+    CHECK(ub_world_set_prop_named(&w, label, "Colours", &seq));
+    keys[1] = 9;
+    CHECK(ub_world_prop_named(&w, label, "Colours")->v.seq.k[1] == 1);
+    seq.v.seq.n = 1; /* fewer than two keypoints: refused */
+    CHECK(!ub_world_set_prop_named(&w, label, "Colours", &seq));
+    ub_value ref;
+    ref.type = UB_PV_REF;
+    ref.v.ref = label;
+    CHECK(ub_world_set_prop_named(&w, link, "Value", &ref));
+    u32 e0 = w.epoch;
+    ub_value ud;
+    ud.type = UB_PV_UDIM2;
+    ud.v.ud2.sx = 0.5f; ud.v.ud2.ox = -10; ud.v.ud2.sy = 0; ud.v.ud2.oy = 40;
+    CHECK(ub_world_set_prop_named(&w, label, "Size", &ud) && w.epoch != e0);
+
+    /* Clone copies properties, and references inside the copy point at the copies */
+    i32 copy = ub_world_clone(&w, gui);
+    CHECK(copy >= 0);
+    i32 copy_label = ub_world_find_child(&w, copy, "Score"), copy_link = ub_world_find_child(&w, copy, "Target");
+    CHECK(copy_label >= 0 && copy_link >= 0 && copy_label != label);
+    v = ub_world_prop_named(&w, copy_label, "Text");
+    CHECK(v && strcmp(v->v.str.s, "Hello") == 0 && v->v.str.s != ub_world_prop_named(&w, label, "Text")->v.str.s);
+    v = ub_world_prop_named(&w, copy_link, "Value");
+    CHECK(v && v->v.ref == copy_label);
+    ub_world_destroy(&w, copy);
+    ub_world_reclaim(&w, copy_link);
+    CHECK(ub_world_prop_count(&w, copy_link) == 0);
+
+    /* .ubx keeps every property; save -> load -> save gives the same bytes */
+    u8 *data = NULL, *data2 = NULL;
+    u32 size = 0, size2 = 0;
+    CHECK(ub_ubx_save(&w, &data, &size));
+    ub_world w2;
+    ub_world_init(&w2);
+    CHECK(ub_ubx_load(&w2, data, size) == UB_LOAD_OK);
+    i32 l2 = ub_world_find_child(&w2, 0, "Score"), k2 = ub_world_find_child(&w2, 0, "Target");
+    CHECK(l2 >= 0 && k2 >= 0);
+    CHECK(ub_world_prop_count(&w2, l2) == ub_world_prop_count(&w, label));
+    for (int i = 0; i < ub_world_prop_count(&w, label); ++i) {
+        const ub_prop *p = ub_world_prop_at(&w, label, i);
+        const ub_value *q = ub_world_prop_named(&w2, l2, ub_world_key_name(&w, p->key));
+        CHECK(q && ub_value_equal(&p->val, q));
+    }
+    v = ub_world_prop_named(&w2, k2, "Value");
+    CHECK(v && v->v.ref == l2);
+    CHECK(ub_ubx_save(&w2, &data2, &size2));
+    CHECK(size == size2 && memcmp(data, data2, size) == 0);
+    /* damaged property data is refused, never misread */
+    int refused = 0;
+    for (u32 cut = 0; cut < size; cut += 7) {
+        u8 *bad = (u8 *)malloc(size);
+        memcpy(bad, data, size);
+        bad[cut] ^= 0x5A;
+        ub_world w3;
+        ub_world_init(&w3);
+        if (ub_ubx_load(&w3, bad, size) != UB_LOAD_OK) refused++;
+        ub_world_free(&w3);
+        free(bad);
+    }
+    CHECK(refused > 0);
+    plat_free(data);
+    plat_free(data2);
+    ub_world_free(&w2);
+    ub_world_free(&w);
+}
+
 void test_world(void)
 {
+    test_props();
+    test_rbx_gui();
     test_mutation();
     test_raycast();
     test_special_rotations();

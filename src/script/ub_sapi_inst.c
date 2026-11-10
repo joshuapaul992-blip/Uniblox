@@ -11,6 +11,7 @@
 
 #include "script/ub_sapi.h"
 #include "core/ub_log.h"
+#include "world/ub_classes.h"
 #include "physics/ub_pmath.h"
 #include "platform/platform.h"
 #include "render/ub_texture.h"
@@ -37,7 +38,8 @@ static const struct {
     { VIRT_MARKETPLACE, "MarketplaceService" }, { VIRT_DATASTORE, "DataStoreService" }, { VIRT_CHAT, "Chat" },
     { VIRT_TELEPORT, "TeleportService" }, { VIRT_SOUNDSERVICE, "SoundService" },
     { VIRT_PHYSICSSERVICE, "PhysicsService" }, { VIRT_COLLECTION, "CollectionService" },
-    { VIRT_TEXTSERVICE, "TextService" },
+    { VIRT_TEXTSERVICE, "TextService" }, { VIRT_GUISERVICE, "GuiService" },
+    { VIRT_CONTENTPROVIDER, "ContentProvider" }, { VIRT_MOUSE, "Mouse" }, { VIRT_CAMERA, "Camera" },
 };
 
 static const char *virt_class(i32 idx)
@@ -113,6 +115,7 @@ static const char *const k_parents[][2] = {
 static bool is_a(const char *cls, const char *want)
 {
     if (streq(want, "Instance")) return true;
+    if (ub_cdb_is_a(cls, want)) return true;
     for (int guard = 0; guard < 8; ++guard) {
         if (streq(cls, want)) return true;
         const char *up = NULL;
@@ -199,12 +202,17 @@ static void set_extra(lua_State *L, i32 idx, const char *key, int vi)
 
 /* ------------------------------------------------------------ helpers */
 
-static void changed(lua_State *L, i32 idx, const char *prop)
+void get_extra_value(lua_State *L, i32 idx, const char *key) { get_extra(L, idx, key); }
+
+void prop_changed(lua_State *L, i32 idx, const char *prop)
 {
     /* Changed (value objects pass the new value, others the name), and
      * GetPropertyChangedSignal(prop) */
-    if (idx >= 0 && is_value_class(cls_of(idx))) get_extra(L, idx, "Value");
-    else lua_pushstring(L, prop);
+    if (idx >= 0 && is_value_class(cls_of(idx)) && streq(prop, "Value")) {
+        if (!gui_get(L, idx, "Value")) get_extra(L, idx, "Value");
+    } else {
+        lua_pushstring(L, prop);
+    }
     fire_signal(L, idx, EV_CHANGED, NULL, 1);
     fire_signal(L, idx, EV_PROPCHANGED, prop, 0);
 }
@@ -461,7 +469,7 @@ static bool get_class_prop(lua_State *L, i32 idx, const char *k)
         if (streq(k, "Gravity")) lua_pushnumber(L, W->gravity);
         else if (streq(k, "FallenPartsDestroyHeight")) lua_pushnumber(L, W->fallen_height);
         else if (streq(k, "DistributedGameTime")) lua_pushnumber(L, script_time());
-        else if (streq(k, "CurrentCamera")) lua_pushnil(L);
+        else if (streq(k, "CurrentCamera")) push_inst(L, VIRT_CAMERA);
         else return false;
         return true;
     }
@@ -487,6 +495,7 @@ static bool get_class_prop(lua_State *L, i32 idx, const char *k)
         return true;
     }
     if (is_value_class(cls) && streq(k, "Value")) {
+        if (ub_world_prop_named(W, idx, "Value") && gui_get(L, idx, "Value")) return true;
         get_extra(L, idx, "Value");
         if (lua_isnil(L, -1) && !streq(cls, "ObjectValue")) { /* defaults */
             lua_pop(L, 1);
@@ -1123,6 +1132,32 @@ static int m_playerbyuserid(lua_State *L)
     return 1;
 }
 
+static int m_getmouse(lua_State *L)
+{
+    push_inst(L, VIRT_MOUSE);
+    return 1;
+}
+
+static int m_thumbnail(lua_State *L)
+{
+    /* nothing is downloaded: no picture, but the call succeeds */
+    lua_pushliteral(L, "");
+    lua_pushboolean(L, 1);
+    return 2;
+}
+
+static int m_playername(lua_State *L)
+{
+    lua_pushstring(L, ub_world_str(W, W->inst[S.g->player].name));
+    return 1;
+}
+
+static int m_one(lua_State *L)
+{
+    lua_pushinteger(L, 1);
+    return 1;
+}
+
 static int m_loadcharacter(lua_State *L)
 {
     (void)L;
@@ -1423,12 +1458,14 @@ static const method k_humanoid_methods[] = {
 static const method k_player_methods[] = {
     { "LoadCharacter", m_loadcharacter }, { "Kick", m_kick }, { "IsInGroup", m_false }, { "GetRankInGroup", m_zero },
     { "GetRoleInGroup", m_noop }, { "HasAppearanceLoaded", m_true },
-    { "DistanceFromCharacter", m_distancefromcharacter }, { "GetMouse", m_noop }, { NULL, NULL },
+    { "DistanceFromCharacter", m_distancefromcharacter }, { "GetMouse", m_getmouse }, { NULL, NULL },
 };
 
 static const method k_players_methods[] = {
     { "GetPlayers", m_getplayers }, { "getPlayers", m_getplayers }, { "GetPlayerFromCharacter", m_playerfromcharacter },
-    { "getPlayerFromCharacter", m_playerfromcharacter }, { "GetPlayerByUserId", m_playerbyuserid }, { NULL, NULL },
+    { "getPlayerFromCharacter", m_playerfromcharacter }, { "GetPlayerByUserId", m_playerbyuserid },
+    { "GetUserThumbnailAsync", m_thumbnail }, { "GetNameFromUserIdAsync", m_playername },
+    { "GetUserIdFromNameAsync", m_one }, { NULL, NULL },
 };
 
 static const method k_lighting_methods[] = {
@@ -1487,7 +1524,7 @@ static int find_event(i32 idx, const char *k)
             return streq(k, "PostSimulation") ? EV_HEARTBEAT : streq(k, "PreSimulation") ? EV_STEPPED : EV_RENDERSTEPPED;
     }
     (void)cls;
-    return -1;
+    return gui_event(idx, k);
 }
 
 /* ------------------------------------------------------------- __index */
@@ -1546,6 +1583,8 @@ static int inst_index(lua_State *L)
             if (!lua_isnil(L, -1)) return 1;
             lua_pop(L, 2);
         }
+        if (gui_virtual_index(L, idx, k)) return 1;
+        if (streq(k, "GetPropertyChangedSignal")) { lua_pushcfunction(L, m_propsignal); return 1; }
         if (streq(k, "IsA")) { lua_pushcfunction(L, m_isa); return 1; }
         if (streq(k, "GetChildren")) { lua_pushcfunction(L, m_getchildren); return 1; }
         if (streq(k, "FindFirstChild")) { lua_pushcfunction(L, m_findfirstchild); return 1; }
@@ -1568,7 +1607,9 @@ static int inst_index(lua_State *L)
     if (streq(k, "Archivable")) { lua_pushboolean(L, 1); return 1; }
     if (is_part(idx) && get_part_prop(L, idx, k)) return 1;
     if (get_class_prop(L, idx, k)) return 1;
+    if (gui_get(L, idx, k)) return 1;
     lua_CFunction m = find_method(k_inst_methods, k);
+    if (!m) m = gui_method(idx, k);
     if (!m && is_part(idx)) m = find_method(k_part_methods, k);
     if (!m && is_a(cls_of(idx), "Model")) m = find_method(k_model_methods, k);
     if (!m && idx == S.g->humanoid) m = find_method(k_humanoid_methods, k);
@@ -1750,6 +1791,7 @@ static bool set_class_prop(lua_State *L, i32 idx, const char *k, int v)
         return true;
     }
     if (is_value_class(cls) && streq(k, "Value")) {
+        if (ub_world_prop_named(W, idx, "Value") && gui_set(L, idx, k, v)) return true;
         if (streq(cls, "IntValue")) {
             f64 n = luaL_checknumber(L, v);
             lua_pushnumber(L, n < 0 ? ceil(n - 0.5) : floor(n + 0.5));
@@ -1818,9 +1860,12 @@ static int set_parent(lua_State *L, i32 idx, int v)
     return 0;
 }
 
-static int set_prop(lua_State *L, i32 idx, const char *k, int v)
+int set_prop(lua_State *L, i32 idx, const char *k, int v)
 {
-    if (idx < 0) return sapi_error(L, "%s cannot be assigned to", k);
+    if (idx < 0) {
+        if (gui_virtual_newindex(L, idx, k, v)) return 0;
+        return sapi_error(L, "%s cannot be assigned to", k);
+    }
     if (streq(k, "Parent")) {
         set_parent(L, idx, v);
     } else if (streq(k, "Name")) {
@@ -1830,10 +1875,11 @@ static int set_prop(lua_State *L, i32 idx, const char *k, int v)
         return sapi_error(L, "ClassName cannot be assigned to");
     } else if (is_part(idx) && set_part_prop(L, idx, k, v)) {
     } else if (set_class_prop(L, idx, k, v)) {
+    } else if (gui_set(L, idx, k, v)) {
     } else {
         set_extra(L, idx, k, v); /* kept, so scripts for things Uniblox lacks still run */
     }
-    changed(L, idx, k);
+    prop_changed(L, idx, k);
     return 0;
 }
 
@@ -1882,6 +1928,7 @@ static int instance_new(lua_State *L)
             idx = ub_world_add_part(W, -1, streq(cls, "SpawnLocation") ? UB_CLASS_SPAWN : UB_CLASS_PART, cls, cls, &p);
             break;
         }
+    if (idx < 0) idx = gui_instance_new(cls); /* GUI objects, values, remotes: with Roblox's defaults */
     if (idx < 0) {
         ub_class c = streq(cls, "Model") ? UB_CLASS_MODEL : streq(cls, "Folder") ? UB_CLASS_FOLDER : UB_CLASS_OTHER;
         if (streq(cls, "Workspace") || streq(cls, "DataModel") || streq(cls, "Players") || streq(cls, "Lighting"))
@@ -1945,6 +1992,18 @@ static int value_kind(lua_State *L, int i, f32 *out)
         (void)c;
         return 2;
     }
+    if (is_udim2(L, i)) {
+        get_udim2(L, i, out);
+        return 4;
+    }
+    if (is_vector2(L, i)) {
+        get_vector2(L, i, out);
+        return 5;
+    }
+    if (is_udim(L, i)) {
+        get_udim(L, i, out);
+        return 6;
+    }
     if (is_cf(L, i)) {
         scf *c = check_cf(L, i);
         memcpy(out, &c->p, sizeof(vec3));
@@ -1963,6 +2022,9 @@ static void push_value(lua_State *L, int kind, const f32 *v)
     if (kind == 0) lua_pushnumber(L, v[0]);
     else if (kind == 1) push_v3(L, v3(v[0], v[1], v[2]));
     else if (kind == 2) push_c3(L, v[0], v[1], v[2]);
+    else if (kind == 4) push_udim2(L, v[0], v[1], v[2], v[3]);
+    else if (kind == 5) push_vector2(L, v[0], v[1]);
+    else if (kind == 6) push_udim(L, v[0], v[1]);
     else {
         quat q = { v[3], v[4], v[5], v[6] };
         mat3 r = quat_to_mat3(quat_normalize(q));
@@ -2096,7 +2158,8 @@ void update_tweens(lua_State *L, f64 now)
         int inst_i = lua_gettop(L);
         for (int i = 0; i < t->nprops; ++i) {
             f32 v[12];
-            int n = t->p[i].kind == 0 ? 1 : t->p[i].kind == 3 ? 7 : 3;
+            static const int floats[7] = { 1, 3, 3, 7, 4, 2, 2 };
+            int n = floats[t->p[i].kind >= 0 && t->p[i].kind < 7 ? t->p[i].kind : 0];
             for (int k = 0; k < n; ++k) v[k] = t->p[i].from[k] + (t->p[i].to[k] - t->p[i].from[k]) * a;
             if (t->p[i].kind == 3) { /* rotations: blend the shorter way */
                 quat qa = { t->p[i].from[3], t->p[i].from[4], t->p[i].from[5], t->p[i].from[6] };

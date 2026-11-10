@@ -1,0 +1,125 @@
+Placeholder|Active|bool|0
+Placeholder|AnchorPoint|vector2|0.0 0.0
+Placeholder|AutoLocalize|bool|1
+Placeholder|AutomaticSize|enum|0
+Placeholder|BackgroundColor3|color3|1.0 1.0 1.0
+Placeholder|BackgroundTransparency|float|0.0
+Placeholder|BorderColor3|color3|0.0 0.0 0.0
+Placeholder|BorderMode|enum|0
+Placeholder|BorderSizePixel|int|0
+Placeholder|ClipsDescendants|bool|0
+Placeholder|Draggable|bool|0
+Placeholder|ImageColor3|color3|1.0 1.0 1.0
+Placeholder|Image|string|rbxasset://textures/ui/GuiImagePlaceholder.png
+Placeholder|ImageRectOffset|vector2|0.0 0.0
+Placeholder|ImageRectSize|vector2|0.0 0.0
+Placeholder|ImageTransparency|float|0.0
+Placeholder|Interactable|bool|1
+Placeholder|LayoutOrder|int|0
+Placeholder|NextSelectionDown|ref|
+Placeholder|NextSelectionLeft|ref|
+Placeholder|NextSelectionRight|ref|
+Placeholder|NextSelectionUp|ref|
+Placeholder|Position|udim2|0.0 0 0.0 0
+Placeholder|ResampleMode|enum|0
+Placeholder|RootLocalizationTable|ref|
+Placeholder|Rotation|float|0.0
+Placeholder|ScaleType|enum|0
+Placeholder|Selectable|bool|0
+Placeholder|SelectionBehaviorDown|enum|0
+Placeholder|SelectionBehaviorLeft|enum|0
+Placeholder|SelectionBehaviorRight|enum|0
+Placeholder|SelectionBehaviorUp|enum|0
+Placeholder|SelectionGroup|bool|0
+Placeholder|SelectionImageObject|ref|
+Placeholder|SelectionOrder|int|0
+Placeholder|Size|udim2|0.0 100 0.0 100
+Placeholder|SizeConstraint|enum|0
+Placeholder|SliceCenter|rect|0.0 0.0 0.0 0.0
+Placeholder|SliceScale|float|1.0
+Placeholder|TileSize|udim2|1.0 0 1.0 0
+Placeholder|Visible|bool|1
+Placeholder|ZIndex|int|1
+SpawnLocation|Active|bool|0
+SpawnLocation|AnchorPoint|vector2|0.0 0.0
+SpawnLocation|AutoLocalize|bool|1
+SpawnLocation|AutomaticSize|enum|0
+SpawnLocation|BackgroundColor3|color3|1.0 1.0 1.0
+SpawnLocation|BackgroundTransparency|float|0.0
+SpawnLocation|BorderColor3|color3|0.0 0.0 0.0
+SpawnLocation|BorderMode|enum|0
+SpawnLocation|BorderSizePixel|int|0
+SpawnLocation|ClipsDescendants|bool|0
+SpawnLocation|Draggable|bool|0
+SpawnLocation|ImageColor3|color3|1.0 1.0 1.0
+SpawnLocation|Image|string|rbxasset://textures/SpawnLocation.png
+SpawnLocation|ImageRectOffset|vector2|0.0 0.0
+SpawnLocation|ImageRectSize|vector2|0.0 0.0
+SpawnLocation|ImageTransparency|float|0.0
+SpawnLocation|Interactable|bool|1
+SpawnLocation|LayoutOrder|int|0
+SpawnLocation|NextSelectionDown|ref|
+SpawnLocation|NextSelectionLeft|ref|
+SpawnLocation|NextSelectionRight|ref|
+SpawnLocation|NextSelectionUp|ref|
+SpawnLocation|Position|udim2|0.0 0 0.0 0
+SpawnLocation|ResampleMode|enum|0
+SpawnLocation|RootLocalizationTable|ref|
+SpawnLocation|Rotation|float|0.0
+SpawnLocation|ScaleType|enum|0
+SpawnLocation|Selectable|bool|0
+SpawnLocation|SelectionBehaviorDown|enum|0
+SpawnLocation|SelectionBehaviorLeft|enum|0
+SpawnLocation|SelectionBehaviorRight|enum|0
+SpawnLocation|SelectionBehaviorUp|enum|0
+SpawnLocation|SelectionGroup|bool|0
+SpawnLocation|SelectionImageObject|ref|
+SpawnLocation|SelectionOrder|int|0
+SpawnLocation|Size|udim2|0.0 100 0.0 100
+SpawnLocation|SizeConstraint|enum|0
+SpawnLocation|SliceCenter|rect|0.0 0.0 0.0 0.0
+SpawnLocation|SliceScale|float|1.0
+SpawnLocation|TileSize|udim2|1.0 0 1.0 0
+SpawnLocation|Visible|bool|1
+SpawnLocation|ZIndex|int|1
+None|Active|bool|0
+None|AnchorPoint|vector2|0.0 0.0
+None|AutoLocalize|bool|1
+None|AutomaticSize|enum|0
+None|BackgroundColor3|color3|1.0 1.0 1.0
+None|BackgroundTransparency|float|0.0
+None|BorderColor3|color3|0.0 0.0 0.0
+None|BorderMode|enum|0
+None|BorderSizePixel|int|0
+None|ClipsDescendants|bool|0
+None|Draggable|bool|0
+None|ImageColor3|color3|1.0 1.0 1.0
+None|ImageRectOffset|vector2|0.0 0.0
+None|ImageRectSize|vector2|0.0 0.0
+None|ImageTransparency|float|0.0
+None|Interactable|bool|1
+None|LayoutOrder|int|0
+None|NextSelectionDown|ref|
+None|NextSelectionLeft|ref|
+None|NextSelectionRight|ref|
+None|NextSelectionUp|ref|
+None|Position|udim2|0.0 0 0.0 0
+None|ResampleMode|enum|0
+None|RootLocalizationTable|ref|
+None|Rotation|float|0.0
+None|ScaleType|enum|0
+None|Selectable|bool|0
+None|SelectionBehaviorDown|enum|0
+None|SelectionBehaviorLeft|enum|0
+None|SelectionBehaviorRight|enum|0
+None|SelectionBehaviorUp|enum|0
+None|SelectionGroup|bool|0
+None|SelectionImageObject|ref|
+None|SelectionOrder|int|0
+None|Size|udim2|0.0 100 0.0 100
+None|SizeConstraint|enum|0
+None|SliceCenter|rect|0.0 0.0 0.0 0.0
+None|SliceScale|float|1.0
+None|TileSize|udim2|1.0 0 1.0 0
+None|Visible|bool|1
+None|ZIndex|int|1
