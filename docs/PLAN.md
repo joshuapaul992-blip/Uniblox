@@ -84,6 +84,7 @@ tests/          host unit tests (make test)
 | 8B | Roblox scripts (up to 2022) | 2022-era game scripts run unchanged | **Built.** Luau's 2022 syntax (type annotations, if-expressions, generalised iteration, new literals and escapes) and library (bit32, utf8, Random, DateTime, os.date, string.pack, table.freeze...), attributes and tags from place files, CollectionService, 118 classes with Roblox's defaults, overlap queries, ClickDetectors, ProximityPrompts, Humanoid states, offline answers from Roblox's online services. The demo has a lamp with a prompt and a clickable block. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8C | Real Roblox games from .rbxl | Open a 2022 game's place file and play it | **Built**, but terrain and decals are not done. Unions and MeshParts keep their shape (the collision pieces saved in every file, drawn and collided with), `.mesh` files and sounds from a local content folder, SpecialMeshes, Atmosphere; R15/R6 rigs with Motor6D, joints from scripts, Tools, Backpack and hotbar, Teams and team spawns; hinges (motor, servo), ball sockets, prismatic, ropes, rods, springs and every body mover; CFrame properties; XML `.rbxlx`/`.rbxmx`; a 20,000-part place loads in about a second. Passes unit tests and the Wine smoke tests. Needs a run on a real install with real 2022 places. Not done: terrain (its format is not documented), decals and textures, animations |
 | 9A | Client UI + a fast renderer for NT 3.51/4.0 | A 2021-style client UI (chat, player list with leaderstats, health, notifications, game menu); a renderer faster than the software one where there is no OpenGL (WINVBE) | **Built.** The client UI in Uniblox's own look, fed by `SetCore`, `SetCoreGuiEnabled` and `Chat:Chat`; the fast software renderer (sorted, coarse tile depth, longer perspective steps, packed texture coordinates, every processor), about twice as fast as the plain one on the demo place under Wine. Passes unit tests and the Wine smoke tests. Needs a run on a real install (NT 3.51/4.0 with WINVBE, ideally with two processors) |
+| 9B | Camera | Better zooming, first person, shift lock | **Built.** Eased zoom from 0.5 to 128 studs (wheel, I/O) with the place's limits, first person below 2 studs, shift lock (Shift), walls pulling the camera in, 80-degree pitch; CameraMode, zoom limits, mouse-lock and occlusion settings from StarterPlayer and Player, MouseBehavior, Scriptable and Fixed cameras. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 9 | Loopback networking | Single-player runs entirely through replication | |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
@@ -608,7 +609,29 @@ tests/          host unit tests (make test)
   thread); 70 against 106 fps. Natively the same frames take 5.2, 3.3 and
   2.6 ms with 1, 2 and 4 threads.
 
+## Milestone 9B notes
+
+- **The camera** lives in `app/app_play.c` (`play_view_*`), shared by the
+  game and the editor's play test. `play_view_input` handles zoom, shift
+  lock, the mouse and movement. `play_view_update` (after the game's step)
+  eases the zoom and the shoulder offset, works out the camera with the
+  wall test (`ub_phys_raycast` from the head, ignoring the character's
+  body; the rig's parts are not in physics) and the fade, and tells
+  `ub_game.cam` what it did.
+- **The rules** (`ub_cam_state` in `game/ub_game.h`) come from StarterPlayer
+  when a game starts. Scripts change them through the Player
+  (`camera_player_get/set` in `script/ub_sapi_gui.c`), UserInputService
+  and the Camera, whose state used to live in the script layer only.
+- **The locked mouse** is the platform's mouse-look capture (hidden,
+  clipped, reporting motion), on whenever the camera wants it. The GUI and
+  scripts are given the middle of the screen as the mouse position.
+
 ## Open items
+
+- Milestone 9B on a real install: zoom into first person and out, try
+  shift lock (Shift) while walking and jumping, stand with your back to a
+  wall, and turn the camera on NT 3.51 (no wheel: I and O). Send
+  `uniblox.log`.
 
 - Milestone 9A on a real install: on NT 3.51 or 4.0 with WINVBE, start
   with `renderer=auto` (or `fast`) and press F5, then set

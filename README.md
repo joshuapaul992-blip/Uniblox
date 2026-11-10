@@ -418,6 +418,44 @@ is built from GUI objects under the game's CoreGui, so it is drawn the
 same way in every renderer, and works with scripts off too. The F3 text
 (place, physics, scripts) is now off at the start and sits under the chat.
 
+## The camera
+
+The player's camera works as Roblox's did in 2021:
+
+- **Zoom** with the mouse wheel, or I and O, from 0.5 to 128 studs (a place
+  can set other limits in StarterPlayer). It eases to where you point it
+  and starts 12.5 studs away.
+- **First person:** zoom in closer than 2 studs and the camera goes to the
+  eyes. The mouse is then locked to the middle of the screen and turns the
+  camera without a button, and the character faces where you look. Your
+  body isn't drawn (it fades as the camera comes close); tools you hold
+  are. Zoom out once and you're 2.5 studs behind again.
+- **Shift lock:** Shift turns it on and off. The mouse is locked to the
+  middle and turns the camera, the view moves over your right shoulder,
+  and the character faces the camera's way, so A and D step sideways. A
+  ring marks the middle of the screen (a dot in first person). Turn the
+  switch off in Settings > Sound and controls > *Shift lock switch*
+  (`shift_lock=0`); places can turn it off too.
+- **Walls:** when a wall comes between you and the camera, the camera
+  comes in front of it at once, then eases back out. See-through parts
+  don't count.
+- The camera looks up to 80 degrees up or down.
+- With the mouse locked, clicks, tools and ClickDetectors aim at the
+  middle of the screen.
+
+Places and scripts control it with:
+- **StarterPlayer and the Player:** `CameraMode` (`LockFirstPerson`),
+  `CameraMinZoomDistance` and `CameraMaxZoomDistance`,
+  `EnableMouseLockOption` / `DevEnableMouseLock`, and
+  `DevCameraOcclusionMode` (`Invisicam` keeps the camera out, though the
+  parts in the way are not made see-through).
+- **UserInputService:** `MouseBehavior` (`LockCenter`,
+  `LockCurrentPosition`; reading it tells whether the camera locked the
+  mouse) and `MouseIconEnabled`.
+- **The camera:** `CameraType`. Scriptable puts the camera at the
+  `CFrame` a script sets; Fixed leaves it where it is. `CameraSubject` can
+  also be a part.
+
 ## The editor
 
 `ubedit.exe` is a separate program for building places. It runs on the
@@ -595,6 +633,18 @@ fallback.
   the door's label. The door's label is also drawn by the software
   renderer over the real scene, to check it sits in front of the wall.
 
+  For milestone 9B, a camera test checks the wheel's steps, easing and
+  limits. Zooming in goes into first person (the camera at the eyes, the
+  body not drawn, the mouse locked and turning the camera without a
+  button, the character facing where it looks), and back out. A wall
+  behind the player pulls the camera in front of it (not when see-through),
+  and it eases out again. Shift lock puts the view 1.75 studs over the
+  right shoulder; the place and the player's setting can forbid it.
+  LockFirstPerson holds the camera at the eyes. A script sets the Player's
+  camera properties (with their changed signal) and moves a Scriptable
+  camera. The smoke test turns shift lock on and off, zooms into first
+  person and out (photographing both) and checks the saved zoom.
+
   For milestone 9A, a test plays the demo place with its client UI: the
   player list shows the player and the place's Doors stat, the stat goes
   up after walking through the door, and chatting gives a rich-text line,
@@ -680,7 +730,7 @@ fallback.
 | File | What it is |
 |---|---|
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
-| `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/fast/software), `render_threads` (fast renderer; 0 = one per processor), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, camera, `scripts` and `place` |
+| `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/fast/software), `render_threads` (fast renderer; 0 = one per processor), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, `shift_lock`, camera, `scripts` and `place` |
 | `places/` | Places saved with F7 in the game or from the editor (`autosave.ubx`: the editor's unsaved changes when it was closed) |
 | `content/` | Optional. Your own files for places' assets, named by asset id: pictures for GUIs (`content\<asset id>.png` or `.bmp`), meshes for MeshParts and SpecialMeshes (`content\<asset id>.mesh`, Roblox's `.mesh` versions 1 to 5) and sounds (`content\<asset id>.wav`), each for `rbxassetid://<asset id>`; paths under it for `rbxasset://` addresses |
 | `ubedit.log`, `ubedit.cfg` | The editor's log and settings (`renderer`, `quality`, `gl_shaders`, `fps_cap`, window size, `sw_height`, grid size) |
@@ -696,7 +746,8 @@ can't write the log or settings.
 | W A S D, or Up/Down arrows | Move (relative to the camera) |
 | Left/Right arrows | Turn the camera |
 | Hold right mouse button | Orbit the camera (left/right and up/down) |
-| Mouse wheel | Zoom (NT 4.0 and later, or NT 3.51 with a wheel driver) |
+| Mouse wheel, or I and O | Zoom in and out (the wheel: NT 4.0 and later, or NT 3.51 with a wheel driver); all the way in is first person |
+| Shift | Shift lock on/off |
 | Space | Jump (hold to keep jumping) |
 | Left click | Use the tool you hold, click a ClickDetector (and beep, panned and pitched by where you click) |
 | 1 to 9 | Take out the tool in that slot of the hotbar (again to put it away) |
