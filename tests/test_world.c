@@ -919,6 +919,80 @@ static void test_mesh_files(void)
     ub_world_free(&w);
 }
 
+/* XML files (8C): each model loaded from XML must give the same world as
+ * its binary twin: instances, names, classes, parts and every property. */
+static void test_rbx_xml(void)
+{
+    static const char *const names[] = { "three-unique-parts", "attributes", "tags", "unions", "three-unique-frames",
+                                         "two-imagebuttons", "three-uigradients", "font", "text-label-with-font",
+                                         "three-vector3values", "funny-numbervalue", "ball-socket-constraint",
+                                         "body-movers", "three-screengui", "imagelabel-content", "cframe-special-cases",
+                                         "weldconstraint" };
+    int files = 0, insts = 0, props = 0, bad = 0;
+    for (size_t f = 0; f < sizeof names / sizeof names[0]; ++f) {
+        char pb[128], px[128];
+        snprintf(pb, sizeof pb, "tests/data/rbx/xml/%s.rbxm", names[f]);
+        snprintf(px, sizeof px, "tests/data/rbx/xml/%s.rbxmx", names[f]);
+        u32 nb = 0, nx = 0;
+        u8 *db = load_file(pb, &nb), *dx = load_file(px, &nx);
+        if (!db || !dx) { free(db); free(dx); continue; }
+        ub_world wb, wx;
+        ub_world_init(&wb);
+        ub_world_init(&wx);
+        ub_import_stats sb, sx;
+        CHECK(ub_rbxl_detect(dx, nx));
+        bool okb = ub_rbxl_load(&wb, db, nb, &sb) == UB_LOAD_OK, okx = ub_rbxl_load(&wx, dx, nx, &sx) == UB_LOAD_OK;
+        CHECK(okb && okx);
+        files++;
+        if (okb && okx) {
+            if (wb.count != wx.count) {
+                printf("    %s: %d instances from binary, %d from XML\n", names[f], wb.count, wx.count);
+                bad++;
+            }
+            for (i32 i = 0; i < wb.count && i < wx.count; ++i) {
+                insts++;
+                const char *why = NULL;
+                if (strcmp(ub_world_str(&wb, wb.inst[i].name), ub_world_str(&wx, wx.inst[i].name))) why = "name";
+                else if (strcmp(ub_world_str(&wb, wb.inst[i].class_name), ub_world_str(&wx, wx.inst[i].class_name))) why = "class";
+                else if ((wb.inst[i].part >= 0) != (wx.inst[i].part >= 0)) why = "part";
+                else if (wb.inst[i].part >= 0) {
+                    const ub_part *a = &wb.parts[wb.inst[i].part], *b = &wx.parts[wx.inst[i].part];
+                    if (v3_length(v3_sub(a->pos, b->pos)) > 1e-3f || v3_length(v3_sub(a->size, b->size)) > 1e-3f ||
+                        a->color != b->color || a->shape != b->shape || a->material != b->material || a->flags != b->flags ||
+                        (a->mesh != 0) != (b->mesh != 0))
+                        why = "part fields";
+                }
+                for (int k = 0; !why && k < ub_world_prop_count(&wb, i); ++k) {
+                    const ub_prop *pp = ub_world_prop_at(&wb, i, k);
+                    const char *kn = ub_world_key_name(&wb, pp->key);
+                    const ub_value *o = ub_world_prop_named(&wx, i, kn);
+                    props++;
+                    if (!o || !ub_value_equal(&pp->val, o)) {
+                        bool close = o && o->type == pp->val.type && o->type == UB_PV_DOUBLE &&
+                                     (fabs(o->v.d - pp->val.v.d) < 1e-6 || (o->v.d != o->v.d && pp->val.v.d != pp->val.v.d));
+                        if (!close) {
+                            static char m[128];
+                            snprintf(m, sizeof m, "property %s", kn);
+                            why = m;
+                        }
+                    }
+                }
+                if (why) {
+                    if (bad < 8)
+                        printf("    %s: %s differs at %s\n", names[f], why, ub_world_str(&wb, wb.inst[i].name));
+                    bad++;
+                }
+            }
+        }
+        ub_world_free(&wb);
+        ub_world_free(&wx);
+        free(db);
+        free(dx);
+    }
+    printf("  XML files: %d, %d instances and %d properties the same as the binary files'\n", files, insts, props);
+    CHECK(files >= 15 && bad == 0);
+}
+
 static void test_rbx_attributes(void);
 static void test_rbx_gui(void)
 {
@@ -932,6 +1006,7 @@ static void test_rbx_gui(void)
     test_rbx_attributes();
     test_rbx_unions();
     test_mesh_files();
+    test_rbx_xml();
 }
 
 static i32 load_model_first(ub_world *w, const char *path, const char *cls)

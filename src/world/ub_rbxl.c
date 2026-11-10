@@ -6,6 +6,7 @@
 #include "platform/platform.h"
 #include "render/ub_mesh.h"
 #include "world/ub_looks.h"
+#include "world/ub_rbxlx.h"
 #include "render/ub_texture.h"
 #include "crt/ub_crt.h"
 
@@ -515,10 +516,17 @@ static ub_load_result data_prop(importer *im, cls *c, const u8 *pname, u32 pl, u
         for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_BOOL); p->a[0] = r->p[r->pos + i] != 0; }
         r->pos += n;
         break;
-    case 0x03: /* Int32 */
+    case 0x03: { /* Int32 (XML files write some BrickColors as ints) */
         if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
-        for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_INT); p->a[0] = (u32)untransform(tmp[i]); }
+        char pn[64];
+        u32 cpl = pl < 63 ? pl : 63;
+        memcpy(pn, pname, cpl);
+        pn[cpl] = 0;
+        const ub_cdb_prop *cp = ub_cdb_find_prop(ub_cdb_class(c->name), pn);
+        u8 t = cp && cp->type == UB_PV_BRICKCOLOR ? UB_PV_BRICKCOLOR : UB_PV_INT;
+        for (u32 i = 0; i < n; ++i) { NEWP(i, t); p->a[0] = (u32)untransform(tmp[i]); }
         break;
+    }
     case 0x04: /* Float32 */
         if (!rd_interleaved32(r, n, tmp)) { res = UB_LOAD_CORRUPT; break; }
         for (u32 i = 0; i < n; ++i) { NEWP(i, UB_PV_FLOAT); p->a[0] = f2u(roblox_float(tmp[i])); }
@@ -1470,6 +1478,7 @@ static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st
 
 bool ub_rbxl_detect(const u8 *data, u32 size)
 {
+    if (ub_rbxlx_detect(data, size)) return true; /* XML too (8C) */
     static const u8 sig[14] = { '<', 'r', 'o', 'b', 'l', 'o', 'x', '!', 0x89, 0xFF, 0x0D, 0x0A, 0x1A, 0x0A };
     return size >= 32 && memcmp(data, sig, 14) == 0;
 }
@@ -1477,6 +1486,15 @@ bool ub_rbxl_detect(const u8 *data, u32 size)
 ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_stats *st)
 {
     memset(st, 0, sizeof *st);
+    if (ub_rbxlx_detect(data, size)) { /* XML: read as the binary it says the same as */
+        u8 *bin;
+        u32 bn;
+        if (!ub_rbxlx_to_binary(data, size, &bin, &bn)) return UB_LOAD_CORRUPT;
+        ub_load_result r = ub_rbxl_load(w, bin, bn, st);
+        plat_free(bin);
+        if (r == UB_LOAD_OK) ub_fmt(st->compression, sizeof st->compression, "xml");
+        return r;
+    }
     if (!ub_rbxl_detect(data, size)) return UB_LOAD_BAD_FORMAT;
     if (data[14] != 0 || data[15] != 0) return UB_LOAD_UNSUPPORTED; /* format version */
     u32 class_count = le32(data + 16), inst_count = le32(data + 20);
