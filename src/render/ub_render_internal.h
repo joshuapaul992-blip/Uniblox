@@ -21,5 +21,8 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
 void gl_begin_2d(int width, int height);
 void gl_text(int x, int y, const char *utf8, u32 color);
 int gl_line_height(void);
+void gl_set_text_px(int px);
+void gl_rect(int x, int y, int w, int h, u32 color);
+void gl_clip(int x, int y, int w, int h);
 
 #endif

@@ -15,6 +15,14 @@
 #define UB_RAM_MIN_MB 384u
 #define UB_RAM_REC_MB 512u
 
+/* Who is running: the window title and log file names. */
+typedef struct {
+    const char *title;          /* window title and message boxes */
+    const char *log_path;       /* e.g. "uniblox.log" */
+    const char *old_log_path;   /* the previous run's log */
+} ub_app_info;
+const ub_app_info *app_info(void);
+
 /* Fill in display settings (renderer, window size, fps cap...). */
 void app_preinit(ub_display_prefs *prefs);
 bool app_init(const ub_system_info *sys, const ub_frame *frame);

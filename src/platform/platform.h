@@ -41,7 +41,7 @@ typedef struct {
     u32 palette_serial;     /* app increments this when palette contents change */
 } ub_framebuffer;
 
-#define UB_TEXT_QUEUE_MAX 24
+#define UB_TEXT_QUEUE_MAX 64
 #define UB_TEXT_ITEM_LEN 120
 
 /* Text for the software backend, drawn by the OS at window resolution after
@@ -49,7 +49,7 @@ typedef struct {
  * text itself from a font atlas.) */
 typedef struct {
     int x, y;               /* window pixels, top-left of the line */
-    u32 color;              /* 0x00RRGGBB */
+    u32 color;              /* 0x00RRGGBB; bit 24 set = no drop shadow */
     char text[UB_TEXT_ITEM_LEN];
 } ub_text_item;
 
@@ -125,19 +125,28 @@ enum {
     UB_KEY_ALT       = 0x12,
     UB_KEY_ESCAPE    = 0x1B,
     UB_KEY_SPACE     = 0x20,
+    UB_KEY_PAGEUP    = 0x21,
+    UB_KEY_PAGEDOWN  = 0x22,
+    UB_KEY_END       = 0x23,
+    UB_KEY_HOME      = 0x24,
     UB_KEY_LEFT      = 0x25,
     UB_KEY_UP        = 0x26,
     UB_KEY_RIGHT     = 0x27,
     UB_KEY_DOWN      = 0x28,
+    UB_KEY_INSERT    = 0x2D,
+    UB_KEY_DELETE    = 0x2E,
     UB_KEY_F1        = 0x70,
     UB_KEY_F2        = 0x71,
     UB_KEY_F3        = 0x72,
+    UB_KEY_F4        = 0x73,
     UB_KEY_F5        = 0x74,
     UB_KEY_F6        = 0x75,
     UB_KEY_F7        = 0x76,
     UB_KEY_F8        = 0x77,
     UB_KEY_F9        = 0x78,
+    UB_KEY_F10       = 0x79,
     UB_KEY_F11       = 0x7A,
+    UB_KEY_F12       = 0x7B,
 };
 
 enum { UB_MOUSE_LEFT, UB_MOUSE_RIGHT, UB_MOUSE_MIDDLE, UB_MOUSE_BUTTONS };
@@ -161,6 +170,7 @@ typedef struct {
      * Keyboard auto-repeat does not set key_pressed. */
     bool key_pressed[UB_KEY_COUNT];
     bool key_released[UB_KEY_COUNT];
+    bool key_repeat[UB_KEY_COUNT];   /* pressed, or repeated by holding it (for text editing) */
     bool mouse_pressed[UB_MOUSE_BUTTONS];
     bool mouse_released[UB_MOUSE_BUTTONS];
     int mouse_dx, mouse_dy;   /* relative motion in screen pixels, only while captured */
@@ -252,6 +262,10 @@ bool plat_file_rename(const char *old_path, const char *new_path);
 bool plat_file_exists(const char *path);
 /* Create a folder (game path); true if it exists afterwards. */
 bool plat_make_dir(const char *path);
+/* Calls fn for each entry of a folder (game path; "" = the game's folder),
+ * names in UTF-8, without "." and "..". False if the folder can't be read. */
+typedef void (*ub_list_fn)(void *user, const char *name, bool is_dir, u32 size);
+bool plat_list_files(const char *dir, ub_list_fn fn, void *user);
 
 /* Read a file the *user* chose (command line, later a file dialog): any
  * absolute or relative path, UTF-8. Never use this for paths that come

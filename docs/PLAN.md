@@ -59,7 +59,8 @@ src/physics/    convex hull + sphere collision, soft-step solver, sleeping islan
 src/game/       a running place: world + physics + character + scripts; the demo place
 src/script/     sandboxed Lua 5.1 + Roblox-style API, on its own small C library
 src/net/        loopback + UDP transports, reliability, replication
-src/ui/         immediate-mode GUI (HUD and editor)
+src/ui/         immediate-mode GUI (the editor's panels, menus, dialogs, code editor)
+src/editor/     the editor's model: selection, changes, undo, behaviours
 src/app/        client / server / editor front ends
 tools/          build and verification tools (PE checker, Wine smoke test)
 tests/          host unit tests (make test)
@@ -76,7 +77,7 @@ tests/          host unit tests (make test)
 | 3 | World model + place files | Save/load round-trips byte for byte | **Built.** `.ubx` round-trips byte for byte; real Roblox `.rbxl`/`.rbxm` files import. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | **Built.** Towers of 20 parts come to rest and sleep; the character walks, jumps, steps up, collides and pushes. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | **Built.** The door opens when walked into (unit test and Wine smoke test), and 28 hostile scripts are stopped or fail while the game carries on. Needs a run on a real install |
-| 6 | In-game editor | Build an obstacle course without writing code | |
+| 6 | In-game editor | Build an obstacle course without writing code | **Built** as a separate program, `ubedit.exe`. A course built with editor actions only is played to the finish by the character (unit test); the real editor is driven through its UI in tests and under Wine. Needs a run on a real install |
 | 7 | Renderer polish + settings menu | In-game settings UI; more effects | Hardware OpenGL path moved forward into milestone 2.5 |
 | 8 | Loopback networking | Single-player runs entirely through replication | |
 | 9 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
@@ -393,7 +394,72 @@ tests/          host unit tests (make test)
     after pushing. The Wine smoke test caught this through the demo's lava
     script.
 
+## Milestone 6 notes
+
+- **A separate program:** `ubedit.exe` shares everything with the game
+  (platform layer, renderers, world, physics, scripts) except its app
+  file. `app_info()` gives each program its own window title and log.
+  `app_play.c` is the play view both use: the camera, keys to movement,
+  the character's figure, and drawing a running game's parts.
+- **UI toolkit** (`src/ui/ub_ui.c`), immediate mode. Every widget call
+  draws itself and returns what the user did. Between frames it remembers
+  only:
+  - which widget is pressed or edited
+  - scroll positions
+  - open menus and pop-ups
+
+  Input is layered (base, dialog, pop-up): the mouse belongs to the top
+  layer open last frame. So clicking outside a menu only closes it, and a
+  dialog blocks what is beneath it. Pop-up choices come back to their
+  widget the next frame. Widgets record their rectangles by label, so
+  tests click things by name.
+- **Renderer additions:** 2D rectangles and clipping in both renderers
+  (glScissor in OpenGL). Text can be drawn into the software frame from
+  the same font atlas OpenGL uses, so panels and menus overlap correctly;
+  the OS-drawn text queue always lands on top. There's also a fixed font
+  size, text widths from the atlas (the same Tahoma both renderers use),
+  and the screen-ray and projection maths shared by picking and the
+  handles.
+- **Editor model** (`src/editor/ub_editor.c`): OS-independent, so the
+  tests make the same calls as the menus.
+  - *Undo:* each change saves the place as a `.ubx` snapshot first, with
+    the selection remapped to its position in the file
+    (`ub_world_save_remap`), so undo restores the selection too. Repeats
+    of the same change within a second (dragging a slider) are one step.
+    The history holds 64 steps or 48 MB.
+  - *Deleting* reclaims the slots at once (the editor owns every index).
+  - *The clipboard* is a separate world, so copies survive undo and
+    loading another place.
+  - *Selection* lookups use a per-instance mark, so Select All on 20,000
+    parts isn't quadratic. The app also caches what is inside the
+    selection, once per change.
+- **Behaviours** are ordinary scripts written for the Roblox API, kept in
+  `ub_editor.c`. Two API pieces were added for them:
+  `Player.RespawnLocation`, and setting the `HumanoidRootPart`'s velocity
+  to launch the character.
+- **Roblox axes in the editor:** the conversion (`ub_part_get_rbx` and
+  friends, and orientation in degrees) moved from the script module to
+  the world, so the Properties panel and scripts agree.
+- **Bugs found on the way:**
+  - Mesh lookups (`ub_mesh_get`) returned empty meshes until a renderer
+    started, so ray tests hit everything at distance 0. Meshes now set
+    themselves up on first use.
+  - On a slow frame Ctrl can be let go before the frame sees S. Shortcuts
+    now count a modifier released during that frame. The Wine OpenGL run
+    caught this.
+  - `ui_wants_mouse` looked two frames back, which swallowed the first
+    click in the 3D view after using a panel.
+
 ## Open items
+
+- Milestone 6 on a real install: build a short course in `ubedit.exe`
+  (blocks, a kill brick, a checkpoint, a finish line), save it, and play it
+  in `uniblox.exe`. Then send `ubedit.log`.
+- Editor, not done yet: several items selected show shared properties
+  only for colour, material and so on; there's no rotation handle (R and T
+  turn by 90 degrees, or type an orientation); no terrain; no reparenting
+  by dragging in the Explorer (cut, select a model, paste); and the script
+  editor has no text selection or clipboard.
 
 - Milestone 5 on a real install: walk into the demo's door, step on the
   green button, and send the `script:` lines from `uniblox.log`. Then try

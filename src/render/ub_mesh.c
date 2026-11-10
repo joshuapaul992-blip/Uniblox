@@ -136,8 +136,11 @@ static void build_ball(ub_mesh *m, int stacks, int slices)
     }
 }
 
+static bool g_meshes_ready;
+
 void ub_meshes_init(void)
 {
+    g_meshes_ready = true;
     for (int d = 0; d < UB_DETAIL_COUNT; ++d) {
         for (int i = 0; i < UB_SHAPE_COUNT; ++i) {
             g_meshes[d][i].vert_count = 0;
@@ -153,6 +156,7 @@ void ub_meshes_init(void)
 
 const ub_mesh *ub_mesh_get(ub_shape s, ub_detail d)
 {
+    if (!g_meshes_ready) ub_meshes_init(); /* first use (queries can come before any renderer) */
     return &g_meshes[(unsigned)d < UB_DETAIL_COUNT ? d : UB_DETAIL_LOW]
                     [(unsigned)s < UB_SHAPE_COUNT ? s : UB_SHAPE_BOX];
 }

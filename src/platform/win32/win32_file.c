@@ -267,6 +267,34 @@ bool plat_file_exists(const char *path)
     return attr != 0xFFFFFFFFu && !(attr & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+bool plat_list_files(const char *dir, ub_list_fn fn, void *user)
+{
+    WCHAR full[MAX_PATH];
+    /* "*" is not a safe-path character: check the folder, then add it */
+    if (dir[0] && !win32_full_path(dir, full, MAX_PATH - 3)) return false;
+    if (!dir[0]) {
+        int n = 0;
+        while (win32_base_dir()[n] && n < MAX_PATH - 3) { full[n] = win32_base_dir()[n]; ++n; }
+        full[n] = 0;
+    }
+    int len = 0;
+    while (full[len]) ++len;
+    if (len && full[len - 1] != L'\\') full[len++] = L'\\';
+    full[len++] = L'*';
+    full[len] = 0;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(full, &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    do {
+        char name[MAX_PATH * 3];
+        ub_utf16_to_utf8((const u16 *)fd.cFileName, name, sizeof name);
+        if ((name[0] == '.' && name[1] == 0) || (name[0] == '.' && name[1] == '.' && name[2] == 0)) continue;
+        fn(user, name, (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0, fd.nFileSizeLow);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    return true;
+}
+
 bool plat_make_dir(const char *path)
 {
     WCHAR full[MAX_PATH];

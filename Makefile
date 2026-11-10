@@ -61,18 +61,39 @@ CORE_SRCS := \
 	src/render/ub_render_gl.c \
 	$(SCRIPT_SRCS)
 
-SRCS := \
-	src/crt/ub_crt.c \
-	$(CORE_SRCS) \
-	src/app/app_demo.c \
+# Tools: the UI toolkit and the editor (ubedit.exe).
+TOOL_SRCS := \
+	src/ui/ub_ui.c \
+	src/editor/ub_editor.c
+
+PLATFORM_SRCS := \
 	src/platform/win32/win32_main.c \
 	src/platform/win32/win32_file.c \
 	src/platform/win32/win32_audio.c \
 	src/platform/win32/win32_display.c \
 	src/platform/win32/win32_gl.c
 
+# uniblox.exe: the game
+SRCS := \
+	src/crt/ub_crt.c \
+	$(CORE_SRCS) \
+	src/app/app_demo.c \
+	src/app/app_play.c \
+	$(PLATFORM_SRCS)
+
+# ubedit.exe: the editor
+EDITOR_EXE := $(OUT)/ubedit.exe
+EDITOR_SRCS := \
+	src/crt/ub_crt.c \
+	$(CORE_SRCS) \
+	$(TOOL_SRCS) \
+	src/app/app_editor.c \
+	src/app/app_play.c \
+	$(PLATFORM_SRCS)
+
 OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(SRCS))
-DEPS := $(OBJS:.o=.d)
+EDITOR_OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(EDITOR_SRCS))
+DEPS := $(sort $(OBJS:.o=.d) $(EDITOR_OBJS:.o=.d))
 
 # Windows only guarantees 4-byte stack alignment at entry points and
 # callbacks; tell the compiler so. GCC also must not turn the loops in
@@ -114,18 +135,23 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
-	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/stub_platform.c $(CORE_SRCS)
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
+	src/app/app_editor.c src/app/app_play.c
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
 TEST_OBJS  := $(patsubst %.c,build/host/obj/%.o,$(TEST_SRCS))
 
 .PHONY: all check test clean
 
-all: $(EXE)
+all: $(EXE) $(EDITOR_EXE)
 
 $(EXE): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(OBJS) $(LIBS)
+
+$(EDITOR_EXE): $(EDITOR_OBJS)
+	@mkdir -p $(dir $@)
+	$(CC) $(LDFLAGS) -o $@ $(EDITOR_OBJS) $(LIBS)
 
 $(OUT)/obj/%.o: src/%.c
 	@mkdir -p $(dir $@)
@@ -140,11 +166,13 @@ $(OUT)/obj/script/lua/%.o: CFLAGS += $(LUA_CFLAGS)
 OBJDUMP ?= $(CROSS)objdump
 P6_PATTERN := [[:space:]](cmov[a-z]*|fcmov[a-z]*|f(u)?comip?|sysenter|sysexit)[[:space:]]|%(x|y)?mm[0-9]
 
-check: $(EXE)
-	$(PYTHON) tools/checkpe.py --allow tools/nt351_imports.txt $(EXE)
-	@if $(OBJDUMP) -d $(EXE) | grep -E '$(P6_PATTERN)' | head -5 | grep .; then \
-		echo "  FAIL: instructions newer than the Pentium (see above)"; exit 1; \
-	else echo "  OK: only Pentium (P5) instructions"; fi
+check: $(EXE) $(EDITOR_EXE)
+	@for exe in $(EXE) $(EDITOR_EXE); do \
+		$(PYTHON) tools/checkpe.py --allow tools/nt351_imports.txt $$exe || exit 1; \
+		if $(OBJDUMP) -d $$exe | grep -E '$(P6_PATTERN)' | head -5 | grep .; then \
+			echo "  FAIL: instructions newer than the Pentium (see above)"; exit 1; \
+		else echo "  OK: only Pentium (P5) instructions"; fi; \
+	done
 
 test: $(TEST_BIN)
 	./$(TEST_BIN)

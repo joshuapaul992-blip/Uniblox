@@ -967,6 +967,7 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
      * back everything the 3D passes rely on. (Depth writes only happen
      * while the depth test is enabled.) */
     ubgl.glDisable(GL_BLEND);
+    ubgl.glDisable(GL_SCISSOR_TEST);
     ubgl.glEnable(GL_DEPTH_TEST);
     ubgl.glDepthMask(GL_TRUE);
     ubgl.glDepthFunc(GL_LEQUAL);
@@ -1103,10 +1104,45 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
 
 /* ------------------------------------------------------------------ 2D */
 
+static int g_text_px;
+
+void gl_set_text_px(int px) { g_text_px = px; }
+
 int gl_line_height(void)
 {
+    if (g_text_px > 0) return g_text_px + 4;
     int h = G.height > 0 ? G.height : 480;
     return UB_CLAMP(h / 34, 15, 40);
+}
+
+void gl_rect(int x, int y, int w, int h, u32 color)
+{
+    if (!G.ready || w <= 0 || h <= 0) return;
+    f32 c[3];
+    color3(color, c);
+    f32 sx = 2.0f / (f32)G.width, sy = 2.0f / (f32)G.height;
+    f32 x0 = (f32)x * sx - 1.0f, x1 = (f32)(x + w) * sx - 1.0f;
+    f32 y0 = 1.0f - (f32)y * sy, y1 = 1.0f - (f32)(y + h) * sy;
+    ubgl.glDisable(GL_TEXTURE_2D);
+    ubgl.glColor4f(c[0], c[1], c[2], 1);
+    ubgl.glBegin(GL_QUADS);
+    ubgl.glVertex2f(x0, y0);
+    ubgl.glVertex2f(x1, y0);
+    ubgl.glVertex2f(x1, y1);
+    ubgl.glVertex2f(x0, y1);
+    ubgl.glEnd();
+    ubgl.glEnable(GL_TEXTURE_2D);
+}
+
+void gl_clip(int x, int y, int w, int h)
+{
+    if (!G.ready) return;
+    if (w <= 0 || h <= 0) {
+        ubgl.glDisable(GL_SCISSOR_TEST);
+        return;
+    }
+    ubgl.glScissor(x, G.height - (y + h), w, h); /* GL counts rows from the bottom */
+    ubgl.glEnable(GL_SCISSOR_TEST);
 }
 
 void gl_begin_2d(int width, int height)
@@ -1163,6 +1199,6 @@ void gl_text(int x, int y, const char *utf8, u32 color)
     ubgl.glBindTexture(GL_TEXTURE_2D, G.font_tex);
     f32 c[3];
     color3(color, c);
-    draw_string((f32)x + 1, (f32)y + 1, utf8, 0, 0, 0);  /* shadow */
+    if (!(color & UB_TEXT_FLAT)) draw_string((f32)x + 1, (f32)y + 1, utf8, 0, 0, 0);  /* shadow */
     draw_string((f32)x, (f32)y, utf8, c[0], c[1], c[2]);
 }

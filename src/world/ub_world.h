@@ -192,8 +192,32 @@ const char *ub_load_result_name(ub_load_result r);
 /* Replace non-finite or absurd numbers in a part loaded from a file. */
 void ub_part_sanitize(ub_part *p);
 
+/* ------------------------------------------------- Roblox's axes
+ * Scripts and the editor's numbers use Roblox's coordinates (right-handed,
+ * +Z towards the viewer); the world uses Uniblox's (z flipped). Rotations
+ * convert as S R S with S = diag(1, 1, -1); cylinders and wedges also turn,
+ * as on import (world/ub_rbxl.c), so get(set(x)) == x. */
+static inline vec3 ub_rbx_vec(vec3 v) { return v3(v.x, v.y, -v.z); } /* either way */
+static inline mat3 ub_rbx_rot(const mat3 *m)                          /* either way */
+{
+    mat3 r;
+    r.x = v3(m->x.x, m->x.y, -m->x.z);
+    r.y = v3(m->y.x, m->y.y, -m->y.z);
+    r.z = v3(-m->z.x, -m->z.y, m->z.z);
+    return r;
+}
+void ub_part_get_rbx(const ub_part *p, vec3 *pos, mat3 *rot);   /* CFrame */
+void ub_part_set_rbx(ub_part *p, vec3 pos, const mat3 *rot);
+vec3 ub_part_get_rbx_size(const ub_part *p);
+void ub_part_set_rbx_size(ub_part *p, vec3 size);               /* clamped; balls stay round */
+vec3 ub_rbx_orientation(const mat3 *rbx_rot);                    /* degrees, Y then X then Z */
+mat3 ub_rbx_from_orientation(vec3 degrees);
+
 /* Serialise to a plat_alloc'd buffer (free with plat_free). */
 bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size);
+/* Where each instance ends up in a saved file (and so in the world loaded
+ * from it): remap[i] for i < count, -1 if not saved. */
+bool ub_world_save_remap(const ub_world *w, i32 *remap);
 /* Parse into `w`, which must be freshly initialised. Untrusted input. */
 ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size);
 

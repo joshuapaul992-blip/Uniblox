@@ -36,7 +36,9 @@ typedef struct ub_game {
     f32 accum;                  /* simulated time owed */
     f32 time;                   /* seconds since the game started (scripts' time()) */
     f32 alpha;                  /* blend between the last two steps, for drawing */
-    vec3 spawn;
+    vec3 spawn;                 /* where the player comes back */
+    vec3 spawn_default;         /* the place's own spawn point */
+    i32 respawn_location;       /* Player.RespawnLocation (a part instance), -1 = none */
     f32 kill_height;
 
     /* the player and their character (instance indices) */
@@ -93,5 +95,8 @@ void ub_game_teleport(ub_game *g, vec3 feet);
 void ub_game_set_walk_speed(ub_game *g, f32 speed);
 void ub_game_set_jump_height(ub_game *g, f32 height);
 vec3 ub_game_root_position(const ub_game *g); /* HumanoidRootPart's centre */
+void ub_game_set_velocity(ub_game *g, vec3 v);
+/* Player.RespawnLocation: come back on top of this part (-1: the place's spawn). */
+void ub_game_set_respawn_location(ub_game *g, i32 part_inst);
 
 #endif

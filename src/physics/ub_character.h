@@ -47,5 +47,7 @@ void ub_char_after_step(ub_character *c, ub_physics *ph);
 /* Where the feet are; alpha blends between the last two steps. */
 vec3 ub_char_feet(const ub_character *c, const ub_physics *ph, f32 alpha);
 vec3 ub_char_velocity(const ub_character *c, const ub_physics *ph);
+/* Launch it (bounce pads): upwards takes it off the ground. */
+void ub_char_set_velocity(ub_character *c, ub_physics *ph, vec3 v);
 
 #endif

@@ -346,8 +346,10 @@ static void draw_text_queue(HDC dc, const ub_frame *frame)
         const ub_text_item *t = &frame->text[i];
         u16 wide[UB_TEXT_ITEM_LEN];
         int n = ub_utf8_to_utf16(t->text, wide, UB_TEXT_ITEM_LEN);
-        SetTextColor(dc, RGB(0, 0, 0));
-        TextOutW(dc, t->x + 1, t->y + 1, (LPCWSTR)wide, n);   /* drop shadow */
+        if (!(t->color & 0x01000000u)) { /* UB_TEXT_FLAT: no shadow */
+            SetTextColor(dc, RGB(0, 0, 0));
+            TextOutW(dc, t->x + 1, t->y + 1, (LPCWSTR)wide, n);   /* drop shadow */
+        }
         SetTextColor(dc, RGB((t->color >> 16) & 255, (t->color >> 8) & 255, t->color & 255));
         TextOutW(dc, t->x, t->y, (LPCWSTR)wide, n);
     }

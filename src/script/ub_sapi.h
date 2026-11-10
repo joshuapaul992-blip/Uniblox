@@ -41,19 +41,12 @@ extern char REG_INSTANCES, REG_SIGNALS, REG_WAITERS, REG_PROPS, REG_SCRIPTS, REG
  * S = diag(1, 1, -1). Cylinders and wedges are also turned, as on import
  * (world/ub_rbxl.c), so get(set(x)) == x. */
 
-static inline vec3 rbx_vec(vec3 v) { return v3(v.x, v.y, -v.z); } /* either way */
-static inline mat3 rbx_rot(const mat3 *m)                           /* either way */
-{
-    mat3 r;
-    r.x = v3(m->x.x, m->x.y, -m->x.z);
-    r.y = v3(m->y.x, m->y.y, -m->y.z);
-    r.z = v3(-m->z.x, -m->z.y, m->z.z);
-    return r;
-}
-void part_get_cframe(const ub_part *p, vec3 *pos, mat3 *rot);       /* Roblox space */
-void part_set_cframe(ub_part *p, vec3 pos, const mat3 *rot);
-vec3 part_get_size(const ub_part *p);
-void part_set_size(ub_part *p, vec3 size);
+#define rbx_vec ub_rbx_vec
+#define rbx_rot ub_rbx_rot
+#define part_get_cframe ub_part_get_rbx
+#define part_set_cframe ub_part_set_rbx
+#define part_get_size ub_part_get_rbx_size
+#define part_set_size ub_part_set_rbx_size
 
 /* ------------------------------------------------------- types (Lua) */
 

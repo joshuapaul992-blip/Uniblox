@@ -86,3 +86,70 @@ int ub_fmt(char *buf, int size, const char *fmt, ...)
     va_end(ap);
     return n;
 }
+
+int ub_fmt_num(char *buf, int size, f32 v, int decimals)
+{
+    if (decimals < 0) decimals = 0;
+    if (decimals > 6) decimals = 6;
+    if (!(v == v)) return ub_fmt(buf, size, "nan");
+    u32 scale = 1;
+    for (int i = 0; i < decimals; ++i) scale *= 10;
+    f64 a = v < 0 ? -(f64)v : (f64)v;
+    if (a > 2.0e9) return ub_fmt(buf, size, "%s%u", v < 0 ? "-" : "", (u32)2000000000u);
+    u64 fixed = (u64)(a * (f64)scale + 0.5);
+    u32 whole = (u32)(fixed / scale), frac = (u32)(fixed % scale);
+    int places = decimals;
+    while (places > 0 && frac % 10 == 0) {
+        frac /= 10;
+        --places;
+    }
+    bool neg = v < 0 && fixed != 0;
+    if (!places) return ub_fmt(buf, size, "%s%u", neg ? "-" : "", whole);
+    char f[8];
+    for (int i = places - 1; i >= 0; --i) {
+        f[i] = (char)('0' + frac % 10);
+        frac /= 10;
+    }
+    f[places] = 0;
+    return ub_fmt(buf, size, "%s%u.%s", neg ? "-" : "", whole, f);
+}
+
+bool ub_parse_num(const char *s, f32 *out)
+{
+    while (*s == ' ' || *s == '\t') ++s;
+    bool neg = false;
+    if (*s == '-' || *s == '+') neg = *s++ == '-';
+    f64 v = 0;
+    int digits = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s++ - '0');
+        ++digits;
+    }
+    if (*s == '.') {
+        ++s;
+        f64 f = 0.1;
+        while (*s >= '0' && *s <= '9') {
+            v += (*s++ - '0') * f;
+            f *= 0.1;
+            ++digits;
+        }
+    }
+    if (!digits) return false;
+    if (*s == 'e' || *s == 'E') {
+        ++s;
+        bool eneg = false;
+        if (*s == '-' || *s == '+') eneg = *s++ == '-';
+        int e = 0, ed = 0;
+        while (*s >= '0' && *s <= '9' && e < 1000) {
+            e = e * 10 + (*s++ - '0');
+            ++ed;
+        }
+        if (!ed) return false;
+        for (int i = 0; i < e && i < 40; ++i) v = eneg ? v / 10 : v * 10;
+    }
+    while (*s == ' ' || *s == '\t') ++s;
+    if (*s) return false;
+    if (v > 3.0e38) v = 3.0e38;
+    *out = (f32)(neg ? -v : v);
+    return true;
+}
