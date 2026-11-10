@@ -6,8 +6,8 @@ A from-scratch sandbox building game (multiplayer later) for **Windows NT
 cross-compiled from Linux. See [docs/PLAN.md](docs/PLAN.md) for the full
 plan and milestones.
 
-**Requirements:** 384 MB RAM minimum, 512 MB+ recommended. The CPU only
-needs to be an x86 Pentium.
+**Requirements:** Windows NT 3.51 or newer, 384 MB RAM minimum (512 MB+
+recommended). The CPU only needs to be an x86 Pentium.
 
 ## Two renderers
 
