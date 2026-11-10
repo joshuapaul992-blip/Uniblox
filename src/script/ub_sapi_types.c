@@ -1221,6 +1221,14 @@ const char *ub_typeof(lua_State *L, int i)
     int t = lua_type(L, i);
     if (t != LUA_TUSERDATA && t != LUA_TTABLE) return lua_typename(L, t);
     if (!lua_getmetatable(L, i)) return lua_typename(L, t);
+    lua_pushliteral(L, "__type"); /* types that name themselves (Random, DateTime, ...) */
+    lua_rawget(L, -2);
+    if (lua_type(L, -1) == LUA_TSTRING) {
+        const char *name = lua_tostring(L, -1); /* kept alive by the metatable */
+        lua_pop(L, 2);
+        return name;
+    }
+    lua_pop(L, 1);
     for (int k = 0; names[k]; ++k) {
         luaL_getmetatable(L, names[k]);
         bool same = lua_rawequal(L, -1, -2);

@@ -198,6 +198,30 @@ static void test_api(void)
     ub_game_stop(&g_g);
 }
 
+/* Luau's library additions (bit32, utf8, DateTime, JSON...). */
+static void test_luaulib(void)
+{
+    char *src = read_text("tests/data/scripts/luaulib.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Lib", src);
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    for (int i = 0; i < 300 && find_result(&g_g, "lib done") < 0; ++i)
+        ub_game_update(&g_g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    bool ok = find_result(&g_g, "lib ok") >= 0;
+    CHECK(find_result(&g_g, "lib done") >= 0);
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* ------------------------------------------------------ hostile code */
 
 static const char k_survivor[] =
@@ -585,6 +609,7 @@ void test_game(void)
 {
     test_door();
     test_api();
+    test_luaulib();
     test_gui_api();
     test_hostile();
     test_reuse();

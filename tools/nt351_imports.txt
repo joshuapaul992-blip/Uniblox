@@ -37,6 +37,8 @@ GetFileAttributesW
 MoveFileExW
 GetModuleFileNameW
 GetLocalTime
+# milestone 8B: os.time, DateTime (NT 3.1 and later)
+GetSystemTime
 # milestone 1: threads and synchronisation
 CreateThread
 SetThreadPriority

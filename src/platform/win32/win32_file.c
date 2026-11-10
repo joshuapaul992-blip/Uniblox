@@ -83,6 +83,20 @@ void plat_local_time(ub_datetime *out)
     out->hour = st.wHour;
     out->minute = st.wMinute;
     out->second = st.wSecond;
+    out->millisecond = st.wMilliseconds;
+}
+
+void plat_utc_time(ub_datetime *out)
+{
+    SYSTEMTIME st;
+    GetSystemTime(&st);
+    out->year = st.wYear;
+    out->month = st.wMonth;
+    out->day = st.wDay;
+    out->hour = st.wHour;
+    out->minute = st.wMinute;
+    out->second = st.wSecond;
+    out->millisecond = st.wMilliseconds;
 }
 
 void plat_debug_output(const char *text)

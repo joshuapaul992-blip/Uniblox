@@ -9,6 +9,7 @@ int memcmp(const void *a, const void *b, size_t n);
 void *ubc_memchr(const void *p, int c, size_t n);
 size_t ubc_strlen(const char *s);
 int ubc_strcmp(const char *a, const char *b);
+int ubc_strncmp(const char *a, const char *b, size_t n);
 int ubc_strcoll(const char *a, const char *b);
 char *ubc_strchr(const char *s, int c);
 char *ubc_strpbrk(const char *s, const char *set);
@@ -23,6 +24,7 @@ char *ubc_strerror(int e);
 #define memchr ubc_memchr
 #define strlen ubc_strlen
 #define strcmp ubc_strcmp
+#define strncmp ubc_strncmp
 #define strcoll ubc_strcoll
 #define strchr ubc_strchr
 #define strpbrk ubc_strpbrk

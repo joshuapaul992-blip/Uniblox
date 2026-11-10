@@ -1570,6 +1570,9 @@ static int inst_index(lua_State *L)
         }
         if (idx == VIRT_HTTP) {
             if (streq(k, "GenerateGUID")) { lua_pushcfunction(L, m_guid); return 1; }
+            if (streq(k, "JSONEncode")) { lua_pushcfunction(L, json_encode); return 1; }
+            if (streq(k, "JSONDecode")) { lua_pushcfunction(L, json_decode); return 1; }
+            if (streq(k, "UrlEncode")) { lua_pushcfunction(L, url_encode); return 1; }
             if (streq(k, "HttpEnabled")) { lua_pushboolean(L, 0); return 1; }
         }
         if (idx == VIRT_DATASTORE && (streq(k, "GetDataStore") || streq(k, "GetGlobalDataStore") ||

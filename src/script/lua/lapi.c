@@ -674,6 +674,8 @@ LUA_API void lua_rawset (lua_State *L, int idx) {
   api_checknelems(L, 2);
   t = index2adr(L, idx);
   api_check(L, ttistable(t));
+  if (hvalue(t)->readonly)  /* UNIBLOX */
+    luaG_runerror(L, "attempt to modify a readonly table");
   setobj2t(L, luaH_set(L, hvalue(t), L->top-2), L->top-1);
   luaC_barriert(L, hvalue(t), L->top-1);
   L->top -= 2;
@@ -687,6 +689,8 @@ LUA_API void lua_rawseti (lua_State *L, int idx, int n) {
   api_checknelems(L, 1);
   o = index2adr(L, idx);
   api_check(L, ttistable(o));
+  if (hvalue(o)->readonly)  /* UNIBLOX */
+    luaG_runerror(L, "attempt to modify a readonly table");
   setobj2t(L, luaH_setnum(L, hvalue(o), n), L->top-1);
   luaC_barriert(L, hvalue(o), L->top-1);
   L->top--;
@@ -709,6 +713,8 @@ LUA_API int lua_setmetatable (lua_State *L, int objindex) {
   }
   switch (ttype(obj)) {
     case LUA_TTABLE: {
+      if (hvalue(obj)->readonly)  /* UNIBLOX */
+        luaG_runerror(L, "attempt to modify a readonly table");
       hvalue(obj)->metatable = mt;
       if (mt)
         luaC_objbarriert(L, hvalue(obj), mt);
@@ -1085,3 +1091,52 @@ LUA_API const char *lua_setupvalue (lua_State *L, int funcindex, int n) {
   return name;
 }
 
+
+
+/*
+** UNIBLOX: Luau's table.freeze and coroutine.close.
+*/
+
+LUA_API void lua_setreadonly (lua_State *L, int idx, int on) {
+  StkId o;
+  lua_lock(L);
+  o = index2adr(L, idx);
+  api_check(L, ttistable(o));
+  hvalue(o)->readonly = cast_byte(on != 0);
+  lua_unlock(L);
+}
+
+
+LUA_API int lua_getreadonly (lua_State *L, int idx) {
+  StkId o = index2adr(L, idx);
+  return ttistable(o) && hvalue(o)->readonly;
+}
+
+
+/* Ends a suspended (or failed) thread: it becomes dead, its open upvalues
+** are closed and its stack emptied. Not for the running thread. */
+LUA_API void lua_resetthread (lua_State *L) {
+  lua_lock(L);
+  luaF_close(L, L->stack);
+  L->ci = L->base_ci;
+  L->base = L->top = L->ci->base;
+  L->nCcalls = 0;
+  L->baseCcalls = 0;
+  L->status = 0;
+  L->errfunc = 0;
+  lua_unlock(L);
+}
+
+
+/* UNIBLOX: Luau's debug.info(f, "a"): the parameters of the function at
+** idx (0, 1 for C functions). */
+LUA_API int lua_getparams (lua_State *L, int idx, int *isvararg) {
+  StkId o = index2adr(L, idx);
+  Closure *cl;
+  *isvararg = 1;
+  if (!ttisfunction(o)) return 0;
+  cl = clvalue(o);
+  if (cl->c.isC) return 0;
+  *isvararg = (cl->l.p->is_vararg & VARARG_ISVARARG) != 0;
+  return cl->l.p->numparams;
+}

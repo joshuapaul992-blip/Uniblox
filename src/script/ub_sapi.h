@@ -205,6 +205,13 @@ void update_debris(lua_State *L, f64 now);
 void reclaim_instances(lua_State *L);
 void free_instances(void);
 
+/* Luau's library additions (ub_luaulib.c): into the base table at `base`. */
+void open_luaulib(lua_State *L, int base);
+/* HttpService:JSONEncode / JSONDecode / UrlEncode (self at 1). */
+int json_encode(lua_State *L);
+int json_decode(lua_State *L);
+int url_encode(lua_State *L);
+
 /* Errors as Roblox words them. */
 int sapi_error(lua_State *L, const char *fmt, ...);
 

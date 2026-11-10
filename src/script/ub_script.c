@@ -198,6 +198,11 @@ static bool q_add(int ref, f64 wake, f64 since, i32 script, int nargs, u8 first)
 /* Resumes a thread; reports errors; stops the script if it ran too long. */
 static void run_thread(lua_State *L, lua_State *co, int nargs, i32 script)
 {
+    lua_Debug ar;
+    if (lua_status(co) == 0 && lua_gettop(co) <= nargs && !lua_getstack(co, 0, &ar)) {
+        lua_settop(co, 0); /* dead: closed by coroutine.close while it waited */
+        return;
+    }
     i32 saved_script = S.cur_script;
     bool saved_timeout = S.timed_out;
     if (g_depth == 0) {
@@ -891,14 +896,14 @@ static int t_spawn(lua_State *L) /* task.spawn(fn, ...): runs it now */
     }
     luaL_checktype(L, 1, LUA_TFUNCTION);
     spawn_now(L, n - 1);
-    return 0;
+    return 1; /* the new thread (left on top) */
 }
 
 static int t_defer(lua_State *L)
 {
     luaL_checktype(L, 1, LUA_TFUNCTION);
     spawn_later(L, lua_gettop(L) - 1, 0);
-    return 0;
+    return 1;
 }
 
 static int t_delay(lua_State *L)
@@ -934,12 +939,6 @@ static int t_cancel(lua_State *L)
     return 0;
 }
 
-static int g_tick(lua_State *L)
-{
-    lua_pushnumber(L, (f64)plat_time_us() * 1e-6);
-    return 1;
-}
-
 static int g_time(lua_State *L)
 {
     lua_pushnumber(L, script_time());
@@ -958,22 +957,6 @@ static int g_collectgarbage(lua_State *L)
     const char *opt = luaL_optstring(L, 1, "count");
     if (strcmp(opt, "count") != 0) return luaL_error(L, "collectgarbage can only count");
     lua_pushnumber(L, (f64)S.mem_used / 1024.0);
-    return 1;
-}
-
-static int os_time(lua_State *L)
-{
-    ub_datetime t;
-    plat_local_time(&t);
-    /* days since 1970 (civil from days, Howard Hinnant) */
-    int y = t.year, m = t.month, d = t.day;
-    y -= m <= 2;
-    int era = (y >= 0 ? y : y - 399) / 400;
-    int yoe = y - era * 400;
-    int doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
-    int doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    f64 days = (f64)era * 146097 + doe - 719468;
-    lua_pushnumber(L, days * 86400 + t.hour * 3600 + t.minute * 60 + t.second);
     return 1;
 }
 
@@ -1040,9 +1023,6 @@ static const char k_prelude[] =
     "function table.pack(...) return { n = select('#', ...), ... } end\n"
     "table.unpack = unpack\n"
     "function table.create(n, v) local t = {} if v ~= nil then for i = 1, n do t[i] = v end end return t end\n"
-    "function table.freeze(t) return t end\n"
-    "function table.isfrozen() return false end\n"
-    "function table.clone(t) local c = {} for k, v in pairs(t) do c[k] = v end return c end\n"
     "function string.split(s, sep)\n"
     "  sep = sep or ','\n"
     "  local out, i = {}, 1\n"
@@ -1055,19 +1035,15 @@ static const char k_prelude[] =
     "  end\n"
     "  return out\n"
     "end\n"
-    "function math.clamp(x, lo, hi) if x < lo then return lo elseif x > hi then return hi end return x end\n"
     "function math.sign(x) if x > 0 then return 1 elseif x < 0 then return -1 end return 0 end\n"
     "function math.round(x) if x >= 0 then return math.floor(x + 0.5) end return math.ceil(x - 0.5) end\n"
-    "function math.noise(x, y, z)\n"
-    "  local n = math.sin((x or 0) * 12.9898 + (y or 0) * 78.233 + (z or 0) * 37.719) * 43758.5453\n"
-    "  return (n - math.floor(n)) - 0.5\n"
-    "end\n";
+    ;
 
 /* pcall and xpcall that let the function wait, as Roblox's do (Lua 5.1's
  * cannot yield across them): the function runs as a coroutine, and its
  * yields are passed on to whoever resumes this thread. */
 static const char k_pcall[] =
-    "local create, resume, status, yield, mark, unpack, select, type = ...\n"
+    "local create, resume, status, yield, mark, unpack, select, type, iscf = ...\n"
     "local function pack(...) return { n = select('#', ...), ... } end\n"
     "local function drive(co, handler, ...)\n"
     "  local r = pack(resume(co, ...))\n"
@@ -1081,7 +1057,7 @@ static const char k_pcall[] =
     "  end\n"
     "end\n"
     "local function start(f)\n"
-    "  if type(f) ~= 'function' then local g = f f = function(...) return g(...) end end\n"
+    "  if type(f) ~= 'function' or iscf(f) then local g = f f = function(...) return g(...) end end\n"
     "  local co = create(f)\n"
     "  mark(co)\n"
     "  return co\n"
@@ -1100,6 +1076,13 @@ static int c_mark_pcall(lua_State *L)
     lua_pushthread(L);
     lua_rawset(L, -3);
     return 0;
+}
+
+/* iscf(f): f is a C function (coroutine.create takes only Lua ones) */
+static int c_iscfunction(lua_State *L)
+{
+    lua_pushboolean(L, lua_iscfunction(L, 1));
+    return 1;
 }
 
 /* coroutine.running(): inside a pcall, the thread that called it */
@@ -1149,7 +1132,7 @@ static void build_base(lua_State *L)
         lua_setfield(L, -2, safe[i]);
     }
     static const luaL_Reg funcs[] = { { "print", g_print }, { "warn", g_warn }, { "wait", g_wait },
-                                      { "spawn", g_spawn }, { "delay", g_delay }, { "tick", g_tick },
+                                      { "spawn", g_spawn }, { "delay", g_delay },
                                       { "time", g_time }, { "elapsedTime", g_time }, { "typeof", g_typeof },
                                       { "collectgarbage", g_collectgarbage }, { "require", g_require },
                                       { NULL, NULL } };
@@ -1166,8 +1149,6 @@ static void build_base(lua_State *L)
     }
     lua_setfield(L, -2, "task");
     lua_newtable(L);
-    lua_pushcfunction(L, os_time);
-    lua_setfield(L, -2, "time");
     lua_pushcfunction(L, os_clock);
     lua_setfield(L, -2, "clock");
     lua_pushcfunction(L, os_difftime);
@@ -1195,7 +1176,8 @@ static void build_base(lua_State *L)
         lua_getglobal(L, "unpack");
         lua_getglobal(L, "select");
         lua_getglobal(L, "type");
-        lua_call(L, 8, 2);
+        lua_pushcfunction(L, c_iscfunction);
+        lua_call(L, 9, 2);
         lua_setfield(L, -3, "xpcall");
         lua_setfield(L, -2, "pcall");
     } else {
@@ -1206,6 +1188,7 @@ static void build_base(lua_State *L)
     lua_pushcfunction(L, c_running);
     lua_setfield(L, -2, "running");
     lua_pop(L, 1);
+    open_luaulib(L, lua_gettop(L));
     lua_pushlightuserdata(L, &REG_BASE);
     lua_pushvalue(L, -2);
     lua_rawset(L, LUA_REGISTRYINDEX);
@@ -1222,7 +1205,8 @@ static void make_env(lua_State *L, i32 script)
     lua_pushlightuserdata(L, &REG_BASE);
     lua_rawget(L, LUA_REGISTRYINDEX);
     int base = lua_gettop(L);
-    static const char *const libs[] = { "string", "table", "math", "coroutine", "os", "task", NULL };
+    static const char *const libs[] = { "string", "table", "math", "coroutine", "os", "task", "bit32", "utf8", "debug",
+                                        NULL };
     for (int i = 0; libs[i]; ++i) {
         lua_getfield(L, base, libs[i]);
         lua_newtable(L);

@@ -21,7 +21,14 @@ u64 plat_time_us(void)
 
 void plat_local_time(ub_datetime *out)
 {
-    ub_datetime t = { 2000, 1, 1, 0, 0, 0 };
+    ub_datetime t = { 2000, 1, 1, 0, 0, 0, 0 };
+    *out = t;
+}
+
+/* Fixed too (tests compare dates): the local time is one hour ahead. */
+void plat_utc_time(ub_datetime *out)
+{
+    ub_datetime t = { 1999, 12, 31, 23, 0, 0, 0 };
     *out = t;
 }
 
