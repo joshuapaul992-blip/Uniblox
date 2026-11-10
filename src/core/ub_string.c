@@ -153,3 +153,12 @@ bool ub_parse_num(const char *s, f32 *out)
     *out = (f32)(neg ? -v : v);
     return true;
 }
+
+int ub_strcmp(const char *a, const char *b)
+{
+    while (*a && *a == *b) {
+        ++a;
+        ++b;
+    }
+    return (int)(u8)*a - (int)(u8)*b;
+}

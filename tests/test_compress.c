@@ -42,6 +42,7 @@ static i32 decode(const char *name, const u8 *src, u32 n, u8 *dst, u32 cap)
 {
     size_t l = strlen(name);
     if (l > 4 && strcmp(name + l - 4, ".lz4") == 0) return ub_lz4_decompress(src, n, dst, cap);
+    if (l > 5 && strcmp(name + l - 5, ".zlib") == 0) return ub_zlib_decompress(src, n, dst, cap);
     return ub_zstd_decompress(src, n, dst, cap);
 }
 
@@ -92,7 +93,7 @@ void test_compress(void)
     }
     fclose(m);
     printf("  %d/%d vectors decode exactly\n", ok, vectors);
-    CHECK(vectors >= 18 && ok == vectors);
+    CHECK(vectors >= 26 && ok == vectors);
 
     /* tiny hand-made cases */
     u8 out[64];

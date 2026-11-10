@@ -130,6 +130,28 @@ typedef struct {
 
 bool plat_font_atlas(int px_height, ub_font_atlas *out);
 
+/* Fonts for the GUI (Roblox's TextLabels...). Uniblox ships no fonts: the
+ * GUI's typefaces map onto the ones Windows has had since NT 3.1 (Arial,
+ * Times New Roman, Courier New) and, where present, Comic Sans MS and Arial
+ * Black. Glyphs are rasterised at 4x and averaged down, so they are
+ * anti-aliased the same way on every Windows version. */
+enum { UB_FACE_SANS, UB_FACE_SERIF, UB_FACE_MONO, UB_FACE_HAND, UB_FACE_FAMILIES };
+typedef struct {
+    u8 family;              /* UB_FACE_* */
+    u8 weight;              /* 1 light, 4 regular, 7 bold, 9 heavy (Roblox's weight / 100) */
+    u8 italic;
+    u8 pad;
+} ub_typeface;
+/* Ascent and descent as fractions of the em. */
+bool plat_face_metrics(ub_typeface f, f32 *ascent, f32 *descent);
+/* Horizontal advance of a character, in ems. */
+f32 plat_glyph_advance(ub_typeface f, u32 codepoint);
+/* The glyph at `em_px` pixels per em: coverage 0..255 in out[w*h] (at
+ * most `cap` bytes), placed with its top-left (x0, y0) pixels from the pen
+ * position on the baseline (y0 is usually negative). False if it does not
+ * fit or the platform cannot draw it; w = 0 for blank glyphs. */
+bool plat_glyph(ub_typeface f, u32 codepoint, f32 em_px, u8 *out, int cap, int *x0, int *y0, int *w, int *h);
+
 /* -------------------------------------------------------------- input */
 
 enum { UB_KEY_COUNT = 256 };

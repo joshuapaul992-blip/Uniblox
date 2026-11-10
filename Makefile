@@ -62,6 +62,10 @@ CORE_SRCS := \
 	src/render/ub_render_sw.c \
 	src/render/ub_render_gl.c \
 	src/render/ub_present.c \
+	src/gui/ub_canvas.c \
+	src/gui/ub_text.c \
+	src/gui/ub_image.c \
+	src/gui/ub_gui.c \
 	$(SCRIPT_SRCS)
 
 # Tools: the UI toolkit and the editor (ubedit.exe).
@@ -75,7 +79,8 @@ PLATFORM_SRCS := \
 	src/platform/win32/win32_file.c \
 	src/platform/win32/win32_audio.c \
 	src/platform/win32/win32_display.c \
-	src/platform/win32/win32_gl.c
+	src/platform/win32/win32_gl.c \
+	src/platform/win32/win32_font.c
 
 # uniblox.exe: the game
 SRCS := \
@@ -146,7 +151,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
-	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/test_present.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/test_present.c tests/test_gui.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
 	src/app/app_editor.c src/app/app_play.c
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all

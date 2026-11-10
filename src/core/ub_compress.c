@@ -597,3 +597,205 @@ done:
     plat_free(z);
     return result;
 }
+
+/* ============================================================= deflate */
+
+/* A canonical Huffman decoder in the style of zlib's "puff": counts of
+ * codes per length and the symbols in code order. Decoding walks the
+ * lengths, so no table can overflow on hostile input. */
+typedef struct {
+    u16 count[16];
+    u16 symbol[288];
+} inf_huff;
+
+typedef struct {
+    const u8 *in;
+    u32 in_len, in_pos;
+    u32 bits, nbits;
+    u8 *out;
+    u32 out_cap, out_pos;
+    bool bad;
+} inf_state;
+
+static u32 inf_bits(inf_state *s, u32 need)
+{
+    while (s->nbits < need) {
+        if (s->in_pos >= s->in_len) {
+            s->bad = true;
+            return 0;
+        }
+        s->bits |= (u32)s->in[s->in_pos++] << s->nbits;
+        s->nbits += 8;
+    }
+    u32 v = s->bits & ((1u << need) - 1u);
+    s->bits >>= need;
+    s->nbits -= need;
+    return v;
+}
+
+/* Builds a decoder from code lengths; false if over-subscribed (an
+ * incomplete set is allowed, as zlib allows it for single codes). */
+static bool inf_build(inf_huff *h, const u8 *lengths, u32 n)
+{
+    u16 offs[16];
+    for (int i = 0; i < 16; ++i) h->count[i] = 0;
+    for (u32 i = 0; i < n; ++i) h->count[lengths[i]]++;
+    if (h->count[0] == n) return true; /* no codes: decoding will fail if used */
+    i32 left = 1;
+    for (int len = 1; len < 16; ++len) {
+        left <<= 1;
+        left -= h->count[len];
+        if (left < 0) return false;
+    }
+    offs[1] = 0;
+    for (int len = 1; len < 15; ++len) offs[len + 1] = (u16)(offs[len] + h->count[len]);
+    for (u32 i = 0; i < n; ++i)
+        if (lengths[i]) h->symbol[offs[lengths[i]]++] = (u16)i;
+    return true;
+}
+
+static i32 inf_decode(inf_state *s, const inf_huff *h)
+{
+    i32 code = 0, first = 0, index = 0;
+    for (int len = 1; len < 16; ++len) {
+        code |= (i32)inf_bits(s, 1);
+        if (s->bad) return -1;
+        i32 count = h->count[len];
+        if (code - count < first) return h->symbol[index + (code - first)];
+        index += count;
+        first += count;
+        first <<= 1;
+        code <<= 1;
+    }
+    s->bad = true;
+    return -1;
+}
+
+static const u16 k_len_base[29] = { 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31,
+                                     35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258 };
+static const u8 k_len_extra[29] = { 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0 };
+static const u16 k_dist_base[30] = { 1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193,
+                                      257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577 };
+static const u8 k_dist_extra[30] = { 0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13 };
+
+static bool inf_codes(inf_state *s, const inf_huff *lit, const inf_huff *dist)
+{
+    for (;;) {
+        i32 sym = inf_decode(s, lit);
+        if (sym < 0) return false;
+        if (sym < 256) {
+            if (s->out_pos >= s->out_cap) return false;
+            s->out[s->out_pos++] = (u8)sym;
+        } else if (sym == 256) {
+            return true;
+        } else {
+            sym -= 257;
+            if (sym >= 29) return false;
+            u32 len = k_len_base[sym] + inf_bits(s, k_len_extra[sym]);
+            i32 ds = inf_decode(s, dist);
+            if (ds < 0 || ds >= 30) return false;
+            u32 d = k_dist_base[ds] + inf_bits(s, k_dist_extra[ds]);
+            if (s->bad || d > s->out_pos || len > s->out_cap - s->out_pos) return false;
+            for (u32 i = 0; i < len; ++i, ++s->out_pos) s->out[s->out_pos] = s->out[s->out_pos - d];
+        }
+    }
+}
+
+i32 ub_inflate(const u8 *src, u32 src_len, u8 *dst, u32 dst_cap, u32 *used)
+{
+    inf_state s;
+    memset(&s, 0, sizeof s);
+    s.in = src;
+    s.in_len = src_len;
+    s.out = dst;
+    s.out_cap = dst_cap;
+    inf_huff *lit = (inf_huff *)plat_alloc(sizeof(inf_huff) * 2);
+    if (!lit) return -1;
+    inf_huff *dist = lit + 1;
+    u8 lengths[320];
+    bool last = false, ok = true;
+    while (!last && ok) {
+        last = inf_bits(&s, 1) != 0;
+        u32 type = inf_bits(&s, 2);
+        if (s.bad) { ok = false; break; }
+        if (type == 0) { /* stored */
+            s.bits = 0;
+            s.nbits = 0;
+            if (s.in_len - s.in_pos < 4) { ok = false; break; }
+            u32 len = s.in[s.in_pos] | ((u32)s.in[s.in_pos + 1] << 8);
+            u32 nlen = s.in[s.in_pos + 2] | ((u32)s.in[s.in_pos + 3] << 8);
+            s.in_pos += 4;
+            if (len != (~nlen & 0xFFFFu) || len > s.in_len - s.in_pos || len > s.out_cap - s.out_pos) { ok = false; break; }
+            memcpy(s.out + s.out_pos, s.in + s.in_pos, len);
+            s.in_pos += len;
+            s.out_pos += len;
+        } else if (type == 1) { /* fixed codes */
+            u32 i = 0;
+            for (; i < 144; ++i) lengths[i] = 8;
+            for (; i < 256; ++i) lengths[i] = 9;
+            for (; i < 280; ++i) lengths[i] = 7;
+            for (; i < 288; ++i) lengths[i] = 8;
+            inf_build(lit, lengths, 288);
+            for (i = 0; i < 30; ++i) lengths[i] = 5;
+            inf_build(dist, lengths, 30);
+            ok = inf_codes(&s, lit, dist);
+        } else if (type == 2) { /* dynamic codes */
+            static const u8 order[19] = { 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
+            u32 nlen = inf_bits(&s, 5) + 257, ndist = inf_bits(&s, 5) + 1, ncode = inf_bits(&s, 4) + 4;
+            if (s.bad || nlen > 286 || ndist > 30) { ok = false; break; }
+            u32 i = 0;
+            for (; i < ncode; ++i) lengths[order[i]] = (u8)inf_bits(&s, 3);
+            for (; i < 19; ++i) lengths[order[i]] = 0;
+            if (s.bad || !inf_build(lit, lengths, 19)) { ok = false; break; }
+            for (i = 0; i < nlen + ndist;) {
+                i32 sym = inf_decode(&s, lit);
+                if (sym < 0) { ok = false; break; }
+                if (sym < 16) {
+                    lengths[i++] = (u8)sym;
+                } else {
+                    u32 rep;
+                    u8 val = 0;
+                    if (sym == 16) {
+                        if (i == 0) { ok = false; break; }
+                        val = lengths[i - 1];
+                        rep = 3 + inf_bits(&s, 2);
+                    } else if (sym == 17) {
+                        rep = 3 + inf_bits(&s, 3);
+                    } else {
+                        rep = 11 + inf_bits(&s, 7);
+                    }
+                    if (s.bad || i + rep > nlen + ndist) { ok = false; break; }
+                    while (rep--) lengths[i++] = val;
+                }
+            }
+            if (!ok) break;
+            if (lengths[256] == 0) { ok = false; break; } /* no end-of-block code */
+            if (!inf_build(lit, lengths, nlen) || !inf_build(dist, lengths + nlen, ndist)) { ok = false; break; }
+            ok = inf_codes(&s, lit, dist);
+        } else {
+            ok = false;
+        }
+        if (s.bad) ok = false;
+    }
+    plat_free(lit);
+    if (used) *used = s.in_pos;
+    return ok ? (i32)s.out_pos : -1;
+}
+
+i32 ub_zlib_decompress(const u8 *src, u32 src_len, u8 *dst, u32 dst_cap)
+{
+    if (src_len < 6) return -1;
+    u32 cmf = src[0], flg = src[1];
+    if ((cmf & 15) != 8 || (cmf >> 4) > 7 || ((cmf << 8) | flg) % 31 != 0 || (flg & 0x20)) return -1;
+    u32 used = 0;
+    i32 n = ub_inflate(src + 2, src_len - 2, dst, dst_cap, &used);
+    if (n < 0 || src_len - 2 - used < 4) return -1;
+    const u8 *q = src + 2 + used;
+    u32 want = ((u32)q[0] << 24) | ((u32)q[1] << 16) | ((u32)q[2] << 8) | q[3];
+    u32 a = 1, b = 0;
+    for (i32 i = 0; i < n; ++i) {
+        a = (a + dst[i]) % 65521u;
+        b = (b + a) % 65521u;
+    }
+    return ((b << 16) | a) == want ? n : -1;
+}

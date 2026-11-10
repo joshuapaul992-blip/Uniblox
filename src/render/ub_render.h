@@ -73,6 +73,15 @@ typedef enum {
     UB_QUALITY_COUNT
 } ub_quality;
 
+/* A picture with alpha (premultiplied 0xAARRGGBB, rows top-down), as the
+ * GUI makes them. `id` names it and `version` changes whenever its pixels
+ * do, so the OpenGL renderer keeps it as a texture until then. */
+typedef struct {
+    const u32 *px;
+    int w, h, pitch;     /* pitch in pixels */
+    u32 id, version;
+} ub_render_image;
+
 typedef struct {
     u32 parts, parts_culled;
     u32 faces, faces_backfacing, polys_drawn;
