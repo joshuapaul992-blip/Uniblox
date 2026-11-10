@@ -82,7 +82,7 @@ tests/          host unit tests (make test)
 | 7 | Renderer polish + settings menu | In-game settings UI; more effects | **Built.** Settings menu (Esc) in the game, a shadow under the character, and NT 3.51/4.0 polish for modern PCs: only changed parts of the screen are sent, fullscreen display modes on NT 4.0+, steady-TSC timing, font fallback, icons. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8A | Roblox GUIs (up to 2022) | Places' ScreenGuis, BillboardGuis and SurfaceGuis look and work as in Roblox, driven by their LocalScripts | **Built.** Every GUI class and property imported and saved, Roblox's layout rules, rounded/stroked/gradient drawing, rich text, images from a local folder, input, LocalScripts, remotes, UserInputService, Mouse, Camera. The demo has a working GUI. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8B | Roblox scripts (up to 2022) | 2022-era game scripts run unchanged | **Built.** Luau's 2022 syntax (type annotations, if-expressions, generalised iteration, new literals and escapes) and library (bit32, utf8, Random, DateTime, os.date, string.pack, table.freeze...), attributes and tags from place files, CollectionService, 118 classes with Roblox's defaults, overlap queries, ClickDetectors, ProximityPrompts, Humanoid states, offline answers from Roblox's online services. The demo has a lamp with a prompt and a clickable block. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
-| 8C | Real Roblox games from .rbxl | Open a 2022 game's place file and play it | Unions and meshes from the file and from a local content folder, decals and textures, terrain, sky and atmosphere; R6/R15 characters with Motor6D, Tools and Backpack, Teams and team spawns; hinges, springs, ropes, prismatic and ball-socket constraints and the body movers; XML `.rbxlx`/`.rbxmx`, sounds, and loading big places quickly in little memory |
+| 8C | Real Roblox games from .rbxl | Open a 2022 game's place file and play it | **Built**, but terrain and decals are not done. Unions and MeshParts keep their shape (the collision pieces saved in every file, drawn and collided with), `.mesh` files and sounds from a local content folder, SpecialMeshes, Atmosphere; R15/R6 rigs with Motor6D, joints from scripts, Tools, Backpack and hotbar, Teams and team spawns; hinges (motor, servo), ball sockets, prismatic, ropes, rods, springs and every body mover; CFrame properties; XML `.rbxlx`/`.rbxmx`; a 20,000-part place loads in about a second. Passes unit tests and the Wine smoke tests. Needs a run on a real install with real 2022 places. Not done: terrain (its format is not documented), decals and textures, animations |
 | 9 | Loopback networking | Single-player runs entirely through replication | |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
@@ -552,7 +552,39 @@ tests/          host unit tests (make test)
   states come from the character controller (Running, Jumping, Freefall,
   Landed, Dead).
 
+## Milestone 8C notes
+
+- **Shapes from the file.** Unions and MeshParts carry `PhysicalConfigData`
+  (or, in older files, `PhysicsData`): "CSGPHS", a version (6, or 7 with
+  one more byte), the solid's mass properties, then convex pieces, each a
+  40-byte header, its vertices and its triangles, in the part's space at
+  `InitialSize`. The format was worked out from rbx-test-files' unions
+  and every piece of every sample parses to the end. The pieces become a
+  world mesh (shared by identical parts, saved in `.ubx`); physics builds
+  a convex hull per piece (exact when it fits its limits, else the 18
+  planes round it) and anchored mesh parts collide as those pieces.
+- **Looks** (`world/ub_looks.c`) come after import: `.mesh` files from
+  `content/` for MeshParts (fitted to the part) and SpecialMesh FileMeshes
+  (their own size times `Scale`), and the basic SpecialMesh shapes. A
+  part's `look` mesh changes only how it is drawn.
+- **XML** files are converted to the binary format in memory and read by
+  the binary importer (`world/ub_rbxlx.c`), so both behave the same; the
+  tests load 17 models both ways and require identical worlds.
+- **Characters** (`game/ub_rig.c`): the rig's parts are carried (posed each
+  frame from the root through the joints) and not simulated; the
+  character's body is still the capsule. Parts welded at run time are
+  carried the same way, so they never fight physics.
+- **Constraints** (`physics/ub_pjoint.c`, `game/ub_constraints.c`) are
+  sequential-impulse joints inside the solver's substeps; forces and
+  velocity drives are applied each substep, like gravity.
+
 ## Open items
+
+- Milestone 8C on a real install: open a 2022 game's `.rbxl` (or a place
+  saved as `.rbxlx`), walk around its unions and meshes, try its tools
+  (1-9, click), doors and prompts. Send `uniblox.log` (the import line
+  counts shaped meshes and placeholders) and screenshots. Put any `.mesh`
+  and `.wav` files you have the right to use in `content\`.
 
 - Milestone 8B on a real install: walk to the demo's lamp and press E;
   click the spinning block in the house. Send `uniblox.log` and a
