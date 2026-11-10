@@ -9,7 +9,7 @@ plan and milestones.
 **Requirements:** Windows NT 3.51 or newer, 384 MB RAM minimum (512 MB+
 recommended). The CPU only needs to be an x86 Pentium.
 
-## Two renderers
+## Three renderers
 
 - **OpenGL** (any graphics card with an OpenGL driver, from the XP era to
   today). Renders at the window's full resolution, including 1080p, 1440p
@@ -17,16 +17,23 @@ recommended). The CPU only needs to be an x86 Pentium.
   highlights, soft sun shadows, 4x anti-aliasing, distance fog, a sky with a
   sun, and sharp filtered textures. Plain OpenGL 1.1 drivers get a simpler
   version without shadows.
-- **Software** (no graphics card needed; works on NT 3.51 and 4.0). Renders
-  at a lower resolution (480 lines by default) and stretches to the window.
-  It supports 256-colour desktops.
+- **Fast software** (no graphics card needed; made for NT 3.51 and 4.0,
+  where there is no OpenGL worth having: a VESA driver such as WINVBE has
+  no 3D at all, and NT 4.0's Direct3D draws in software too). It draws the
+  same picture as the plain software renderer, about twice as fast (see
+  [NT 3.51 and 4.0 on a modern PC](#nt-351-and-40-on-a-modern-pc)).
+  It renders at a lower resolution (480 lines by default), stretches to the
+  window and supports 256-colour desktops.
+- **Software** (the plain one): draws each part as it comes, on one
+  processor. Kept as the reference, and to compare with.
 
 `renderer=auto`, the default, uses OpenGL when a hardware driver is present
-and software otherwise. The frame rate is capped at 120 fps by default (F9
+and the fast software renderer otherwise (`renderer=opengl`, `fast` or
+`software` picks one). The frame rate is capped at 120 fps by default (F9
 cycles through 60/120/144/240/unlimited).
 
-**The settings menu** (Esc) has Resume, Settings, Load the place again and
-Quit. Settings has three tabs:
+**The game menu** (Esc) is described under [The client UI](#the-client-ui).
+Its Settings button (or S) opens the settings, which have three tabs:
 - **Display:** renderer, fullscreen, fullscreen size, graphics quality or
   render resolution, colours, sending only what changed, frame rate cap,
   text overlay.
@@ -78,6 +85,37 @@ uncached. At 2560×1421 a whole frame took about 150 ms to send, against
   which font GDI actually picked and uses Arial when there's no Tahoma.
 - **Icons and version information** in both programs (Program Manager on
   NT 3.51, Explorer's Properties on NT 4.0).
+- **The fast software renderer** (`renderer=fast`, and what `auto` picks
+  without a hardware OpenGL driver). There is no faster way to draw on
+  these systems than the CPU itself, so it does less work per frame and
+  uses every processor:
+  - Parts are drawn nearest first, so pixels already hidden fail the depth
+    test before any texture work.
+  - A coarse depth is kept for each 16×16 tile: the farthest point drawn in
+    it. Polygons, and stretches of their rows, that lie behind everything
+    already drawn there are skipped.
+  - The perspective divide is stepped further (32 or 64 pixels instead of
+    16) where a polygon's depth hardly changes.
+  - The textured spans keep u and v in one register, for the Pentium's
+    seven.
+  - Floats become integers without the x87's rounding-mode switch, which
+    stalls modern processors; the plain renderer gains from this too.
+  - The frame is shared out over every processor by rows of tiles (NT 3.51
+    and 4.0 run on several, and so does a virtual machine given several).
+    Each thread draws its own rows, depth clear and sky included, and the
+    picture is the same with any number of threads. The log's CPU line
+    gives the number of processors, and the renderer line the threads
+    used; `render_threads=` in `uniblox.cfg` sets them (0 = one per
+    processor).
+
+  On the demo place at 960×540 under Wine, on a 4-processor virtual
+  machine, the 3D scene took 9.0 ms a frame with the plain renderer and
+  4.3 ms with the fast one (7.0 ms on a single thread); the game went from
+  70 to 106 fps. `uniblox.exe -benchmark` runs the F5 benchmark and quits,
+  and `tools/wine_bench.sh nt40 software fast` compares renderers.
+- **The GUI is drawn only when it changes.** Any change in the world (a
+  script turning a part, physics) used to draw every GUI layer again. Now a
+  layer is drawn again only if its layout or one of its properties changed.
 
 ## Places
 
@@ -345,6 +383,41 @@ a "Back to the start" button that asks a server script, through a
 RemoteEvent, to move you), messages that slide up from the bottom, a
 SurfaceGui sign by the spawn and a BillboardGui over the door.
 
+## The client UI
+
+Around the view is what a 2021-era player had, in Uniblox's own look
+(nothing is taken from Roblox's art):
+
+- **A top bar:** the menu button and the chat button (it hides or shows the
+  chat window).
+- **Chat:** the last lines, names in their own colours, fading when idle;
+  the box at the bottom ("To chat click here or press /"). What you say
+  also shows in a **bubble** over your head for 10 seconds. Scripts hear it
+  as `Player.Chatted`, and can add lines with
+  `StarterGui:SetCore("ChatMakeSystemMessage", {Text, Color})` and bubbles
+  with `Chat:Chat(part, message)`.
+- **The player list** (top right; Tab shows or hides it): the players,
+  their team colour, and the place's **leaderstats**, the value objects in
+  the player's `leaderstats` folder (up to four columns). The demo place
+  counts the doors you open.
+- **A health bar** under it while you are hurt.
+- **Notifications** in the bottom right, from
+  `StarterGui:SetCore("SendNotification", {Title, Text, Duration})`.
+- **The game menu** (Esc, or the menu button) with three tabs:
+  - **People:** the players.
+  - **Settings:** opens the settings (S).
+  - **Help:** the controls.
+  Its buttons are **Reset character** (R), **Leave** (L) and **Resume**
+  (Esc). Reset and Leave ask first (Enter or the button says yes; Esc says
+  no).
+
+Places can turn parts off with
+`StarterGui:SetCoreGuiEnabled(Enum.CoreGuiType.PlayerList/Health/Backpack/Chat/All, false)`,
+and the reset button with `SetCore("ResetButtonCallback", false)`. The UI
+is built from GUI objects under the game's CoreGui, so it is drawn the
+same way in every renderer, and works with scripts off too. The F3 text
+(place, physics, scripts) is now off at the start and sits under the chat.
+
 ## The editor
 
 `ubedit.exe` is a separate program for building places. It runs on the
@@ -522,6 +595,20 @@ fallback.
   the door's label. The door's label is also drawn by the software
   renderer over the real scene, to check it sits in front of the wall.
 
+  For milestone 9A, a test plays the demo place with its client UI: the
+  player list shows the player and the place's Doors stat, the stat goes
+  up after walking through the door, and chatting gives a rich-text line,
+  a bubble on the head and `Chatted`. The chat button and Tab hide the
+  chat and the list, the health bar shows when hurt, and the game menu's
+  buttons are where its hit test says. Reset asks first and kills the
+  character, unless the place turned it off. An idle frame must change
+  nothing, so nothing is laid out again. `gui.lua` checks
+  `SetCoreGuiEnabled`, `SetCore` (system message, notification, reset
+  button) and `Chat:Chat`. The renderer tests run every check on the fast
+  renderer too, in both colour depths, with three threads' worth of rows
+  run in turn. A crowd behind a wall must come out pixel for pixel as the
+  plain renderer draws it, with fewer pixels tested and polygons skipped.
+
   The editor tests build an obstacle course with editor actions only (no
   code written): a lava floor, platforms over gaps, a checkpoint and a
   finish line. The place is saved, loaded and played by the character,
@@ -560,8 +647,11 @@ fallback.
 
   It photographs the demo's GUI at the start, clicks the panel's button
   and checks that a server script got the RemoteEvent and that the panel's
-  LocalScript ran. It also opens the menu with Esc, changes the frame rate cap there and
-  checks that it took effect and was saved, and quits from the menu. It
+  LocalScript ran. It chats (the line and bubble are photographed), hides
+  and shows the player list, and opens the game menu with Esc and its Help
+  tab. It asks to reset and says no, opens the settings with S, changes the
+  frame rate cap there and checks that it took effect and was saved, and
+  leaves from the game menu. It
   checks that the demo's loose parts settle and fall asleep, walks
   into the scripted door and checks the script opened it, checks that no
   script failed, opens a Roblox place from the command line, saves it with
@@ -576,7 +666,9 @@ fallback.
   ```
 
   The first argument is the Windows version Wine pretends to be: `nt351`,
-  `nt40`, `win2k` or `winxp`. The second picks the renderer. Wine is
+  `nt40`, `win2k` or `winxp`. The second picks the renderer (`software`,
+  `fast` or `opengl`). `tools/wine_bench.sh nt40 software fast` runs
+  `uniblox.exe -benchmark` once per renderer and prints the results. Wine is
   forgiving, so passing proves the logic works, not that the `.exe` runs on
   real NT.
 - **Real test:** copy the `.exe` into NT 3.51 and NT 4.0 guests in 86Box or
@@ -588,7 +680,7 @@ fallback.
 | File | What it is |
 |---|---|
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
-| `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, camera, `scripts` and `place` |
+| `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/fast/software), `render_threads` (fast renderer; 0 = one per processor), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, camera, `scripts` and `place` |
 | `places/` | Places saved with F7 in the game or from the editor (`autosave.ubx`: the editor's unsaved changes when it was closed) |
 | `content/` | Optional. Your own files for places' assets, named by asset id: pictures for GUIs (`content\<asset id>.png` or `.bmp`), meshes for MeshParts and SpecialMeshes (`content\<asset id>.mesh`, Roblox's `.mesh` versions 1 to 5) and sounds (`content\<asset id>.wav`), each for `rbxassetid://<asset id>`; paths under it for `rbxasset://` addresses |
 | `ubedit.log`, `ubedit.cfg` | The editor's log and settings (`renderer`, `quality`, `gl_shaders`, `fps_cap`, window size, `sw_height`, grid size) |
@@ -609,18 +701,21 @@ can't write the log or settings.
 | Left click | Use the tool you hold, click a ClickDetector (and beep, panned and pitched by where you click) |
 | 1 to 9 | Take out the tool in that slot of the hotbar (again to put it away) |
 | E (or the prompt's key) | Use the ProximityPrompt shown near you; hold it for prompts that need holding |
-| Enter or `/` | Type a message (Enter sends, Esc cancels); scripts hear it as `Player.Chatted` |
+| Enter or `/` | Chat (Enter sends, Esc cancels); the line and a bubble over your head show it, and scripts hear it as `Player.Chatted` |
+| Tab | Show or hide the player list |
 | F11 or Alt+Enter | Fullscreen on/off |
 | F5 | 10-second benchmark with the frame cap off; the result goes on screen and into `uniblox.log` |
 | F6 | OpenGL: graphics quality high, medium (no anti-aliasing), low (no shadows). Software: render resolution 240/360/480/720/full |
 | F7 | Save the current place as `places/<name>.ubx` |
 | F8 | Software renderer: switch between 32-bit colour and 8-bit palette |
 | F9 | Frame rate cap: 60, 120, 144, 240, unlimited |
-| F3 | Hide the text overlay |
+| F3 | Show or hide the information text (off at the start) |
 | M | Mute / unmute |
-| Esc | The menu: resume, settings, load the place again, quit (Q) |
+| Esc | The game menu: People, Settings (S), Help; Reset character (R), Leave (L), Resume (Esc) |
 
-The text overlay shows the place's name and the result of the last load
+`uniblox.exe -benchmark` runs the F5 benchmark and quits.
+
+The information text (F3) shows the place's name and the result of the last load
 or save. It also shows what physics is doing (moving parts, how many are
 awake, contacts, and the time physics took that frame). For scripts, it
 shows how many are running and waiting, their memory and time, and the

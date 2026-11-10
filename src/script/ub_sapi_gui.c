@@ -1501,11 +1501,6 @@ static int m_objects_at(lua_State *L)
 static int m_noop(lua_State *L) { return 0; }
 
 
-static int m_nil(lua_State *L)
-{
-    lua_pushnil(L);
-    return 1;
-}
 
 static int m_half(lua_State *L)
 {
@@ -1513,42 +1508,82 @@ static int m_half(lua_State *L)
     return 1;
 }
 
-static int m_setcore(lua_State *L)
+
+/* StarterGui:SetCoreGuiEnabled(type, on) / GetCoreGuiEnabled(type): the
+ * client UI's parts (PlayerList 0, Health 1, Backpack 2, Chat 3, All 4). */
+static int core_type(lua_State *L, int i)
 {
-    const char *what = luaL_optstring(L, 2, "");
-    if (streq(what, "SendNotification") && lua_istable(L, 3)) {
-        lua_getfield(L, 3, "Title");
-        lua_getfield(L, 3, "Text");
-        ub_info("script: notification: %s - %s", luaL_optstring(L, -2, ""), luaL_optstring(L, -1, ""));
-        lua_pop(L, 2);
-    }
-    return 0;
+    if (lua_isnumber(L, i)) return (int)lua_tointeger(L, i);
+    if (lua_isnoneornil(L, i)) return -1;
+    lua_getfield(L, i, "Value");
+    int t = lua_isnumber(L, -1) ? (int)lua_tointeger(L, -1) : -1;
+    lua_pop(L, 1);
+    return t;
 }
 
-/* StarterGui:SetCoreGuiEnabled(type, on): the Backpack (2) and All (5) hide
- * the hotbar; the other core GUIs Uniblox does not draw. */
-extern bool g_backpack_hidden;
 static int m_setcoregui(lua_State *L)
 {
-    int t = lua_isnumber(L, 2) ? (int)lua_tointeger(L, 2) : -1;
-    if (t < 0) {
-        lua_getfield(L, 2, "Value");
-        t = (int)lua_tointeger(L, -1);
-        lua_pop(L, 1);
-    }
-    if (t == 2 || t == 5) g_backpack_hidden = !lua_toboolean(L, 3);
+    int t = core_type(L, 2);
+    bool on = lua_toboolean(L, 3);
+    for (int k = 0; k < UB_CORE_COUNT; ++k)
+        if (t == 4 || t == k) S.g->hud.core_off[k] = !on;
     return 0;
 }
 
 static int m_getcoregui(lua_State *L)
 {
-    int t = lua_isnumber(L, 2) ? (int)lua_tointeger(L, 2) : -1;
-    if (t < 0) {
-        lua_getfield(L, 2, "Value");
-        t = (int)lua_tointeger(L, -1);
+    int t = core_type(L, 2);
+    bool on = true;
+    for (int k = 0; k < UB_CORE_COUNT; ++k)
+        if (t == 4 || t == k) on = on && !S.g->hud.core_off[k];
+    lua_pushboolean(L, on);
+    return 1;
+}
+
+/* StarterGui:SetCore(name, value): ChatMakeSystemMessage, SendNotification,
+ * ResetButtonCallback, ChatActive... ; GetCore */
+static u32 table_color(lua_State *L, int t, u32 dflt)
+{
+    lua_getfield(L, t, "Color");
+    u32 c = is_c3(L, -1) ? check_c3_rgb(L, -1) : dflt;
+    lua_pop(L, 1);
+    return c;
+}
+
+static const char *table_str(lua_State *L, int t, const char *k, const char *dflt)
+{
+    lua_getfield(L, t, k);
+    const char *s = lua_isstring(L, -1) ? lua_tostring(L, -1) : dflt;
+    lua_pop(L, 1); /* (the string stays alive in the table) */
+    return s;
+}
+
+static int m_setcore(lua_State *L)
+{
+    const char *k = luaL_checkstring(L, 2);
+    if (streq(k, "ChatMakeSystemMessage") && lua_istable(L, 3)) {
+        ub_hud_chat(S.g, "", table_str(L, 3, "Text", ""), table_color(L, 3, 0xF0F0F0));
+    } else if (streq(k, "SendNotification") && lua_istable(L, 3)) {
+        lua_getfield(L, 3, "Duration");
+        f32 d = lua_isnumber(L, -1) ? (f32)lua_tonumber(L, -1) : 5;
         lua_pop(L, 1);
+        ub_hud_notify(S.g, table_str(L, 3, "Title", ""), table_str(L, 3, "Text", ""), d);
+    } else if (streq(k, "ResetButtonCallback")) {
+        S.g->hud.reset_off = lua_isboolean(L, 3) && !lua_toboolean(L, 3);
+    } else if (streq(k, "TopbarEnabled")) {
+        bool on = lua_toboolean(L, 3);
+        for (int c = 0; c < UB_CORE_COUNT; ++c) S.g->hud.core_off[c] = !on;
     }
-    lua_pushboolean(L, (t == 2 || t == 5) ? !g_backpack_hidden : 1);
+    return 0; /* the rest (ChatActive, PointsNotificationsActive...) mean nothing here */
+}
+
+static int m_getcore(lua_State *L)
+{
+    const char *k = luaL_checkstring(L, 2);
+    if (streq(k, "ChatActive") || streq(k, "PlayerListActive")) lua_pushboolean(L, 1);
+    else if (streq(k, "TopbarEnabled")) lua_pushboolean(L, !S.g->hud.core_off[UB_CORE_CHAT]);
+    else if (streq(k, "DevConsoleVisible")) lua_pushboolean(L, 0);
+    else lua_pushnil(L);
     return 1;
 }
 
@@ -1582,9 +1617,9 @@ lua_CFunction gui_method(i32 idx, const char *k)
     if (streq(cls, "StarterGui")) {
         if (streq(k, "SetCoreGuiEnabled")) return m_setcoregui;
         if (streq(k, "RegisterSetCore") || streq(k, "RegisterGetCore")) return m_noop;
-        if (streq(k, "GetCoreGuiEnabled")) return m_getcoregui;
         if (streq(k, "SetCore")) return m_setcore;
-        if (streq(k, "GetCore")) return m_nil;
+        if (streq(k, "GetCore")) return m_getcore;
+        if (streq(k, "GetCoreGuiEnabled")) return m_getcoregui;
     }
     return NULL;
 }

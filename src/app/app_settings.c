@@ -23,6 +23,7 @@ void settings_defaults(ub_settings *s)
     s->scripts = true;
     s->zoom = 22;
     s->pitch_deg = -20;
+    s->hide_overlay = true; /* the client UI shows what players need; F3 adds the details */
 }
 
 static i32 parse_int(const char *s)
@@ -64,7 +65,9 @@ void settings_parse(ub_settings *s, const char *text)
         const char *v;
         ub_display_prefs *p = &s->prefs;
         if (key_is(buf, "renderer", &v))
-            p->backend = str_is(v, "opengl") ? UB_BACKEND_PREF_OPENGL : str_is(v, "software") ? UB_BACKEND_PREF_SOFTWARE : UB_BACKEND_PREF_AUTO;
+            p->backend = str_is(v, "opengl") ? UB_BACKEND_PREF_OPENGL : str_is(v, "software") ? UB_BACKEND_PREF_SOFTWARE
+                       : str_is(v, "fast") ? UB_BACKEND_PREF_FAST : UB_BACKEND_PREF_AUTO;
+        else if (key_is(buf, "render_threads", &v)) s->render_threads = UB_CLAMP(parse_int(v), 0, 16);
         else if (key_is(buf, "fullscreen", &v)) p->fullscreen = parse_int(v) != 0;
         else if (key_is(buf, "fullscreen_w", &v)) p->fs_width = UB_CLAMP(parse_int(v), 0, 16384);
         else if (key_is(buf, "fullscreen_h", &v)) p->fs_height = UB_CLAMP(parse_int(v), 0, 16384);
@@ -96,12 +99,15 @@ void settings_parse(ub_settings *s, const char *text)
 
 int settings_write(const ub_settings *s, char *buf, int cap)
 {
-    static const char *const renderer[] = { "auto", "opengl", "software" };
+    static const char *const renderer[] = { "auto", "opengl", "software", "fast" };
     const ub_display_prefs *p = &s->prefs;
     return ub_fmt(buf, cap,
                   "# Uniblox settings (written on exit, or by the menu: Esc)\r\n"
-                  "# renderer: auto (OpenGL if available), opengl or software\r\n"
+                  "# renderer: auto (OpenGL with a real driver, else fast), opengl, fast (software, every processor)\r\n"
+                  "# or software (the plain software renderer)\r\n"
                   "renderer=%s\r\n"
+                  "# render_threads (fast renderer): threads that draw, 0 = one per processor\r\n"
+                  "render_threads=%d\r\n"
                   "# quality (OpenGL): 0 = low, 1 = medium (shadows), 2 = high (shadows + anti-aliasing)\r\n"
                   "quality=%d\r\n"
                   "# gl_shaders: 1 = full effects, 0 = basic OpenGL 1.1 (for problem drivers)\r\n"
@@ -128,7 +134,7 @@ int settings_write(const ub_settings *s, char *buf, int cap)
                   "# place: place file to open at start, relative to this folder (.ubx, .rbxl, .rbxm, .rbxlx, .rbxmx),\r\n"
                   "# e.g. places/castle.ubx. Empty = the built-in demo. A file named on the command line wins\r\n"
                   "place=%s\r\n",
-                  renderer[p->backend % 3], s->quality, s->gl_shaders, p->fps_cap, p->vsync, p->fullscreen,
+                  renderer[p->backend % 4], s->render_threads, s->quality, s->gl_shaders, p->fps_cap, p->vsync, p->fullscreen,
                   p->window_w, p->window_h, p->fs_width, p->fs_height, p->sw_height, s->colors, s->changed_only,
                   p->timer_qpc ? "qpc" : "auto", !s->hide_overlay, s->volume, s->muted, s->mouse_pct, s->invert_y,
                   s->fov, s->zoom, s->yaw_deg, s->pitch_deg, s->scripts, s->place);
@@ -151,9 +157,9 @@ static int display_page(ub_menu *m, ub_settings *s)
 {
     int f = 0, d;
     ub_display_prefs *p = &s->prefs;
-    static const char *const renderers[] = { "Automatic", "OpenGL", "Software" };
-    if ((d = ui_stepper("Renderer (restart)", renderers[p->backend % 3])) != 0) {
-        p->backend = (ub_backend_pref)step_index(3, (int)p->backend, d);
+    static const char *const renderers[] = { "Automatic", "OpenGL", "Software (plain)", "Software (fast)" };
+    if ((d = ui_stepper("Renderer (restart)", renderers[p->backend % 4])) != 0) {
+        p->backend = (ub_backend_pref)step_index(4, (int)p->backend, d);
         f |= SET_RESTART_NEEDED;
     }
     if (on_off("Fullscreen", &p->fullscreen)) f |= SET_FULLSCREEN;

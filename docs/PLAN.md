@@ -83,6 +83,7 @@ tests/          host unit tests (make test)
 | 8A | Roblox GUIs (up to 2022) | Places' ScreenGuis, BillboardGuis and SurfaceGuis look and work as in Roblox, driven by their LocalScripts | **Built.** Every GUI class and property imported and saved, Roblox's layout rules, rounded/stroked/gradient drawing, rich text, images from a local folder, input, LocalScripts, remotes, UserInputService, Mouse, Camera. The demo has a working GUI. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8B | Roblox scripts (up to 2022) | 2022-era game scripts run unchanged | **Built.** Luau's 2022 syntax (type annotations, if-expressions, generalised iteration, new literals and escapes) and library (bit32, utf8, Random, DateTime, os.date, string.pack, table.freeze...), attributes and tags from place files, CollectionService, 118 classes with Roblox's defaults, overlap queries, ClickDetectors, ProximityPrompts, Humanoid states, offline answers from Roblox's online services. The demo has a lamp with a prompt and a clickable block. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8C | Real Roblox games from .rbxl | Open a 2022 game's place file and play it | **Built**, but terrain and decals are not done. Unions and MeshParts keep their shape (the collision pieces saved in every file, drawn and collided with), `.mesh` files and sounds from a local content folder, SpecialMeshes, Atmosphere; R15/R6 rigs with Motor6D, joints from scripts, Tools, Backpack and hotbar, Teams and team spawns; hinges (motor, servo), ball sockets, prismatic, ropes, rods, springs and every body mover; CFrame properties; XML `.rbxlx`/`.rbxmx`; a 20,000-part place loads in about a second. Passes unit tests and the Wine smoke tests. Needs a run on a real install with real 2022 places. Not done: terrain (its format is not documented), decals and textures, animations |
+| 9A | Client UI + a fast renderer for NT 3.51/4.0 | A 2021-style client UI (chat, player list with leaderstats, health, notifications, game menu); a renderer faster than the software one where there is no OpenGL (WINVBE) | **Built.** The client UI in Uniblox's own look, fed by `SetCore`, `SetCoreGuiEnabled` and `Chat:Chat`; the fast software renderer (sorted, coarse tile depth, longer perspective steps, packed texture coordinates, every processor), about twice as fast as the plain one on the demo place under Wine. Passes unit tests and the Wine smoke tests. Needs a run on a real install (NT 3.51/4.0 with WINVBE, ideally with two processors) |
 | 9 | Loopback networking | Single-player runs entirely through replication | |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
@@ -578,7 +579,43 @@ tests/          host unit tests (make test)
   sequential-impulse joints inside the solver's substeps; forces and
   velocity drives are applied each substep, like gravity.
 
+## Milestone 9A notes
+
+- **The client UI** (`app/app_hud.c`) is GUI objects under the game's
+  CoreGui folder, made when a game starts and updated every frame. Each
+  property is set only if it changed, so an idle frame changes nothing and
+  the GUI is not laid out again. It hit-tests clicks itself (its layout is
+  its own), so it works without scripts. What places tell it is in
+  `ub_game.hud` (`game/ub_game.h`): parts turned off, the reset button,
+  chat lines, notifications and bubbles. Player chat goes through
+  `ub_game_player_chat` (line, bubble, `Chatted`).
+- **The fast renderer** is a mode of the software backend
+  (`render/ub_render_sw.c`): `sw_part` queues, and `sw_flush` (from
+  `ub_render_end_scene`, or `sw_end`) sorts, sets up every polygon once,
+  then runs `strip_job` for each thread through `plat_parallel`. The rows of
+  16×16 tiles go round the threads; each keeps the farthest depth of each
+  tile in its row (refreshed only when a polygon covers a good part of the
+  tile, since a stale value is still a safe bound). Colour tables in use
+  this frame are never replaced: a clashing slot takes a table from a pool.
+- **Threads on NT 3.51:** `CreateThread`, `CreateEventW`, `SetEvent` and
+  `WaitForSingleObject` were already used; `GetSystemInfo` (NT 3.1) gives
+  the number of processors. Workers are made on first use and wait on an
+  event each.
+- **x87 conversions:** `ub_rint` (adding 1.5 × 2^52) replaces C casts on
+  the drawing paths; `ub_floorf`/`ub_ceilf` use it and stay exact.
+- **Benchmarks** (demo place, 960×540, Wine on a 4-processor VM): 3D scene
+  9.0 ms (plain) against 4.3 ms (fast, 4 threads) and 7.0 ms (fast, 1
+  thread); 70 against 106 fps. Natively the same frames take 5.2, 3.3 and
+  2.6 ms with 1, 2 and 4 threads.
+
 ## Open items
+
+- Milestone 9A on a real install: on NT 3.51 or 4.0 with WINVBE, start
+  with `renderer=auto` (or `fast`) and press F5, then set
+  `renderer=software` and press F5 again; send `uniblox.log` (the
+  benchmark lines give the 3D scene's time, and the CPU line the number of
+  processors). Try the client UI: chat with `/`, Tab, Esc and its Reset
+  and Leave, in 256 colours too.
 
 - Milestone 8C on a real install: open a 2022 game's `.rbxl` (or a place
   saved as `.rbxlx`), walk around its unions and meshes, try its tools

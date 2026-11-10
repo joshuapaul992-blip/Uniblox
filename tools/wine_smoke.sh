@@ -56,8 +56,9 @@ start_game() {
 }
 
 stop_game() {
-    xdotool key Escape; sleep 0.5                       # the menu
-    xdotool key q                                       # Quit
+    xdotool key Escape; sleep 0.5                       # the game menu
+    xdotool key l; sleep 0.3                            # Leave...
+    xdotool key Return                                  # ...yes
     for _ in $(seq 50); do kill -0 "$GAME_PID" 2>/dev/null || break; sleep 0.2; done
     if kill -0 "$GAME_PID" 2>/dev/null; then
         echo "game did not exit after Escape" >&2
@@ -71,8 +72,8 @@ start_game
 eval "$(xdotool getwindowgeometry --shell "$WIN")"
 sleep 0.5
 import -window root "${SHOT%.png}-gui.png"              # the GUI: the panel, the sign, the door's label
-# the panel's "Back to the start" button: top right, below the title and the count
-xdotool mousemove $((X + WIDTH - 12 - 105)) $((Y + 36 + 12 + 10 + 22 + 6 + 18 + 6 + 15)); sleep 0.3
+# the panel's "Back to the start" button: top right under the player list, below the title and the count
+xdotool mousemove $((X + WIDTH - 12 - 105)) $((Y + 36 + 64 + 99)); sleep 0.3
 xdotool click 1; sleep 0.5
 xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT * 3 / 4)); sleep 0.2
 xdotool keydown w; sleep 1.3                            # walk into the scripted door...
@@ -82,11 +83,14 @@ xdotool keydown space; sleep 0.1; xdotool keyup space   # jump
 sleep 0.8
 xdotool key --delay 0 Return h i Return                 # chat text, all in one burst
 xdotool key slash; xdotool type 'x'; xdotool key Escape  # open + cancel: must not quit
+sleep 0.5
+import -window root "${SHOT%.png}-chat.png"              # the chat line and the bubble over the head
+xdotool key Tab; sleep 0.3; xdotool key Tab             # the player list: hide, show
 eval "$(xdotool getwindowgeometry --shell "$WIN")"
 # Wine can drop a button event that arrives in the same instant as the
 # pointer move onto its window, so pause after every move.
-xdotool mousemove $((X + WIDTH / 4)) $((Y + HEIGHT / 2)); sleep 0.3
-xdotool click 1                                         # click (left side)
+xdotool mousemove $((X + WIDTH / 4)) $((Y + HEIGHT * 3 / 4)); sleep 0.3
+xdotool click 1                                         # click (left side, below the chat)
 sleep 0.2
 xdotool click 4 click 4 click 4                         # wheel up x3 = zoom in
 sleep 0.2
@@ -97,21 +101,24 @@ for _ in 1 2 3 4 5; do xdotool mousemove_relative -- 20 0; sleep 0.1; done
 xdotool mouseup 3
 sleep 0.5
 import -window root "$SHOT"
-if [ "$RENDERER" = software ]; then
+if [ "$RENDERER" != opengl ]; then
     xdotool key F8; sleep 1                             # 8-bit palette rendering
     import -window root "${SHOT%.png}-8bit.png"
     xdotool key F8; sleep 0.3                           # back to 32-bit
 fi
 xdotool key F6; sleep 0.5                               # quality (GL) / resolution (software)
 xdotool key F9; sleep 0.3                               # fps cap 120 -> 144
-xdotool key Escape; sleep 0.6                           # the menu
+xdotool key Escape; sleep 0.6                           # the game menu
 import -window root "${SHOT%.png}-menu.png"
-xdotool mousemove $((X + 480)) $((Y + 249)); sleep 0.3; xdotool click 1; sleep 0.5   # Settings
+xdotool key Tab; sleep 0.3; xdotool key Tab; sleep 0.4  # its Help tab
+import -window root "${SHOT%.png}-help.png"
+xdotool key r; sleep 0.3; xdotool key Escape; sleep 0.3 # reset? no
+xdotool key s; sleep 0.5                                # Settings
 import -window root "${SHOT%.png}-settings.png"
 # Frame rate cap > (240): the 7th row with software, the 5th with OpenGL (no resolution, colours, sending rows)
 FPS_ROW_Y=$([ "$RENDERER" = opengl ] && echo 275 || echo 321)
 xdotool mousemove $((X + 742)) $((Y + FPS_ROW_Y)); sleep 0.3; xdotool click 1; sleep 0.5
-xdotool key Escape; sleep 0.3; xdotool key Escape; sleep 0.5                         # back, resume
+xdotool key Escape; sleep 0.3; xdotool key Escape; sleep 0.5                         # back to the game menu, resume
 xdotool key F11; sleep 1.5                              # fullscreen
 import -window root "${SHOT%.png}-fullscreen.png"
 xdotool key F11; sleep 1                                # back to a window
@@ -146,7 +153,7 @@ expect "$RUN1" "physics: all loose parts at rest after" "the demo's loose parts 
 expect "$RUN2" "loaded uniblox.cfg" "settings loaded on second run"
 expect "$RUN2" "shutdown complete" "clean shutdown"
 expect "$RUN2" "imported Roblox place" "Roblox place imported from the command line"
-expect "$RUN2" "18 parts, 1 mesh/union placeholders" "all castle parts imported"
+expect "$RUN2" "18 parts, .* 1 mesh/union placeholders" "all castle parts imported"
 expect "$RUN2" "saved places/castle-generated.ubx" "F7 saved the place as .ubx"
 expect "$LOG" "loaded place \"places/castle-generated.ubx\"" "place= in the settings opened the saved .ubx"
 expect "$LOG" "shutdown complete" "third run shut down cleanly"
@@ -166,16 +173,25 @@ expect "$RUN1" "mouse look on" "right button started mouse-look"
 expect "$RUN1" "saved uniblox.cfg" "settings saved"
 expect "$RUN1" "benchmark: [0-9]* frames" "F5 benchmark completed"
 expect "$RUN1" "frame rate cap 144" "F9 changed the fps cap"
-expect "$RUN1" "menu opened" "Esc opened the menu"
+expect "$RUN1" "game menu opened" "Esc opened the game menu"
+expect "$RUN1" "menu opened" "S in the game menu opened the settings"
 expect "$CFG" "fps_cap=240" "the menu changed the fps cap and saved it"
 expect "$RUN1" "frame rate cap 240" "the new cap took effect at once"
 expect "$RUN1" "menu closed" "Esc closed the menu"
-expect "$RUN1" "quitting from the menu" "Quit in the menu"
+expect "$RUN1" "leaving from the game menu" "Leave in the game menu"
+if grep -q "reset character from the menu" "$RUN1"; then echo "  FAIL  Esc did not cancel the reset"; fail=1
+else echo "  ok    Esc cancelled the reset question"; fi
 expect "$RUN1" "display: fullscreen" "F11 went fullscreen"
 expect "$RUN1" "display: windowed" "F11 came back to a window"
 if [ "$RENDERER" = opengl ]; then
     expect "$RUN1" "renderer: OpenGL" "OpenGL renderer started"
     expect "$RUN1" "quality: medium" "F6 changed graphics quality"
+elif [ "$RENDERER" = fast ]; then
+    expect "$RUN1" "renderer: fast software renderer, [0-9]* thread" "fast software renderer started"
+    expect "$RUN1" "CPU: .*; [0-9]* processor" "processors counted"
+    expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
+    expect "$CFG" "colors=32" "colour choice saved"
+    expect "$RUN1" "software render height" "F6 changed the render resolution"
 else
     expect "$RUN1" "renderer: software" "software renderer started"
     expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
@@ -186,6 +202,6 @@ expect "$CFG" "zoom=14" "mouse wheel zoomed in 3 notches (22 -> 14)"
 if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
 else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
 grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$RUN1" | sed 's/^/  /' || true
-echo "Screenshots: $SHOT, ${SHOT%.png}-gui.png, ${SHOT%.png}-door.png, ${SHOT%.png}-fullscreen.png"
+echo "Screenshots: $SHOT, ${SHOT%.png}-gui.png, ${SHOT%.png}-door.png, ${SHOT%.png}-chat.png, ${SHOT%.png}-menu.png, ${SHOT%.png}-help.png, ${SHOT%.png}-fullscreen.png"
 echo "Logs:       $RUN1, $RUN2, $LOG"
 exit $fail

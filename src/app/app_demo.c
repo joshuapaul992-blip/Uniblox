@@ -19,6 +19,7 @@
  * scripts. */
 #include "app/app.h"
 #include "app/app_play.h"
+#include "app/app_hud.h"
 #include "gui/ub_gui.h"
 #include "app/app_settings.h"
 #include "audio/ub_mixer.h"
@@ -61,6 +62,7 @@ static bool g_demo_world;
 static ub_import_stats g_import;
 static bool g_imported;
 static char g_place_arg[260];         /* place from the command line or config */
+static bool g_auto_bench;             /* "uniblox.exe -benchmark": run the benchmark, then quit */
 #define g_cfg_place g_set.place
 static char g_status[160];            /* last load/save message for the overlay */
 
@@ -91,7 +93,7 @@ static ub_render_stats g_stats;
 static bool g_bench;
 static f32 g_bench_t;
 static u32 g_bench_frames;
-static u64 g_bench_render_us, g_bench_present_us, g_bench_polys, g_bench_pixels;
+static u64 g_bench_gui_us, g_bench_render_us, g_bench_scene_us, g_bench_present_us, g_bench_polys, g_bench_pixels;
 static u32 g_bench_saved_cap;
 static char g_bench_result[160];
 
@@ -114,6 +116,7 @@ static void world_changed(void)
     if (g_game_on) ub_game_stop(&g_game);
     g_game_on = ub_game_start(&g_game, &g_world, g_run_scripts);
     play_view_reset(&g_view, &g_game);
+    hud_begin_game(g_game_on ? &g_game : NULL);
     g_bench_center = g_demo_world ? v3(0, 3, 40) : v3_add(g_game.spawn, v3(0, 3, 0));
     char title[128];
     ub_fmt(title, sizeof title, "Uniblox - %s", GW->name);
@@ -376,6 +379,10 @@ void app_preinit(ub_display_prefs *prefs)
     g_prefs = *prefs; /* platform defaults: 120 fps cap, software height 480 */
     g_prefs.fs_width = g_prefs.fs_height = 0;
     plat_command_line_arg(g_place_arg, sizeof g_place_arg); /* "uniblox.exe castle.rbxl" */
+    if (!ub_strcmp(g_place_arg, "-benchmark") || !ub_strcmp(g_place_arg, "/benchmark")) {
+        g_auto_bench = true;
+        g_place_arg[0] = 0;
+    }
     load_config();
     *prefs = g_prefs;
     g_win_w = prefs->window_w;
@@ -390,6 +397,9 @@ bool app_init(const ub_system_info *sys, const ub_frame *frame)
         ub_warn("only %u MB RAM; Uniblox needs %u MB (%u MB recommended)", ram_mb,
                 UB_RAM_MIN_MB, UB_RAM_REC_MB);
     ub_render_force_fixed_function(!g_gl_shaders);
+    /* without OpenGL, the fast software renderer unless the plain one is asked for */
+    ub_render_set_fast(frame->backend == UB_BACKEND_SOFTWARE && g_prefs.backend != UB_BACKEND_PREF_SOFTWARE,
+                       g_set.render_threads);
     if (!ub_render_init(frame, g_renderer_desc, sizeof g_renderer_desc)) {
         ub_error("renderer failed to start: %s", g_renderer_desc);
         return false;
@@ -467,7 +477,7 @@ static bool handle_typing(const ub_input *in)
             if (len > 0) {
                 ub_info("typed: %s", g_typed);
                 for (int i = 0; i <= len; ++i) g_last_message[i] = g_typed[i];
-                if (g_game.scripts) ub_script_chatted(g_typed); /* Player.Chatted */
+                if (g_game_on) ub_game_player_chat(&g_game, g_typed); /* the chat, a bubble, Player.Chatted */
             }
             g_typed[0] = 0;
             g_typing = false;
@@ -523,7 +533,7 @@ static void start_benchmark(ub_frame *frame)
     g_bench = true;
     g_bench_t = 0;
     g_bench_frames = 0;
-    g_bench_render_us = g_bench_present_us = g_bench_polys = g_bench_pixels = 0;
+    g_bench_gui_us = g_bench_render_us = g_bench_scene_us = g_bench_present_us = g_bench_polys = g_bench_pixels = 0;
     g_bench_saved_cap = frame->fps_cap;
     plat_set_fps_cap(0); /* measure what the machine can do */
     ub_info("benchmark: started (%d s flythrough, frame cap off)", BENCH_SECONDS);
@@ -541,20 +551,99 @@ static void finish_benchmark(ub_frame *frame, bool cancelled)
     u32 fps10 = (u32)((f32)g_bench_frames * 10.0f / g_bench_t);
     u32 ms10 = (u32)(g_bench_render_us / g_bench_frames / 100u);
     u32 pms10 = (u32)(g_bench_present_us / g_bench_frames / 100u);
-    const char *backend = frame->backend == UB_BACKEND_OPENGL ? "OpenGL" : "software";
+    u32 sms10 = (u32)(g_bench_scene_us / g_bench_frames / 100u);
+    u32 gms10 = (u32)(g_bench_gui_us / g_bench_frames / 100u);
+    const char *backend = frame->backend == UB_BACKEND_OPENGL ? "OpenGL" : ub_render_fast() ? "fast software" : "software";
     int rw = frame->fb ? frame->fb->width : frame->width, rh = frame->fb ? frame->fb->height : frame->height;
     ub_fmt(g_bench_result, sizeof g_bench_result,
            "Benchmark: %u.%u fps at %dx%d (%s %s; CPU %u.%u ms, present %u.%u ms)",
            fps10 / 10, fps10 % 10, frame->width, frame->height, backend, mode_name(frame),
            ms10 / 10, ms10 % 10, pms10 / 10, pms10 % 10);
-    ub_info("benchmark: %u frames in %u ms = %u.%u fps; render %u.%u ms/frame, present %u.%u ms/frame; "
+    ub_info("benchmark: %u frames in %u ms = %u.%u fps; render %u.%u ms/frame (3D scene %u.%u; GUI %u.%u), present %u.%u ms/frame; "
             "%u polys, %u pixels per frame; window %dx%d, render %dx%d; %s %s; %s; %s; %s%s%s",
-            g_bench_frames, (u32)(g_bench_t * 1000.0f), fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10,
+            g_bench_frames, (u32)(g_bench_t * 1000.0f), fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10, sms10 / 10, sms10 % 10, gms10 / 10, gms10 % 10,
             pms10 / 10, pms10 % 10,
             (u32)(g_bench_polys / g_bench_frames), (u32)(g_bench_pixels / g_bench_frames),
             frame->width, frame->height, rw, rh, backend, mode_name(frame), g_renderer_desc,
             g_sys.cpu_desc, g_sys.os_name, frame->present_detail[0] ? "; present: " : "",
             frame->present_detail);
+    if (g_auto_bench) {
+        ub_info("benchmark: done (-benchmark); quitting");
+        plat_request_quit();
+    }
+}
+
+/* The client UI's keys and clicks (app_hud.c): the game menu (Esc), its
+ * tabs and buttons (R reset, L leave, S settings, Enter yes), the player
+ * list (Tab), the chat button and the chat box. Returns true if it used
+ * this frame's input, so the game does not see it. */
+static bool hud_input(const ub_frame *frame, const ub_input *in, bool keys_free)
+{
+    int sw, sh, act = HUD_DO_NONE;
+    play_gui_screen_size(frame, &sw, &sh);
+    bool menu = hud_menu_open(), used = menu;
+    if (menu) {
+        int c = hud_confirming();
+        if (in->key_pressed[UB_KEY_ESCAPE]) act = c ? HUD_DO_CANCEL : HUD_DO_RESUME;
+        else if (c && in->key_pressed[UB_KEY_ENTER]) act = c == 1 ? HUD_DO_RESET : HUD_DO_LEAVE;
+        else if (!c && in->key_pressed['R']) act = HUD_ASK_RESET;
+        else if (!c && in->key_pressed['L']) act = HUD_ASK_LEAVE;
+        else if (!c && in->key_pressed['S']) act = HUD_DO_SETTINGS;
+        else if (in->key_pressed[UB_KEY_TAB]) hud_set_tab(-1); /* the next tab */
+    } else if (keys_free && in->key_pressed[UB_KEY_ESCAPE]) {
+        hud_set_menu(true);
+        ub_info("game menu opened");
+        return true;
+    } else if (keys_free && in->key_pressed[UB_KEY_TAB]) {
+        hud_toggle_list();
+    }
+    if (in->mouse_pressed[UB_MOUSE_LEFT] && !in->mouse_captured && frame->width > 0 && frame->height > 0) {
+        int x = in->mouse_x * sw / frame->width, y = in->mouse_y * sh / frame->height;
+        int hit = hud_hit(x, y);
+        if (hit >= 0) used = true;
+        if (hit == HUD_HIT_MENU) {
+            if (menu) act = HUD_DO_RESUME;
+            else {
+                hud_set_menu(true);
+                ub_info("game menu opened");
+            }
+        } else if (hit == HUD_HIT_CHAT) hud_toggle_chat();
+        else if (hit == HUD_HIT_CHAT_INPUT && !g_typing) {
+            g_typing = true;
+            g_typed[0] = 0;
+        } else if (hit == HUD_HIT_LIST) hud_toggle_list();
+        else if (hit >= HUD_HIT_TAB_PEOPLE && hit <= HUD_HIT_TAB_HELP) hud_set_tab(hit - HUD_HIT_TAB_PEOPLE);
+        else if (hit >= HUD_HIT_BTN0 && hit <= HUD_HIT_BTN2) act = hud_button_meaning(hit - HUD_HIT_BTN0);
+    }
+    switch (act) {
+    case HUD_DO_RESUME:
+        hud_set_menu(false);
+        ub_info("game menu closed");
+        break;
+    case HUD_ASK_RESET:
+        if (!g_game.hud.reset_off) hud_confirm(1);
+        break;
+    case HUD_ASK_LEAVE: hud_confirm(2); break;
+    case HUD_DO_CANCEL: hud_confirm(0); break;
+    case HUD_DO_RESET:
+        hud_set_menu(false);
+        ub_info("reset character from the menu");
+        ub_game_reset_character(&g_game);
+        break;
+    case HUD_DO_LEAVE:
+        ub_info("leaving from the game menu");
+        plat_request_quit();
+        break;
+    case HUD_DO_SETTINGS:
+        hud_set_menu(false);
+        g_menu_open = true; /* the settings menu (it reads Esc itself from the next frame) */
+        g_menu.page = 1; /* straight to the settings: the game menu is the paused page */
+        g_menu.opengl = frame->backend == UB_BACKEND_OPENGL;
+        ub_info("menu opened");
+        break;
+    default: break;
+    }
+    return used || act != HUD_DO_NONE;
 }
 
 void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
@@ -575,9 +664,14 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
 
     /* --- the place's GUI first: it may take the mouse, the wheel or the
      * keyboard (a TextBox), and then the game does not get them --- */
+    if (g_game_on) {
+        int sw, sh;
+        play_gui_screen_size(frame, &sw, &sh);
+        hud_frame(sw, sh, g_typing ? g_typed : NULL, dt);
+    }
     bool gui_keys = g_game.gui && ub_gui_keyboard_taken(g_game.gui);
     if (g_game.gui) {
-        if (!g_menu_open && !g_bench && !g_typing) {
+        if (!g_menu_open && !g_bench && !g_typing && !hud_menu_open()) {
             play_gui_input(&g_game, frame, in, g_have_cam ? &g_last_cam : NULL, in->mouse_captured, g_time);
         } else {
             int sw, sh;
@@ -591,9 +685,12 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     if (g_game.gui && ub_gui_wheel_taken(g_game.gui)) pin.wheel = 0;
 
     /* --- text entry: while it is open, keys do not move us --- */
-    bool typed = !g_bench && !gui_keys && handle_typing(in);
+    bool typed = !g_bench && !gui_keys && !hud_menu_open() && handle_typing(in);
     bool menu_was_open = g_menu_open;
     bool play_keys = !typed && !g_typing && !gui_keys && !g_bench && !g_menu_open;
+    bool hud_used = !g_bench && !g_menu_open && g_game_on && hud_input(frame, in, play_keys);
+    if (hud_used || hud_menu_open()) play_keys = false;
+    if (hud_used) gui_mouse = true; /* (the click was the UI's) */
 
     /* --- function keys --- */
     if (play_keys && in->key_pressed[UB_KEY_F3]) g_hide_overlay = !g_hide_overlay;
@@ -602,7 +699,8 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_prefs.fullscreen = !frame->fullscreen;
         plat_set_fullscreen(g_prefs.fullscreen);
     }
-    if (play_keys && in->key_pressed[UB_KEY_F5]) start_benchmark(frame);
+    if ((play_keys && in->key_pressed[UB_KEY_F5]) || (g_auto_bench && !g_bench && g_time > 1.5f && !g_bench_result[0]))
+        start_benchmark(frame);
     else if (g_bench && (in->key_pressed[UB_KEY_ESCAPE] || in->key_pressed[UB_KEY_F5])) {
         finish_benchmark(frame, true);
         play_keys = false; /* this Escape only cancels */
@@ -636,7 +734,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     /* --- camera controls and movement --- */
     vec3 move;
     bool jump;
-    play_view_input(&g_view, &pin, dt, play_keys, !g_bench && !g_menu_open, &move, &jump);
+    play_view_input(&g_view, &pin, dt, play_keys, !g_bench && !g_menu_open && !hud_menu_open(), &move, &jump);
 
     /* --- the game: scripts, physics in fixed steps, the character --- */
     ub_game_update(&g_game, dt, move, jump);
@@ -668,8 +766,8 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_clicks++;
         ub_debug("click %u at %d,%d", g_clicks, in->mouse_x, in->mouse_y);
     }
-    if (play_keys && in->key_pressed[UB_KEY_ESCAPE] && !g_menu_open) {
-        g_menu_open = true; /* the menu (it reads Esc itself from the next frame) */
+    if (play_keys && in->key_pressed[UB_KEY_ESCAPE] && !g_menu_open && !g_game_on) {
+        g_menu_open = true; /* no game: straight to the settings (it reads Esc itself from the next frame) */
         g_menu.page = 0;
         g_menu.opengl = frame->backend == UB_BACKEND_OPENGL;
         ub_info("menu opened");
@@ -721,7 +819,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
                  frame->width, frame->height, frame->fps_cap, frame->sleep_us);
     }
     if ((!g_hide_overlay || g_bench) && !g_menu_open) {
-        int lh = ub_render_line_height(), x = lh / 2, y = lh / 3;
+        int lh = ub_render_line_height(), x = lh / 2, y = g_game_on && !g_bench ? hud_below_chat() : lh / 3;
         char line[192];
 #define LINE(...) do { ub_fmt(line, sizeof line, __VA_ARGS__); ub_render_text(x, y, line, 0xFFFFFF); y += lh; } while (0)
         u32 rms10 = g_stats.render_us / 100u, pms10 = frame->present_us / 100u;
@@ -775,11 +873,8 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
             if (g_status[0]) LINE("%s", g_status);
             LINE("Audio: %s%s", g_sys.audio_desc, g_muted ? " (muted)" : "");
             if (g_bench_result[0]) LINE("%s", g_bench_result);
-            if (g_typing) LINE("Say: %s_   (Enter send, Esc cancel)", g_typed);
-            else if (g_last_message[0]) LINE("Last message: %s", g_last_message);
-            else if (g_demo_world) LINE("Chat (Enter): fast, slow, night, day");
-            LINE("WASD move, Space jump, right mouse look, wheel zoom, F11 fullscreen");
-            LINE("F5 benchmark, F6 %s, F7 save place, F8 colours, F9 fps cap, F3 hide text, Esc menu",
+            if (g_demo_world && !g_last_message[0]) LINE("Chat (/): fast, slow, night, day");
+            LINE("F5 benchmark, F6 %s, F7 save place, F8 colours, F9 fps cap, F3 hide this text",
                  frame->backend == UB_BACKEND_OPENGL ? "quality" : "resolution");
         }
 #undef LINE
@@ -791,12 +886,25 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         int f = settings_menu(&g_menu, &g_set, &mi);
         ui_end();
         apply_menu(f, frame);
+        if (g_menu_open && g_game_on && g_menu.page == 0) {
+            /* Back (or Esc) from the settings: to the game menu, which replaces the paused page */
+            g_menu_open = false;
+            hud_set_menu(true);
+            hud_set_tab(1);
+            ub_info("menu closed");
+        }
     }
     ub_render_end(&g_stats);
 
     if (g_bench) {
         g_bench_frames++;
         g_bench_render_us += g_stats.render_us;
+        g_bench_scene_us += g_stats.scene_us;
+        if (g_game.gui) {
+            ub_gui_stats gs;
+            ub_gui_get_stats(g_game.gui, &gs);
+            g_bench_gui_us += gs.layout_us + gs.drawn_us;
+        }
         g_bench_present_us += frame->present_us;
         g_bench_polys += g_stats.polys_drawn;
         g_bench_pixels += g_stats.pixels_tested;

@@ -63,6 +63,41 @@ typedef struct {
 
 #define UB_RIG_JOINTS 20
 
+/* The client UI's state (milestone 9A): what scripts asked for and what
+ * the app shows (app/app_hud.c draws it). */
+enum { UB_CORE_PLAYERLIST, UB_CORE_HEALTH, UB_CORE_BACKPACK, UB_CORE_CHAT, UB_CORE_COUNT }; /* CoreGuiType values */
+#define UB_HUD_CHAT_LINES 64
+#define UB_HUD_TEXT 200
+typedef struct {
+    char who[48];              /* "" for a system message */
+    char text[UB_HUD_TEXT];
+    u32 color;                 /* the name's (or a system message's) colour, 0x00RRGGBB */
+    f32 time;                  /* game time it arrived */
+} ub_chat_line;
+
+typedef struct {
+    char title[64], text[UB_HUD_TEXT];
+    f32 time, duration;
+} ub_notice;
+
+typedef struct {
+    i32 adornee;               /* the part it floats over */
+    char text[UB_HUD_TEXT];
+    f32 time;
+} ub_bubble;
+
+typedef struct {
+    bool core_off[UB_CORE_COUNT];
+    bool reset_off;            /* SetCore("ResetButtonCallback", false) */
+    ub_chat_line chat[UB_HUD_CHAT_LINES];
+    u32 chat_count;            /* total ever: the newest is chat[(chat_count - 1) % LINES] */
+    ub_notice notices[8];
+    u32 notice_count;
+    ub_bubble bubbles[16];
+    u32 bubble_count;
+    bool reset_requested;      /* the menu's Reset Character (or a script) */
+} ub_hud_state;
+
 typedef struct ub_game {
     ub_world world;
     ub_physics phys;
@@ -100,6 +135,8 @@ typedef struct ub_game {
     f32 pose_facing, pose_phase, pose_amount, pose_fallen; /* set by the app (or from the movement) */
     bool pose_from_app;
     u32 spawn_count;            /* times the character has (re)spawned: tools refill */
+    i32 core_gui;               /* the engine's own GUI root (prompts, hotbar, the client UI) */
+    ub_hud_state hud;
 
     /* constraints and movers (game/ub_constraints.c) */
     bool constraints_dirty;
@@ -168,6 +205,17 @@ bool ub_game_carry(ub_game *g, i32 part, i32 follow, vec3 p, const mat3 *r, i32 
 /* Stops carries made by `joint` (or of `part` if joint is -1). */
 void ub_game_uncarry(ub_game *g, i32 part, i32 joint);
 bool ub_game_is_carried(const ub_game *g, i32 part);
+
+/* --- the client UI's state (game/ub_game.c) --- */
+void ub_hud_chat(ub_game *g, const char *who, const char *text, u32 color);
+void ub_hud_notify(ub_game *g, const char *title, const char *text, f32 duration);
+void ub_hud_bubble(ub_game *g, i32 adornee, const char *text);
+/* Resets the character (its health to 0; it comes back), unless scripts turned that off. */
+void ub_game_reset_character(ub_game *g);
+/* The player said something: the chat, a bubble over their head, Chatted. */
+void ub_game_player_chat(ub_game *g, const char *text);
+/* A name's colour in the chat (stable per name). */
+u32 ub_hud_name_color(const char *name);
 
 /* --- constraints and movers (game/ub_constraints.c) --- */
 void ub_constraints_rebuild(ub_game *g);

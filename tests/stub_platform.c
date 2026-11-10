@@ -43,6 +43,14 @@ void plat_mutex_lock(ub_mutex *m) { m->depth++; }
 void plat_mutex_unlock(ub_mutex *m) { m->depth--; }
 
 void plat_set_mouse_capture(bool on) { (void)on; }
+
+/* One processor here, so tests run the jobs in order: the results must
+ * not depend on how many threads draw. */
+int plat_cpu_count(void) { return 1; }
+void plat_parallel(void (*fn)(void *ctx, int job), void *ctx, int count)
+{
+    for (int j = 0; j < count; ++j) fn(ctx, j);
+}
 void plat_request_quit(void) {}
 void plat_set_pixel_format(ub_pixel_format f) { (void)f; }
 void plat_set_sw_resolution(int height) { (void)height; }

@@ -144,8 +144,12 @@ typedef struct {
     int pw, ph;
     bool dirty;
     u32 version;
+    u32 look;                   /* hash of what its picture depends on (layout and properties) */
+    bool look_set;
     ub_gui_quad quad;
 } glayer;
+
+static u32 layer_look(const ub_world *w, const glayer *l);
 
 typedef struct {
     u32 cls;                    /* class name offset it was classified from */
@@ -462,6 +466,7 @@ static void add_layer(ub_gui *g, i32 inst, u8 kind)
     l->kind = kind;
     l->live = true;
     l->dirty = true;
+    l->look_set = false;
     l->quad.image.id = g->next_id++;
 }
 
@@ -1224,8 +1229,93 @@ static void lay_out_layer(ub_gui *g, ub_world *w, glayer *l)
     l->laid_w = l->w;
     l->laid_h = l->h;
     l->laid_gen = g->gen;
-    l->dirty = true;
-    if (l->kind == K_SCREEN) g->scr_dirty = true;
+    u32 look = layer_look(w, l);
+    if (!l->look_set || look != l->look) {
+        l->dirty = true;
+        if (l->kind == K_SCREEN) g->scr_dirty = true;
+    }
+    l->look = look;
+    l->look_set = true;
+}
+
+/* ------------------------------------------------- did the picture change?
+ *
+ * Any change in the world (a script turning a part, physics) lays the
+ * GUI out again. Its pictures are drawn again only if what they show
+ * changed: the layout of their elements, or a property of the elements,
+ * of their corners, strokes and gradients, or of the layer itself. */
+
+static u32 mix(u32 h, u32 v) { return (h ^ v) * 16777619u; }
+static u32 mixf(u32 h, f32 f)
+{
+    u32 b;
+    memcpy(&b, &f, sizeof b);
+    return mix(h, b);
+}
+
+static u32 hash_value(u32 h, const ub_value *v)
+{
+    h = mix(h, v->type);
+    switch (v->type) {
+    case UB_PV_BOOL: return mix(h, v->v.b);
+    case UB_PV_INT: case UB_PV_REF: return mix(h, (u32)v->v.i);
+    case UB_PV_ENUM: case UB_PV_BRICKCOLOR: return mix(h, v->v.e);
+    case UB_PV_FLOAT: return mixf(h, v->v.f);
+    case UB_PV_DOUBLE: return mixf(mixf(h, (f32)v->v.d), (f32)(v->v.d * 1e-6));
+    case UB_PV_STRING:
+        for (u32 i = 0; i < v->v.str.len; ++i) h = mix(h, (u8)v->v.str.s[i]);
+        return h;
+    case UB_PV_COLOR3: case UB_PV_VECTOR3: return mixf(mixf(mixf(h, v->v.v3.x), v->v.v3.y), v->v.v3.z);
+    case UB_PV_VECTOR2: case UB_PV_NUMRANGE: return mixf(mixf(h, v->v.v2.x), v->v.v2.y);
+    case UB_PV_UDIM: return mix(mixf(h, v->v.ud.s), (u32)v->v.ud.o);
+    case UB_PV_UDIM2: return mix(mixf(mix(mixf(h, v->v.ud2.sx), (u32)v->v.ud2.ox), v->v.ud2.sy), (u32)v->v.ud2.oy);
+    case UB_PV_RECT: return mixf(mixf(mixf(mixf(h, v->v.rect.x0), v->v.rect.y0), v->v.rect.x1), v->v.rect.y1);
+    case UB_PV_NUMSEQ: case UB_PV_COLORSEQ: {
+        u32 n = v->v.seq.n * (v->type == UB_PV_NUMSEQ ? 3u : 4u);
+        for (u32 i = 0; v->v.seq.k && i < n; ++i) h = mixf(h, v->v.seq.k[i]);
+        return h;
+    }
+    case UB_PV_FONT:
+        for (const char *c = v->v.font.family; c && *c; ++c) h = mix(h, (u8)*c);
+        return mix(mix(h, v->v.font.weight), v->v.font.style);
+    case UB_PV_CFRAME:
+        for (int i = 0; v->v.cf.m && i < 12; ++i) h = mixf(h, v->v.cf.m[i]);
+        return h;
+    default: return h;
+    }
+}
+
+static u32 hash_inst(u32 h, const ub_world *w, i32 inst)
+{
+    if (inst < 0 || !ub_world_alive(w, inst)) return mix(h, 0xFFFFFFFFu);
+    int n = ub_world_prop_count(w, inst);
+    h = mix(mix(h, (u32)inst), (u32)n);
+    for (int i = 0; i < n; ++i) {
+        const ub_prop *p = ub_world_prop_at(w, inst, i);
+        h = hash_value(mix(h, p->key), &p->val);
+    }
+    return h;
+}
+
+static u32 layer_look(const ub_world *w, const glayer *l)
+{
+    u32 h = hash_inst(mix(2166136261u, (u32)l->n), w, l->inst);
+    h = mixf(mixf(h, l->w), l->h);
+    for (int i = 0; i < l->n; ++i) {
+        const gelem *e = &l->e[l->draw ? l->draw[i] : i];
+        h = mix(mix(mix(h, (u32)e->inst), e->kind), (u32)e->visible | (u32)e->clips << 1 | (u32)e->bar_v << 2 | (u32)e->bar_h << 3);
+        h = mixf(mixf(mixf(mixf(mixf(h, e->x), e->y), e->w), e->h), e->rot);
+        h = mixf(mixf(mixf(mixf(mixf(mixf(h, e->m.a), e->m.b), e->m.c), e->m.d), e->m.tx), e->m.ty);
+        h = mix(mix(mix(mix(h, (u32)e->cx0), (u32)e->cy0), (u32)e->cx1), (u32)e->cy1);
+        h = mixf(mix(mix(h, (u32)e->z), (u32)e->textsize), e->scale);
+        for (int k = 0; k < 4; ++k) h = mixf(h, e->pad[k]);
+        h = mixf(mixf(mixf(mixf(h, e->canvas_w), e->canvas_h), e->cpx), e->cpy);
+        h = hash_inst(h, w, e->inst);
+        if (e->corner >= 0) h = hash_inst(h, w, e->corner);
+        if (e->stroke >= 0) h = hash_inst(h, w, e->stroke);
+        if (e->gradient >= 0) h = hash_inst(h, w, e->gradient);
+    }
+    return h;
 }
 
 /* Reports properties the layout works out that changed (AbsoluteSize...). */

@@ -425,6 +425,12 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
         ub_game_fill_player_gui(g, true, added, 64);
     }
     g->gui = ub_gui_new();
+    /* the engine's own GUIs live under a CoreGui root scripts do not see into */
+    g->core_gui = ub_world_add(&g->world, -1, UB_CLASS_FOLDER, "CoreGui", "CoreGui");
+    if (g->core_gui >= 0) {
+        g->world.inst[g->core_gui].flags |= UB_INST_RUNTIME;
+        if (g->gui) ub_gui_set_core_root(g->gui, g->core_gui);
+    }
     if (g->gui) ub_gui_set_root(g->gui, g->player_gui);
     if (g->phys_ok && !ub_char_init(&g->chr, &g->phys, g->spawn)) {
         ub_error("physics: out of memory adding the character");
@@ -549,4 +555,69 @@ void ub_game_update(ub_game *g, f32 dt, vec3 move, bool jump)
     u64 s1 = plat_time_us();
     g->phys_us = (u32)(p1 - p0) - script_in_steps;
     g->script_us = (u32)(s1 - s0) - g->phys_us;
+}
+
+/* ------------------------------------------------------------ the HUD */
+
+static void copy_text(char *d, int cap, const char *s)
+{
+    int i = 0;
+    for (; s && s[i] && i < cap - 1; ++i) d[i] = s[i] == '\n' || s[i] == '\r' ? ' ' : s[i];
+    d[i] = 0;
+}
+
+void ub_hud_chat(ub_game *g, const char *who, const char *text, u32 color)
+{
+    ub_chat_line *l = &g->hud.chat[g->hud.chat_count % UB_HUD_CHAT_LINES];
+    copy_text(l->who, (int)sizeof l->who, who ? who : "");
+    copy_text(l->text, (int)sizeof l->text, text);
+    l->color = color;
+    l->time = g->time;
+    g->hud.chat_count++;
+}
+
+void ub_hud_notify(ub_game *g, const char *title, const char *text, f32 duration)
+{
+    ub_notice *n = &g->hud.notices[g->hud.notice_count % 8];
+    copy_text(n->title, (int)sizeof n->title, title);
+    copy_text(n->text, (int)sizeof n->text, text);
+    n->time = g->time;
+    n->duration = duration > 0 ? duration : 5;
+    g->hud.notice_count++;
+}
+
+void ub_hud_bubble(ub_game *g, i32 adornee, const char *text)
+{
+    ub_bubble *b = &g->hud.bubbles[g->hud.bubble_count % 16];
+    b->adornee = adornee;
+    copy_text(b->text, (int)sizeof b->text, text);
+    b->time = g->time;
+    g->hud.bubble_count++;
+}
+
+u32 ub_hud_name_color(const char *name)
+{
+    static const u32 k[8] = { 0xFD5A6E, 0x3DB4FF, 0x34C77B, 0xB97FD0, 0xF5A030, 0xF5D547, 0xF0B8CC, 0xD9C9A0 };
+    u32 h = 0;
+    for (const char *p = name; *p; ++p) h = h * 31u + (u8)*p;
+    return k[h % 8];
+}
+
+void ub_game_player_chat(ub_game *g, const char *text)
+{
+    if (!text || !text[0]) return;
+    const char *name = g->player >= 0 ? ub_world_str(&g->world, g->world.inst[g->player].name) : "Player";
+    ub_hud_chat(g, name, text, ub_hud_name_color(name));
+    if (g->char_model >= 0 && ub_world_alive(&g->world, g->char_model)) {
+        i32 head = ub_world_find_child(&g->world, g->char_model, "Head");
+        if (head >= 0) ub_hud_bubble(g, head, text);
+    }
+    if (g->scripts) ub_script_chatted(text); /* Player.Chatted */
+}
+
+void ub_game_reset_character(ub_game *g)
+{
+    if (g->hud.reset_off || g->dead) return;
+    g->hud.reset_requested = true;
+    ub_game_set_health(g, 0);
 }
