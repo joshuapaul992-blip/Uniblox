@@ -201,6 +201,7 @@ static void begin_input_frame(void)
 {
     memset(g_input.key_pressed, 0, sizeof g_input.key_pressed);
     memset(g_input.key_released, 0, sizeof g_input.key_released);
+    memset(g_input.key_repeat, 0, sizeof g_input.key_repeat);
     memset(g_input.mouse_pressed, 0, sizeof g_input.mouse_pressed);
     memset(g_input.mouse_released, 0, sizeof g_input.mouse_released);
     g_input.mouse_dx = g_input.mouse_dy = 0;
@@ -371,6 +372,7 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
         int k = (int)(wp & 0xFF);
         bool was_down = (lp & (1L << 30)) != 0; /* auto-repeat */
         if (!was_down) g_input.key_pressed[k] = true;
+        g_input.key_repeat[k] = true;
         g_input.key_down[k] = true;
         /* Let Alt+F4 through; swallow other system keys so a lone Alt or
          * F10 does not freeze the game loop in menu mode. */
@@ -454,7 +456,9 @@ static bool create_window(int client_w, int client_h)
 {
     RECT r = { 0, 0, client_w, client_h };
     AdjustWindowRect(&r, WINDOWED_STYLE, FALSE);
-    g_hwnd = CreateWindowW(L"UnibloxWindow", L"Uniblox", WINDOWED_STYLE,
+    u16 title[96];
+    ub_utf8_to_utf16(app_info()->title, title, 96);
+    g_hwnd = CreateWindowW(L"UnibloxWindow", (LPCWSTR)title, WINDOWED_STYLE,
                            CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top,
                            NULL, NULL, g_inst, NULL);
     if (!g_hwnd) return false;
@@ -503,7 +507,9 @@ static int fatal(const WCHAR *what)
     ub_utf16_to_utf8((const u16 *)what, utf8, sizeof utf8); /* WCHAR is 16-bit on Win32 */
     ub_error("fatal: %s", utf8);
     ub_log_close();
-    MessageBoxW(NULL, what, L"Uniblox", MB_OK | MB_ICONSTOP);
+    u16 title[96];
+    ub_utf8_to_utf16(app_info()->title, title, 96);
+    MessageBoxW(NULL, what, (LPCWSTR)title, MB_OK | MB_ICONSTOP);
     return 1;
 }
 
@@ -548,7 +554,7 @@ static int win32_main(void)
 
     timeBeginPeriod(1); /* 1 ms Sleep() granularity for the frame limiter */
     win32_init_base_dir();
-    ub_log_open("uniblox.log", "uniblox.old.log");
+    ub_log_open(app_info()->log_path, app_info()->old_log_path);
 
     ub_system_info sys;
     memset(&sys, 0, sizeof sys);
@@ -593,7 +599,7 @@ static int win32_main(void)
         g_frame.height = rc.bottom;
         if (g_frame.backend == UB_BACKEND_SOFTWARE) g_frame.fb = win32_sw_prepare(rc.right, rc.bottom);
     }
-    if (!app_init(&sys, &g_frame)) return fatal(L"Uniblox failed to initialise. See uniblox.log.");
+    if (!app_init(&sys, &g_frame)) return fatal(L"Uniblox failed to initialise. See the log file next to the program.");
 
     u64 last = plat_time_us();
     MSG msg;

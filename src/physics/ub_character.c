@@ -115,3 +115,14 @@ vec3 ub_char_velocity(const ub_character *c, const ub_physics *ph)
 {
     return ph->bodies[c->body].v;
 }
+
+void ub_char_set_velocity(ub_character *c, ub_physics *ph, vec3 v)
+{
+    ub_body *b = &ph->bodies[c->body];
+    b->v = v;
+    if (v.y > 0.5f) {
+        c->grounded = false;
+        c->ground_body = -1;
+        c->ground_part = -1;
+    }
+}

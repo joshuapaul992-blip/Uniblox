@@ -6,6 +6,10 @@
 # with GetProcAddress and given a fallback.
 
 [KERNEL32.DLL]
+# milestone 6: the editor's file list (NT 3.1 and later)
+FindFirstFileW
+FindNextFileW
+FindClose
 ExitProcess
 GetModuleHandleA
 GetModuleHandleW

@@ -502,6 +502,12 @@ static void draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amoun
 
 /* ------------------------------------------------------------ app API */
 
+const ub_app_info *app_info(void)
+{
+    static const ub_app_info info = { "Uniblox", "uniblox.log", "uniblox.old.log" };
+    return &info;
+}
+
 void app_preinit(ub_display_prefs *prefs)
 {
     g_prefs = *prefs; /* platform defaults: 120 fps cap, software height 480 */

@@ -14,4 +14,11 @@ size_t ub_strlen(const char *s);
 int ub_vfmt(char *buf, int size, const char *fmt, va_list ap);
 int ub_fmt(char *buf, int size, const char *fmt, ...);
 
+/* A number with up to `decimals` places, trailing zeros dropped
+ * ("2", "0.5", "-1.25"). */
+int ub_fmt_num(char *buf, int size, f32 v, int decimals);
+/* Parses "12", "-0.5", "3.", ".25", "1e3" (surrounding spaces allowed).
+ * False if it is not a number. */
+bool ub_parse_num(const char *s, f32 *out);
+
 #endif

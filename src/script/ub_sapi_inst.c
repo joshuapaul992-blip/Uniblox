@@ -281,32 +281,6 @@ static void full_name(i32 idx, char *buf, int cap)
         len += snprintf(buf + len, (size_t)(cap - len), "%s%s", k == n - 1 ? "" : ".", name_of(chain[k]));
 }
 
-static vec3 orientation_deg(const mat3 *r) /* YXZ, degrees */
-{
-    f64 x, y, z;
-    x = asin(-(r->z.y < -1 ? -1 : r->z.y > 1 ? 1 : r->z.y));
-    if (fabs(r->z.y) < 0.9999999) {
-        y = atan2(r->z.x, r->z.z);
-        z = atan2(r->x.y, r->y.y);
-    } else {
-        y = atan2(-r->x.z, r->x.x);
-        z = 0;
-    }
-    const f64 d = 180.0 / 3.14159265358979;
-    return v3((f32)(x * d), (f32)(y * d), (f32)(z * d));
-}
-
-static mat3 from_orientation_deg(vec3 o)
-{
-    const f64 k = 3.14159265358979 / 180.0;
-    f64 cx = cos(o.x * k), sx = sin(o.x * k), cy = cos(o.y * k), sy = sin(o.y * k), cz = cos(o.z * k), sz = sin(o.z * k);
-    /* Ry * Rx * Rz, as columns */
-    mat3 m;
-    m.x = v3((f32)(cy * cz + sy * sx * sz), (f32)(cx * sz), (f32)(-sy * cz + cy * sx * sz));
-    m.y = v3((f32)(-cy * sz + sy * sx * cz), (f32)(cx * cz), (f32)(sy * sz + cy * sx * cz));
-    m.z = v3((f32)(sy * cx), (f32)(-sx), (f32)(cy * cx));
-    return m;
-}
 
 static void part_moved(i32 idx) { ub_game_part_changed(S.g, W->inst[idx].part, UB_CHANGE_PHYS | UB_CHANGE_LOOK); }
 
@@ -401,7 +375,7 @@ static bool get_part_prop(lua_State *L, i32 idx, const char *k)
         vec3 pos;
         mat3 r;
         part_get_cframe(p, &pos, &r);
-        push_v3(L, orientation_deg(&r));
+        push_v3(L, ub_rbx_orientation(&r));
     } else if (streq(k, "Color")) {
         push_c3_rgb(L, p->color);
     } else if (streq(k, "BrickColor")) {
@@ -422,6 +396,7 @@ static bool get_part_prop(lua_State *L, i32 idx, const char *k)
         vec3 v = v3(0, 0, 0);
         bool ang = k[0] == 'R' || streq(k, "AssemblyAngularVelocity");
         if (b > 0) v = ang ? S.g->phys.bodies[b].w : S.g->phys.bodies[b].v;
+        if (idx == S.g->char_root && S.g->phys_ok && !ang) v = ub_char_velocity(&S.g->chr, &S.g->phys);
         push_v3(L, ang ? v3(-v.x, -v.y, v.z) : rbx_vec(v)); /* angular velocity is a pseudovector */
     } else if (streq(k, "Mass") || streq(k, "AssemblyMass")) {
         i32 b = S.g->phys_ok ? ub_phys_part_body(&S.g->phys, W->inst[idx].part) : -1;
@@ -465,7 +440,8 @@ static bool get_class_prop(lua_State *L, i32 idx, const char *k)
         return true;
     }
     if (idx == g->player) {
-        if (streq(k, "Character")) push_inst(L, g->char_model);
+        if (streq(k, "RespawnLocation")) push_inst(L, g->respawn_location);
+        else if (streq(k, "Character")) push_inst(L, g->char_model);
         else if (streq(k, "UserId")) lua_pushinteger(L, 1);
         else if (streq(k, "DisplayName")) lua_pushstring(L, name_of(idx));
         else if (streq(k, "AccountAge")) lua_pushinteger(L, 365);
@@ -1655,7 +1631,7 @@ static bool set_part_prop(lua_State *L, i32 idx, const char *k, int v)
         vec3 pos;
         mat3 r;
         part_get_cframe(p, &pos, &r);
-        r = from_orientation_deg(check_v3(L, v));
+        r = ub_rbx_from_orientation(check_v3(L, v));
         part_set_cframe(p, pos, &r);
         what = UB_CHANGE_PHYS;
     } else if (streq(k, "Color")) {
@@ -1694,6 +1670,10 @@ static bool set_part_prop(lua_State *L, i32 idx, const char *k, int v)
                streq(k, "AssemblyAngularVelocity")) {
         vec3 val = check_v3(L, v);
         bool ang = k[0] == 'R' || streq(k, "AssemblyAngularVelocity");
+        if (idx == S.g->char_root) { /* launching the character */
+            if (!ang) ub_game_set_velocity(S.g, rbx_vec(val));
+            return true;
+        }
         i32 b = S.g->phys_ok ? ub_phys_part_body(&S.g->phys, W->inst[idx].part) : -1;
         if (b > 0 && S.g->phys.bodies[b].type == UB_BODY_DYNAMIC) {
             ub_phys_wake(&S.g->phys, b);
@@ -1799,6 +1779,12 @@ static bool set_class_prop(lua_State *L, i32 idx, const char *k, int v)
         return true;
     }
     if (idx == g->player && streq(k, "Character")) return true; /* stays the player's own */
+    if (idx == g->player && streq(k, "RespawnLocation")) {
+        i32 p = opt_inst(L, v);
+        if (p >= 0 && !is_part(p)) return sapi_error(L, "RespawnLocation must be a part");
+        ub_game_set_respawn_location(g, p);
+        return true;
+    }
     return false;
 }
 

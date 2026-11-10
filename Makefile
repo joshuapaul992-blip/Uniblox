@@ -61,6 +61,11 @@ CORE_SRCS := \
 	src/render/ub_render_gl.c \
 	$(SCRIPT_SRCS)
 
+# Tools: the UI toolkit and the editor (ubedit.exe).
+TOOL_SRCS := \
+	src/ui/ub_ui.c \
+	src/editor/ub_editor.c
+
 SRCS := \
 	src/crt/ub_crt.c \
 	$(CORE_SRCS) \
@@ -114,7 +119,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
-	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/stub_platform.c $(CORE_SRCS)
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS)
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
 TEST_OBJS  := $(patsubst %.c,build/host/obj/%.o,$(TEST_SRCS))

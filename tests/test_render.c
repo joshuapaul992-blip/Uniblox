@@ -298,6 +298,58 @@ void test_render(void)
 
 /* Meshes: both detail levels are closed, outward-facing and within limits;
  * smooth faces have unit vertex normals. HD textures match the 64x64 ones. */
+/* The front end's 2D: rectangles, clipping, text widths, rays. */
+void test_render_2d(void)
+{
+    for (int pass = 0; pass < 2; ++pass) {
+        ub_framebuffer fb = make_fb(pass ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32);
+        ub_frame frame;
+        memset(&frame, 0, sizeof frame);
+        frame.backend = UB_BACKEND_SOFTWARE;
+        frame.width = W * 2; /* a window twice the frame's size */
+        frame.height = H * 2;
+        frame.fb = &fb;
+        char desc[64];
+        CHECK(ub_render_init(&frame, desc, sizeof desc));
+        fb.palette = ub_render_palette();
+        ub_camera cam = cam_at(v3(0, 5, -10), 0.3f, -0.2f, 70);
+        ub_render_env env = flat_env();
+        ub_render_begin(&frame, &cam, &env);
+        ub_render_rect(100, 100, 40, 20, 0xFF0000);   /* window pixels: frame 50..70 x 50..60 */
+        ub_render_clip(200, 200, 20, 20);
+        ub_render_rect(180, 180, 100, 100, 0x00FF00); /* only frame 100..110 x 100..110 */
+        ub_render_clip(0, 0, 0, 0);
+        ub_render_end(NULL);
+        u32 c = pass ? ub_palette[g_px8[55 * W + 60]] : g_px32[55 * W + 60];
+        CHECK((c >> 16 & 255) > 200 && (c & 0xFFFF) < 0x3030);
+        int green = 0;
+        for (int y = 90; y < 130; ++y)
+            for (int x = 90; x < 130; ++x) {
+                u32 p = pass ? ub_palette[g_px8[y * W + x]] : g_px32[y * W + x];
+                green += (p >> 8 & 255) > 200 && (p >> 16 & 255) < 60;
+            }
+        CHECK(green == 100);
+        ub_render_shutdown();
+    }
+    /* widths grow with the text; the fixed font size is used */
+    ub_render_set_text_px(13);
+    CHECK(ub_render_line_height() == 17);
+    CHECK(ub_render_text_width("") == 0 && ub_render_text_width("ab") > ub_render_text_width("a"));
+    CHECK(ub_render_text_width_n("abc", 2) == ub_render_text_width("ab"));
+    ub_render_set_text_px(0);
+    /* a ray through a projected point passes through it */
+    ub_camera cam = cam_at(v3(3, 7, -12), 0.6f, -0.3f, 70);
+    vec3 p = v3(5, 2, 9);
+    f32 sx, sy;
+    CHECK(ub_render_project(&cam, 800, 600, p, &sx, &sy));
+    vec3 o, d;
+    ub_render_screen_ray(&cam, 800, 600, sx, sy, &o, &d);
+    vec3 to = v3_sub(p, o);
+    vec3 off = v3_sub(to, v3_scale(d, v3_dot(to, d)));
+    CHECK(v3_length(off) < 1e-3f && fabsf(v3_length(d) - 1) < 1e-5f);
+    CHECK(!ub_render_project(&cam, 800, 600, v3_sub(cam.pos, v3_scale(d, 5)), &sx, &sy));
+}
+
 void test_meshes(void)
 {
     ub_meshes_init();

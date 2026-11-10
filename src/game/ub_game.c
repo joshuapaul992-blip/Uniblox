@@ -116,6 +116,24 @@ void ub_game_teleport(ub_game *g, vec3 feet)
     g->last_ground_part = -1;
 }
 
+void ub_game_set_velocity(ub_game *g, vec3 v)
+{
+    if (g->phys_ok && !g->dead) ub_char_set_velocity(&g->chr, &g->phys, v);
+}
+
+void ub_game_set_respawn_location(ub_game *g, i32 inst)
+{
+    ub_world *w = &g->world;
+    if (inst >= 0 && ub_world_alive(w, inst) && w->inst[inst].part >= 0) {
+        const ub_part *p = &w->parts[w->inst[inst].part];
+        g->spawn = v3_add(p->pos, v3_scale(p->rot.y, p->size.y * 0.5f));
+        g->respawn_location = inst;
+    } else {
+        g->spawn = g->spawn_default;
+        g->respawn_location = -1;
+    }
+}
+
 void ub_game_set_walk_speed(ub_game *g, f32 speed)
 {
     g->walk_speed = ub_clampf(speed, 0, 1000);
@@ -239,6 +257,8 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
         g->spawn = g->phys_ok && ub_phys_raycast(&g->phys, v3(c.x, hi.y + 100.0f, c.z), v3(0, -1, 0), 1.0e5f, -1, &h)
                        ? h.point : v3(c.x, 0, c.z);
     }
+    g->spawn_default = g->spawn;
+    g->respawn_location = -1;
     g->kill_height = UB_MIN(wd->fallen_height, g->spawn.y - 50.0f);
     g->feet = g->spawn;
     g->last_ground_part = -1;

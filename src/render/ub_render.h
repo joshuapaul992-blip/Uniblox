@@ -105,9 +105,32 @@ void ub_render_set_static(const ub_part_draw *parts, int count);
 void ub_render_begin(ub_frame *frame, const ub_camera *cam, const ub_render_env *env);
 void ub_render_part(const ub_part_draw *p);
 void ub_render_end_scene(void);
-/* Text in window pixels; (x, y) is the top-left of the line. */
+/* Text in window pixels; (x, y) is the top-left of the line. Drawn with a
+ * drop shadow unless the colour has UB_TEXT_FLAT set. */
+#define UB_TEXT_FLAT 0x01000000u
 void ub_render_text(int x, int y, const char *utf8, u32 color);
 int ub_render_line_height(void);
+
+/* ---- 2D for tools and menus (after the scene; window pixels) ---- */
+/* Font size in pixels; 0 = follows the window height (the default). */
+void ub_render_set_text_px(int px);
+/* Software renderer: draw text into the frame itself, in order with
+ * rectangles (for overlapping panels and menus), instead of having the OS
+ * draw it on top afterwards. Sharpest when the frame is window-sized. */
+void ub_render_set_text_in_frame(bool on);
+int ub_render_text_width(const char *utf8);
+/* Width of the first n bytes. */
+int ub_render_text_width_n(const char *utf8, int n);
+void ub_render_rect(int x, int y, int w, int h, u32 color);
+/* Clip 2D drawing (rects and in-frame text) to a rectangle; w <= 0 turns
+ * it off. */
+void ub_render_clip(int x, int y, int w, int h);
+
+/* The ray through window pixel (x, y), as the renderers project; dir is
+ * unit length. */
+void ub_render_screen_ray(const ub_camera *cam, int width, int height, f32 x, f32 y, vec3 *origin, vec3 *dir);
+/* Where a point lands in the window; false if it is behind the camera. */
+bool ub_render_project(const ub_camera *cam, int width, int height, vec3 p, f32 *sx, f32 *sy);
 void ub_render_end(ub_render_stats *stats);
 
 /* The 8-bit palette, for ub_framebuffer.palette. */

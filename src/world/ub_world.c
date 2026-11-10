@@ -1,5 +1,9 @@
 #include "world/ub_world.h"
+#include "core/ub_math.h"
 #include "core/ub_string.h"
+#include "core/ub_vec.h"
+#include "physics/ub_pmath.h"
+#include "render/ub_mesh.h"
 #include "platform/platform.h"
 #include "crt/ub_crt.h"
 
@@ -455,20 +459,10 @@ static void chunk_end(buf *b, u32 at)
     b->p[at + 3] = (u8)(n >> 24);
 }
 
-bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
+/* The order instances are saved in (tree pre-order, skipping what is not
+ * part of the place); remap[i] = position in the file or -1. */
+static i32 save_order(const ub_world *w, i32 *order, i32 *remap, i32 *stack)
 {
-    *data = NULL;
-    *size = 0;
-    /* tree pre-order, so every parent is written before its children */
-    i32 *order = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
-    i32 *remap = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
-    i32 *stack = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
-    if (!order || !remap || !stack) {
-        plat_free(order);
-        plat_free(remap);
-        plat_free(stack);
-        return false;
-    }
     /* made at run time, destroyed or unparented: not part of the place */
     const u16 skip = UB_INST_DESTROYED | UB_INST_RUNTIME | UB_INST_DETACHED;
     i32 n = 0;
@@ -492,6 +486,35 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
     }
     for (i32 i = 0; i < w->count; ++i) remap[i] = -1;
     for (i32 i = 0; i < n; ++i) remap[order[i]] = i;
+    return n;
+}
+
+bool ub_world_save_remap(const ub_world *w, i32 *remap)
+{
+    i32 *order = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
+    i32 *stack = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
+    bool ok = order && stack;
+    if (ok) save_order(w, order, remap, stack);
+    plat_free(order);
+    plat_free(stack);
+    return ok;
+}
+
+bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
+{
+    *data = NULL;
+    *size = 0;
+    /* tree pre-order, so every parent is written before its children */
+    i32 *order = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
+    i32 *remap = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
+    i32 *stack = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->count + 1));
+    if (!order || !remap || !stack) {
+        plat_free(order);
+        plat_free(remap);
+        plat_free(stack);
+        return false;
+    }
+    i32 n = save_order(w, order, remap, stack);
 
     buf b = { 0 };
     put(&b, "UBXPLACE", 8);
@@ -807,4 +830,94 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
         if (!ub_world_add_weld(w, (i32)a, (i32)b)) return UB_LOAD_NO_MEMORY;
     }
     return UB_LOAD_OK;
+}
+
+/* ------------------------------------------------ parts in Roblox space */
+
+void ub_part_get_rbx(const ub_part *p, vec3 *pos, mat3 *rot)
+{
+    mat3 c = p->rot;
+    if (p->shape == UB_SHAPE_CYLINDER) { /* ours runs along Y, Roblox's along X */
+        mat3 t;
+        t.x = c.y;
+        t.y = v3_neg(c.x);
+        t.z = c.z;
+        c = t;
+    } else if (p->shape == UB_SHAPE_WEDGE || p->shape == UB_SHAPE_CORNER_WEDGE) {
+        c.x = v3_neg(c.x);
+        c.z = v3_neg(c.z);
+    }
+    *rot = ub_rbx_rot(&c);
+    *pos = ub_rbx_vec(p->pos);
+}
+
+void ub_part_set_rbx(ub_part *p, vec3 pos, const mat3 *rot)
+{
+    /* clean up drift: keep it a rotation */
+    quat q = quat_from_mat3(rot);
+    mat3 r = quat_to_mat3(q);
+    mat3 c = ub_rbx_rot(&r);
+    if (p->shape == UB_SHAPE_CYLINDER) {
+        mat3 t;
+        t.x = v3_neg(c.y);
+        t.y = c.x;
+        t.z = c.z;
+        c = t;
+    } else if (p->shape == UB_SHAPE_WEDGE || p->shape == UB_SHAPE_CORNER_WEDGE) {
+        c.x = v3_neg(c.x);
+        c.z = v3_neg(c.z);
+    }
+    p->rot = c;
+    p->pos = ub_rbx_vec(pos);
+}
+
+vec3 ub_part_get_rbx_size(const ub_part *p)
+{
+    if (p->shape == UB_SHAPE_CYLINDER) return v3(p->size.y, p->size.x, p->size.z);
+    return p->size;
+}
+
+void ub_part_set_rbx_size(ub_part *p, vec3 s)
+{
+    s = v3(s.x < 0.001f ? 0.001f : s.x, s.y < 0.001f ? 0.001f : s.y, s.z < 0.001f ? 0.001f : s.z);
+    if (s.x > 2048) s.x = 2048;
+    if (s.y > 2048) s.y = 2048;
+    if (s.z > 2048) s.z = 2048;
+    if (p->shape == UB_SHAPE_CYLINDER) {
+        f32 d = s.y < s.z ? s.y : s.z;
+        p->size = v3(d, s.x, d);
+    } else if (p->shape == UB_SHAPE_BALL) {
+        f32 d = s.x < s.y ? s.x : s.y;
+        d = d < s.z ? d : s.z;
+        p->size = v3(d, d, d);
+    } else {
+        p->size = s;
+    }
+}
+
+vec3 ub_rbx_orientation(const mat3 *r)
+{
+    f32 s = ub_clampf(-r->z.y, -1, 1);
+    f32 x = ub_atan2f(s, ub_sqrtf(1 - s * s)), y, z;
+    if (ub_absf(r->z.y) < 0.9999999f) {
+        y = ub_atan2f(r->z.x, r->z.z);
+        z = ub_atan2f(r->x.y, r->y.y);
+    } else {
+        y = ub_atan2f(-r->x.z, r->x.x);
+        z = 0;
+    }
+    const f32 d = 180.0f / UB_PI;
+    return v3(x * d, y * d, z * d);
+}
+
+mat3 ub_rbx_from_orientation(vec3 o)
+{
+    const f32 k = UB_PI / 180.0f;
+    f32 cx = ub_cosf(o.x * k), sx = ub_sinf(o.x * k), cy = ub_cosf(o.y * k), sy = ub_sinf(o.y * k);
+    f32 cz = ub_cosf(o.z * k), sz = ub_sinf(o.z * k);
+    mat3 m; /* Ry * Rx * Rz, as columns */
+    m.x = v3(cy * cz + sy * sx * sz, cx * sz, -sy * cz + cy * sx * sz);
+    m.y = v3(-cy * sz + sy * sx * cz, cx * cz, sy * sz + cy * sx * cz);
+    m.z = v3(sy * cx, -sx, cy * cx);
+    return m;
 }

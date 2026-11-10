@@ -24,6 +24,23 @@ int g_failures, g_checks;
 
 static void test_fmt(void)
 {
+    {
+        char nb[32];
+        f32 v;
+        ub_fmt_num(nb, sizeof nb, 2.0f, 3); CHECK_STR(nb, "2");
+        ub_fmt_num(nb, sizeof nb, 0.5f, 3); CHECK_STR(nb, "0.5");
+        ub_fmt_num(nb, sizeof nb, -1.25f, 3); CHECK_STR(nb, "-1.25");
+        ub_fmt_num(nb, sizeof nb, 3.14159f, 2); CHECK_STR(nb, "3.14");
+        ub_fmt_num(nb, sizeof nb, 0.05f, 2); CHECK_STR(nb, "0.05");
+        ub_fmt_num(nb, sizeof nb, -0.0001f, 3); CHECK_STR(nb, "0");
+        ub_fmt_num(nb, sizeof nb, 196.2f, 3); CHECK_STR(nb, "196.2");
+        CHECK(ub_parse_num(" 12 ", &v) && v == 12);
+        CHECK(ub_parse_num("-0.5", &v) && v == -0.5f);
+        CHECK(ub_parse_num(".25", &v) && v == 0.25f);
+        CHECK(ub_parse_num("3.", &v) && v == 3);
+        CHECK(ub_parse_num("1e3", &v) && v == 1000);
+        CHECK(!ub_parse_num("", &v) && !ub_parse_num("-", &v) && !ub_parse_num("1x", &v) && !ub_parse_num("1e", &v));
+    }
     char b[64];
     ub_fmt(b, sizeof b, "%d %d %u", 42, -7, 4000000000u); CHECK_STR(b, "42 -7 4000000000");
     ub_fmt(b, sizeof b, "%d", (i32)0x80000000u);           CHECK_STR(b, "-2147483648");
@@ -334,7 +351,7 @@ int main(int argc, char **argv)
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "fmt", test_fmt }, { "utf", test_utf }, { "path", test_path },
         { "math", test_math }, { "wav", test_wav }, { "mixer", test_mixer },
-        { "crt", test_crt }, { "compress", test_compress }, { "world", test_world }, { "physics", test_physics }, { "libc", test_libc }, { "script", test_script }, { "game", test_game }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render },
+        { "crt", test_crt }, { "compress", test_compress }, { "world", test_world }, { "physics", test_physics }, { "libc", test_libc }, { "script", test_script }, { "game", test_game }, { "ui", test_ui }, { "editor", test_editor }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render }, { "render 2d", test_render_2d },
         { "render fuzz", test_render_fuzz }, { "meshes", test_meshes },
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; ++i) {
