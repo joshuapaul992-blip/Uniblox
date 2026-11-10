@@ -95,6 +95,9 @@ f32 ease(int style, int dir, f32 t);
 
 const char *ub_typeof(lua_State *L, int i);
 void open_types(lua_State *L);
+/* Region3, Vector3int16, OverlapParams, PhysicalProperties... (ub_sapi_types2.c) */
+void open_types2(lua_State *L, int base);
+bool get_region3(lua_State *L, int i, vec3 *lo, vec3 *hi);
 
 /* ---------------------------------------------------------- instances */
 
@@ -104,7 +107,9 @@ enum {
     VIRT_USERINPUT = -7, VIRT_MARKETPLACE = -8, VIRT_DATASTORE = -9, VIRT_CHAT = -10, VIRT_TELEPORT = -11,
     VIRT_SOUNDSERVICE = -12, VIRT_PHYSICSSERVICE = -13, VIRT_COLLECTION = -14, VIRT_TEXTSERVICE = -15,
     VIRT_GUISERVICE = -16, VIRT_MOUSE = -17, VIRT_CAMERA = -18, VIRT_CONTENTPROVIDER = -19,
-    VIRT_LAST = -19
+    VIRT_PROMPTSERVICE = -20, VIRT_POLICY = -21, VIRT_BADGE = -22, VIRT_LOCALIZATION = -23, VIRT_PATHFINDING = -24,
+    VIRT_GROUP = -25, VIRT_SOCIAL = -26, VIRT_ANALYTICS = -27,
+    VIRT_LAST = -27
 };
 void push_inst(lua_State *L, i32 idx);                      /* nil for -1 */
 i32 check_inst(lua_State *L, int i);
@@ -169,8 +174,12 @@ enum {
     EV_JUMPREQUEST, EV_MOVE, EV_KEYDOWN, EV_KEYUP, EV_NEVER,
     /* attributes and tags (ub_sapi_attr.c) */
     EV_ATTRCHANGED, EV_TAGADDED, EV_TAGREMOVED,
+    /* prompts and the humanoid (ub_sapi_interact.c) */
+    EV_TRIGGERED, EV_TRIGGERENDED, EV_PROMPTSHOWN, EV_PROMPTHIDDEN, EV_HOLDBEGAN, EV_HOLDENDED, EV_STATECHANGED,
+    EV_RUNNING, EV_JUMPING, EV_FREEFALLING,
     EV_COUNT
 };
+typedef char ev_count_fits[EV_COUNT <= 64 ? 1 : -1]; /* signal keys pack the event in 6 bits */
 /* A signal of an instance (or a tween: inst = -1000 - tween id). For
  * GetPropertyChangedSignal, `prop` names the property (else NULL). */
 void push_signal(lua_State *L, i32 inst, int ev, const char *prop);
@@ -229,6 +238,16 @@ bool collection_index(lua_State *L, const char *k);
 void tags_moved(lua_State *L, i32 root, bool was_in, bool now_in);
 bool sapi_in_game(i32 i);                                    /* in the DataModel (not detached) */
 i32 *sapi_subtree(i32 root, i32 *count);                     /* root first; plat_free it */
+
+/* ClickDetector, ProximityPrompt, Humanoid states (ub_sapi_interact.c) */
+int interact_event(i32 idx, const char *k);                 /* -1 if not one */
+lua_CFunction interact_method(i32 idx, const char *k);      /* NULL if not one */
+void interact_pump(lua_State *L, f32 dt);                    /* each frame, after the input */
+void interact_reset(void);
+int humanoid_state(void);                                    /* HumanoidStateType value */
+bool offline_index(lua_State *L, i32 idx, const char *k);  /* Policy/Badge/Localization/Pathfinding... */
+i32 gui_mouse_target(vec3 *hit);                             /* the part under the mouse (hit in Roblox axes) */
+int gui_vk_of(int keycode);                                  /* a KeyCode value's key, -1 if none */
 
 /* Errors as Roblox words them. */
 int sapi_error(lua_State *L, const char *fmt, ...);
