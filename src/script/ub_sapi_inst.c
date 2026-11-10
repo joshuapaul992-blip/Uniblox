@@ -631,7 +631,7 @@ static int m_isancestorof(lua_State *L)
 
 /* An instance and everything below it (destroyed ones keep their links),
  * in a plat_alloc'd array; NULL when out of memory. */
-static i32 *subtree(i32 root, i32 *count)
+i32 *sapi_subtree(i32 root, i32 *count)
 {
     i32 cap = 64, n = 0, done = 0;
     i32 *list = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap);
@@ -730,7 +730,7 @@ void reclaim_instances(lua_State *L)
             /* never parented (or taken out) and forgotten: gone, unless a
              * script still holds something inside it */
             i32 n;
-            i32 *sub = subtree(i, &n);
+            i32 *sub = sapi_subtree(i, &n);
             if (!sub) continue;
             bool held = false;
             for (i32 j = 1; j < n && !held; ++j) held = has_userdata(L, instances, sub[j]) || protected_inst(sub[j]);
@@ -778,7 +778,7 @@ static void do_destroy(lua_State *L, i32 i)
     if (i < 0 || is_service(i) || protected_inst(i)) return;
     if (!ub_world_alive(W, i)) return;
     i32 n;
-    i32 *sub = subtree(i, &n);
+    i32 *sub = sapi_subtree(i, &n);
     if (!sub) return;
     for (i32 j = 0; j < n; ++j)
         if (protected_inst(sub[j])) { /* the character is never destroyed with something else */
@@ -787,6 +787,11 @@ static void do_destroy(lua_State *L, i32 i)
         }
     fire_signal(L, i, EV_DESTROYING, NULL, 0);
     if (!ub_world_alive(W, i)) { /* a Destroying handler destroyed it already */
+        plat_free(sub);
+        return;
+    }
+    tags_moved(L, i, sapi_in_game(i), false);
+    if (!ub_world_alive(W, i)) { /* a handler destroyed it already */
         plat_free(sub);
         return;
     }
@@ -841,7 +846,7 @@ static int m_clone(lua_State *L)
         return 1;
     }
     i32 n;
-    i32 *sub = subtree(i, &n);
+    i32 *sub = sapi_subtree(i, &n);
     if (!sub) return luaL_error(L, "out of memory");
     plat_free(sub);
     check_room(L, n);
@@ -872,56 +877,6 @@ static int m_getfullname(lua_State *L)
     if (i < 0) snprintf(b, sizeof b, "%s", i == VIRT_GAME ? "Game" : virt_class(i));
     else full_name(i, b, sizeof b);
     lua_pushstring(L, b);
-    return 1;
-}
-
-static int m_getattribute(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    lua_pushfstring(L, "@%s", luaL_checkstring(L, 2));
-    get_extra(L, i, lua_tostring(L, -1));
-    return 1;
-}
-
-static int m_setattribute(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    const char *n = luaL_checkstring(L, 2);
-    lua_pushfstring(L, "@%s", n);
-    set_extra(L, i, lua_tostring(L, -1), 3);
-    char key[64];
-    snprintf(key, sizeof key, "@%s", n);
-    fire_signal(L, i, EV_PROPCHANGED, key, 0);
-    return 0;
-}
-
-static int m_getattributes(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    lua_newtable(L);
-    push_props(L, i, false);
-    if (lua_istable(L, -1)) {
-        lua_pushnil(L);
-        while (lua_next(L, -2)) {
-            const char *k = lua_type(L, -2) == LUA_TSTRING ? lua_tostring(L, -2) : NULL;
-            if (k && k[0] == '@') {
-                lua_pushstring(L, k + 1);
-                lua_pushvalue(L, -2);
-                lua_rawset(L, -6);
-            }
-            lua_pop(L, 1);
-        }
-    }
-    lua_pop(L, 1);
-    return 1;
-}
-
-static int m_attrsignal(lua_State *L)
-{
-    i32 i = check_inst(L, 1);
-    char key[64];
-    snprintf(key, sizeof key, "@%s", luaL_checkstring(L, 2));
-    push_signal(L, i, EV_PROPCHANGED, key);
     return 1;
 }
 
@@ -1429,11 +1384,11 @@ static const method k_inst_methods[] = {
     { "IsA", m_isa }, { "isA", m_isa }, { "IsDescendantOf", m_isdescendantof }, { "IsAncestorOf", m_isancestorof },
     { "Destroy", m_destroy }, { "destroy", m_destroy }, { "Remove", m_destroy }, { "remove", m_destroy },
     { "ClearAllChildren", m_clearallchildren }, { "Clone", m_clone }, { "clone", m_clone },
-    { "GetFullName", m_getfullname }, { "GetAttribute", m_getattribute }, { "SetAttribute", m_setattribute },
-    { "GetAttributes", m_getattributes }, { "GetAttributeChangedSignal", m_attrsignal },
+    { "GetFullName", m_getfullname }, { "GetAttribute", attr_get }, { "SetAttribute", attr_set },
+    { "GetAttributes", attr_getall }, { "GetAttributeChangedSignal", attr_signal },
     { "GetPropertyChangedSignal", m_propsignal }, { "GetPivot", m_getpivot }, { "PivotTo", m_pivotto },
-    { "BreakJoints", m_noop }, { "MakeJoints", m_noop }, { "GetTags", m_emptytable }, { "HasTag", m_false },
-    { "AddTag", m_noop }, { "RemoveTag", m_noop }, { NULL, NULL },
+    { "BreakJoints", m_noop }, { "MakeJoints", m_noop }, { "GetTags", tag_list_of }, { "HasTag", tag_has },
+    { "AddTag", tag_add }, { "RemoveTag", tag_remove }, { NULL, NULL },
 };
 
 static const method k_part_methods[] = {
@@ -1498,6 +1453,7 @@ static int find_event(i32 idx, const char *k)
         if (streq(k, "DescendantRemoving")) return EV_DESCENDANTREMOVING;
         if (streq(k, "Destroying")) return EV_DESTROYING;
         if (streq(k, "AncestryChanged")) return EV_ANCESTRYCHANGED;
+        if (streq(k, "AttributeChanged")) return EV_ATTRCHANGED;
     }
     if (is_part(idx) && (streq(k, "Touched") || streq(k, "touched"))) return EV_TOUCHED;
     if (is_part(idx) && streq(k, "TouchEnded")) return EV_TOUCHENDED;
@@ -1575,6 +1531,7 @@ static int inst_index(lua_State *L)
             if (streq(k, "UrlEncode")) { lua_pushcfunction(L, url_encode); return 1; }
             if (streq(k, "HttpEnabled")) { lua_pushboolean(L, 0); return 1; }
         }
+        if (idx == VIRT_COLLECTION && collection_index(L, k)) return 1;
         if (idx == VIRT_DATASTORE && (streq(k, "GetDataStore") || streq(k, "GetGlobalDataStore") ||
                                       streq(k, "GetOrderedDataStore"))) {
             lua_pushcfunction(L, m_getdatastore);
@@ -1844,6 +1801,7 @@ static int set_parent(lua_State *L, i32 idx, int v)
     if (!ub_world_alive(W, idx)) return sapi_error(L, "The Parent property of %s is locked, current parent: NULL", name_of(idx));
     i32 old = W->inst[idx].parent;
     if (old == np) return 0;
+    bool was_in = sapi_in_game(idx);
     if (!ub_world_set_parent(W, idx, np)) return sapi_error(L, "Attempt to set parent of %s to %s would result in circular reference", name_of(idx), np >= 0 ? name_of(np) : "nil");
     ub_game_subtree_changed(S.g, idx);
     if (old >= 0) {
@@ -1859,6 +1817,7 @@ static int set_parent(lua_State *L, i32 idx, int v)
         }
         start_scripts_in(idx);
     }
+    tags_moved(L, idx, was_in, sapi_in_game(idx));
     fire_signal(L, idx, EV_ANCESTRYCHANGED, NULL, 0);
     return 0;
 }

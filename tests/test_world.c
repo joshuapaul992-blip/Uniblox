@@ -734,6 +734,7 @@ static void check_rbx_props(const char *name)
     free(data);
 }
 
+static void test_rbx_attributes(void);
 static void test_rbx_gui(void)
 {
     static const char *const models[] = {
@@ -743,6 +744,97 @@ static void test_rbx_gui(void)
         "three-vector3values", "font",
     };
     for (int i = 0; i < (int)(sizeof models / sizeof models[0]); ++i) check_rbx_props(models[i]);
+    test_rbx_attributes();
+}
+
+static i32 load_model_first(ub_world *w, const char *path, const char *cls)
+{
+    u32 size = 0;
+    u8 *data = load_file(path, &size);
+    CHECK(data != NULL);
+    ub_world_init(w);
+    if (!data) return -1;
+    ub_import_stats st;
+    CHECK(ub_rbxl_load(w, data, size, &st) == UB_LOAD_OK);
+    free(data);
+    for (i32 i = 0; i < w->count; ++i)
+        if (strcmp(ub_world_str(w, w->inst[i].class_name), cls) == 0) return i;
+    return -1;
+}
+
+/* Attributes (AttributesSerialize) and CollectionService tags (milestone 8B). */
+static void test_rbx_attributes(void)
+{
+    ub_world w;
+    i32 f = load_model_first(&w, "tests/data/rbx/attributes.rbxm", "Folder");
+    CHECK(f >= 0);
+    if (f >= 0) {
+        const ub_value *v;
+        v = ub_world_prop_named(&w, f, "@Boolean");
+        CHECK(v && v->type == UB_PV_BOOL && v->v.b);
+        v = ub_world_prop_named(&w, f, "@BrickColor");
+        CHECK(v && v->type == UB_PV_BRICKCOLOR && v->v.e == 1004);
+        v = ub_world_prop_named(&w, f, "@Color3");
+        CHECK(v && v->type == UB_PV_COLOR3 && fabsf(v->v.c3.r - 162 / 255.0f) < 1e-3f && v->v.c3.g == 0 && v->v.c3.b == 1);
+        v = ub_world_prop_named(&w, f, "@ColorSequence");
+        CHECK(v && v->type == UB_PV_COLORSEQ && v->v.seq.n == 3 && v->v.seq.k[0] == 0 && v->v.seq.k[1] == 1 &&
+              v->v.seq.k[4] == 0.5f && v->v.seq.k[6] == 1 && v->v.seq.k[11] == 1);
+        v = ub_world_prop_named(&w, f, "@Number");
+        CHECK(v && v->type == UB_PV_DOUBLE && v->v.d == 12345);
+        v = ub_world_prop_named(&w, f, "@NumberRange");
+        CHECK(v && v->type == UB_PV_NUMRANGE && v->v.range.lo == 5 && v->v.range.hi == 10);
+        v = ub_world_prop_named(&w, f, "@NumberSequence");
+        CHECK(v && v->type == UB_PV_NUMSEQ && v->v.seq.n == 3 && v->v.seq.k[1] == 1 && v->v.seq.k[3] == 0.5f &&
+              v->v.seq.k[4] == 0 && v->v.seq.k[7] == 1);
+        v = ub_world_prop_named(&w, f, "@Rect");
+        CHECK(v && v->type == UB_PV_RECT && v->v.rect.x0 == 1 && v->v.rect.y1 == 4);
+        v = ub_world_prop_named(&w, f, "@String");
+        CHECK(v && v->type == UB_PV_STRING && v->v.str.len == 13 && memcmp(v->v.str.s, "Hello, world!", 13) == 0);
+        v = ub_world_prop_named(&w, f, "@UDim");
+        CHECK(v && v->type == UB_PV_UDIM && v->v.ud.s == 0.5f && v->v.ud.o == 100);
+        v = ub_world_prop_named(&w, f, "@UDim2");
+        CHECK(v && v->type == UB_PV_UDIM2 && v->v.ud2.sx == 0.5f && v->v.ud2.ox == 10 && fabsf(v->v.ud2.sy - 0.7f) < 1e-6f &&
+              v->v.ud2.oy == 30);
+        v = ub_world_prop_named(&w, f, "@Vector2");
+        CHECK(v && v->type == UB_PV_VECTOR2 && v->v.v2.x == 10 && v->v.v2.y == 50);
+        v = ub_world_prop_named(&w, f, "@Vector3");
+        CHECK(v && v->type == UB_PV_VECTOR3 && v->v.v3.x == 1 && v->v.v3.z == 3);
+        v = ub_world_prop_named(&w, f, "@Infinity");
+        CHECK(v && v->type == UB_PV_DOUBLE && v->v.d > 1e308);
+        v = ub_world_prop_named(&w, f, "@NaN");
+        CHECK(v && v->type == UB_PV_DOUBLE && v->v.d != v->v.d);
+    }
+    /* they survive .ubx */
+    u8 *a1, *b1;
+    u32 na, nb;
+    CHECK(ub_ubx_save(&w, &a1, &na));
+    ub_world w2;
+    ub_world_init(&w2);
+    CHECK(ub_ubx_load(&w2, a1, na) == UB_LOAD_OK);
+    CHECK(ub_ubx_save(&w2, &b1, &nb) && na == nb && memcmp(a1, b1, na) == 0);
+    plat_free(a1);
+    plat_free(b1);
+    ub_world_free(&w2);
+    ub_world_free(&w);
+
+    f = load_model_first(&w, "tests/data/rbx/tags.rbxm", "Folder");
+    const ub_value *t = f >= 0 ? ub_world_prop_named(&w, f, "Tags") : NULL;
+    CHECK(t && t->type == UB_PV_STRING && t->v.str.len == 12 && memcmp(t->v.str.s, "Cool\0My\0Tags", 12) == 0);
+    ub_world_free(&w);
+
+    f = load_model_first(&w, "tests/data/rbx/font-attribute.rbxm", "Folder");
+    bool font = false;
+    for (int i = 0; f >= 0 && i < ub_world_prop_count(&w, f); ++i) {
+        const ub_prop *p = ub_world_prop_at(&w, f, i);
+        if (p->val.type == UB_PV_FONT && strstr(p->val.v.font.family, "Creepster")) font = true;
+    }
+    CHECK(font);
+    ub_world_free(&w);
+
+    f = load_model_first(&w, "tests/data/rbx/int32-attribute.rbxm", "Lighting");
+    const ub_value *iv = f >= 0 ? ub_world_prop_named(&w, f, "@RBX_OriginalTechnologyOnFileLoad") : NULL;
+    CHECK(iv && iv->type == UB_PV_DOUBLE && iv->v.d == floor(iv->v.d));
+    ub_world_free(&w);
 }
 
 /* Typed properties: storing, copying with Clone, saving in .ubx, and the

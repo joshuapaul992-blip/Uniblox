@@ -167,6 +167,8 @@ enum {
     EV_INPUTCHANGED, EV_ACTIVATED, EV_B1CLICK, EV_B1DOWN, EV_B1UP, EV_B2CLICK, EV_B2DOWN, EV_B2UP, EV_FOCUSED,
     EV_FOCUSLOST, EV_SERVEREVENT, EV_CLIENTEVENT, EV_BINDABLE, EV_TEXTBOXFOCUSED, EV_TEXTBOXRELEASED,
     EV_JUMPREQUEST, EV_MOVE, EV_KEYDOWN, EV_KEYUP, EV_NEVER,
+    /* attributes and tags (ub_sapi_attr.c) */
+    EV_ATTRCHANGED, EV_TAGADDED, EV_TAGREMOVED,
     EV_COUNT
 };
 /* A signal of an instance (or a tween: inst = -1000 - tween id). For
@@ -211,6 +213,22 @@ void open_luaulib(lua_State *L, int base);
 int json_encode(lua_State *L);
 int json_decode(lua_State *L);
 int url_encode(lua_State *L);
+
+/* Attributes and tags (ub_sapi_attr.c): instance methods (self at 1). */
+int attr_get(lua_State *L);
+int attr_set(lua_State *L);
+int attr_getall(lua_State *L);
+int attr_signal(lua_State *L);
+int tag_has(lua_State *L);
+int tag_add(lua_State *L);
+int tag_remove(lua_State *L);
+int tag_list_of(lua_State *L);
+/* CollectionService's members: pushed and true, or false. */
+bool collection_index(lua_State *L, const char *k);
+/* A subtree moved in or out of the game: InstanceAdded/Removed signals. */
+void tags_moved(lua_State *L, i32 root, bool was_in, bool now_in);
+bool sapi_in_game(i32 i);                                    /* in the DataModel (not detached) */
+i32 *sapi_subtree(i32 root, i32 *count);                     /* root first; plat_free it */
 
 /* Errors as Roblox words them. */
 int sapi_error(lua_State *L, const char *fmt, ...);

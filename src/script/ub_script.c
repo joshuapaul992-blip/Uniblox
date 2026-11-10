@@ -462,7 +462,7 @@ typedef struct {
 /* the signal's key in REG_SIGNALS / REG_WAITERS */
 static void push_key(lua_State *L, i32 inst, int ev, const char *prop)
 {
-    if (prop && prop[0]) lua_pushfstring(L, "%d:%s", (int)inst, prop);
+    if (prop && prop[0]) lua_pushfstring(L, "%d:%d:%s", (int)inst, ev, prop);
     else lua_pushnumber(L, ((f64)inst + 1000000.0) * 64.0 + ev);
 }
 

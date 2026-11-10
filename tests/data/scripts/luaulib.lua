@@ -228,6 +228,61 @@ local ok, err = pcall(function()
 	check(fails(function() Http:JSONEncode(cyc) end), "encode cycle")
 	check(Http:UrlEncode("a b&c=é") == "a%20b%26c%3D%C3%A9", "UrlEncode")
 	check(#Http:GenerateGUID(false) == 36, "GenerateGUID")
+
+	-- attributes (the test world gives workspace.Tagged @Speed = 16 and the tags Coin, Spin)
+	local tagged = workspace:WaitForChild("Tagged")
+	check(tagged:GetAttribute("Speed") == 16 and tagged:GetAttribute("Nope") == nil, "attribute from the place")
+	local folder = Instance.new("Folder")
+	local changes, named = 0, 0
+	folder.AttributeChanged:Connect(function(n) if n == "Hp" then changes += 1 end end)
+	folder:GetAttributeChangedSignal("Hp"):Connect(function() named += 1 end)
+	folder:SetAttribute("Hp", 100)
+	folder:SetAttribute("Hp", 100) -- the same value: no event
+	folder:SetAttribute("Where", Vector3.new(1, 2, 3))
+	folder:SetAttribute("Tint", Color3.new(1, 0, 0))
+	folder:SetAttribute("Label", "hi")
+	folder:SetAttribute("On", true)
+	folder:SetAttribute("Size", UDim2.new(0.5, 1, 0, 2))
+	check(folder:GetAttribute("Hp") == 100 and folder:GetAttribute("Where") == Vector3.new(1, 2, 3), "SetAttribute")
+	check(folder:GetAttribute("Tint") == Color3.new(1, 0, 0) and folder:GetAttribute("Size") == UDim2.new(0.5, 1, 0, 2), "attribute types")
+	local all = folder:GetAttributes()
+	local count = 0
+	for k, v in all do count += 1 end
+	check(count == 6 and all.Label == "hi" and all.On == true, "GetAttributes")
+	folder:SetAttribute("Hp", nil)
+	check(folder:GetAttribute("Hp") == nil and folder:GetAttributes().Hp == nil, "remove an attribute")
+	task.wait()
+	check(changes == 2 and named == 2, "AttributeChanged " .. changes .. " " .. named)
+	check(fails(function() folder:SetAttribute("bad name", 1) end), "bad attribute name")
+	check(fails(function() folder:SetAttribute("RBXThing", 1) end), "reserved attribute name")
+	check(fails(function() folder:SetAttribute("F", function() end) end, "not a supported attribute type"), "bad attribute type")
+	check(folder:Clone():GetAttribute("Label") == "hi", "Clone keeps attributes")
+
+	-- tags and CollectionService
+	local CS = game:GetService("CollectionService")
+	check(tagged:HasTag("Coin") and CS:HasTag(tagged, "Spin") and not tagged:HasTag("Other"), "tags from the place")
+	local tags = tagged:GetTags()
+	check(#tags == 2 and tags[1] == "Coin" and tags[2] == "Spin", "GetTags")
+	check(#CS:GetTagged("Coin") == 1 and CS:GetTagged("Coin")[1] == tagged, "GetTagged")
+	local added, removed = {}, {}
+	CS:GetInstanceAddedSignal("Coin"):Connect(function(i) added[#added + 1] = i end)
+	CS:GetInstanceRemovedSignal("Coin"):Connect(function(i) removed[#removed + 1] = i end)
+	local coin = Instance.new("Part")
+	coin:AddTag("Coin")
+	check(coin:HasTag("Coin") and #CS:GetTagged("Coin") == 1, "not in the game: not tagged yet")
+	coin.Parent = workspace
+	check(#CS:GetTagged("Coin") == 2, "GetTagged after parenting")
+	CS:AddTag(coin, "Coin") -- again: nothing
+	coin:AddTag("Gold")
+	local alltags = CS:GetAllTags()
+	check(table.find(alltags, "Gold") and table.find(alltags, "Spin") and #alltags == 3, "GetAllTags")
+	CS:RemoveTag(tagged, "Coin")
+	check(not tagged:HasTag("Coin") and tagged:HasTag("Spin"), "RemoveTag")
+	coin:Destroy()
+	task.wait()
+	check(#added == 1 and added[1] == coin, "InstanceAdded " .. #added)
+	check(#removed == 2, "InstanceRemoved " .. #removed)
+	check(#CS:GetTagged("Coin") == 0, "nothing left with the tag")
 end)
 
 if not ok then

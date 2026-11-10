@@ -208,6 +208,14 @@ static void test_luaulib(void)
     door_world(&w, NULL);
     i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
     add_script(&w, sss, "Lib", src);
+    /* attributes and tags as a place file brings them */
+    i32 tagged = ub_world_add(&w, ub_world_workspace(&w), UB_CLASS_FOLDER, "Folder", "Tagged");
+    ub_value speed;
+    memset(&speed, 0, sizeof speed);
+    speed.type = UB_PV_DOUBLE;
+    speed.v.d = 16;
+    ub_value tags = ub_vstr("Coin\0Spin", 9);
+    CHECK(ub_world_set_prop_named(&w, tagged, "@Speed", &speed) && ub_world_set_prop_named(&w, tagged, "Tags", &tags));
     free(src);
     CHECK(ub_game_start(&g_g, &w, true));
     for (int i = 0; i < 300 && find_result(&g_g, "lib done") < 0; ++i)

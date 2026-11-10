@@ -35,3 +35,15 @@ produce all of them.
 | `imagelabel-content.rbxm` | The newer Content type (`ImageContent`) |
 | `funny-uipadding.rbxm` | UDim values |
 | `three-intvalues.rbxm`, `funny-numbervalue.rbxm`, `three-brickcolorvalues.rbxm`, `three-color3values.rbxm`, `three-vector3values.rbxm` | Value objects (Int64, Float64, BrickColor, Color3, Vector3 with inf and NaN) |
+
+### Attributes and tags (milestone 8B)
+
+The same project's `models/<name>/binary.rbxm`, checked by `test_rbx_attributes` in
+`tests/test_world.c`.
+
+| File | Source | Why |
+|---|---|---|
+| `attributes.rbxm` | `models/attributes` | Every attribute type, with infinity and NaN |
+| `tags.rbxm` | `models/tags` | CollectionService tags |
+| `font-attribute.rbxm` | `models/folder-with-font-attribute` | A Font attribute |
+| `int32-attribute.rbxm` | `models/lighting-with-int32-attribute` | The Int32 attribute type |

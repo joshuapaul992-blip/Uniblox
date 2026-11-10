@@ -672,11 +672,14 @@ static ub_load_result apply_props(importer *im, ub_world *w, const i32 *made)
         switch (p->type) {
         case UB_PV_STRING:
             v.v.str.s = im->names + p->a[0];
-            v.v.str.len = (u32)ub_strlen(v.v.str.s);
+            v.v.str.len = p->a[2] ? p->a[1] : (u32)ub_strlen(v.v.str.s);
             break;
         case UB_PV_BOOL: v.v.b = p->a[0] != 0; break;
         case UB_PV_INT: case UB_PV_ENUM: case UB_PV_BRICKCOLOR: v.v.i = (i32)p->a[0]; break;
-        case UB_PV_DOUBLE: memcpy(&v.v.d, p->a, 8); if (!(v.v.d == v.v.d)) v.v.d = 0; break;
+        case UB_PV_DOUBLE: /* NaN only where scripts put it: attributes */
+            memcpy(&v.v.d, p->a, 8);
+            if (!(v.v.d == v.v.d) && im->names[p->name] != '@') v.v.d = 0;
+            break;
         case UB_PV_FLOAT: v.v.f = u2f(p->a[0]); break;
         case UB_PV_REF: {
             i32 rr = map_get(im, (i32)p->a[0]);
@@ -713,6 +716,202 @@ static ub_load_result apply_props(importer *im, ub_world *w, const i32 *made)
     return UB_LOAD_OK;
 }
 
+/* ------------------------------------------- attributes and tags
+ *
+ * Any instance may have AttributesSerialize (a blob: u32 count, then per
+ * attribute a u32-prefixed name, a type byte and the value; docs/
+ * attributes.md in rbx-dom) and Tags (names separated by NULs). Both
+ * become typed properties: "@Name" per attribute, and "Tags" as the raw
+ * NUL-separated text. CFrame and EnumItem attributes are skipped. */
+
+typedef struct {
+    const u8 *p;
+    u32 n, pos;
+    bool bad;
+} ablob;
+
+static bool ab_need(ablob *b, u32 k)
+{
+    if (b->bad || k > b->n - b->pos) b->bad = true;
+    return !b->bad;
+}
+
+static u32 ab_u32(ablob *b)
+{
+    if (!ab_need(b, 4)) return 0;
+    u32 v = le32(b->p + b->pos);
+    b->pos += 4;
+    return v;
+}
+
+static u32 ab_u8(ablob *b)
+{
+    if (!ab_need(b, 1)) return 0;
+    return b->p[b->pos++];
+}
+
+static const u8 *ab_str(ablob *b, u32 *len)
+{
+    *len = ab_u32(b);
+    if (!ab_need(b, *len)) return NULL;
+    const u8 *s = b->p + b->pos;
+    b->pos += *len;
+    return s;
+}
+
+/* A string property kept with its length (it may hold NULs). */
+static iprop *text_prop(importer *im, u32 ri, u32 name, const u8 *s, u32 len)
+{
+    iprop *p = new_prop(im, ri, name, UB_PV_STRING);
+    if (!p) return NULL;
+    p->a[0] = add_text(im, s, len, true);
+    p->a[1] = len;
+    p->a[2] = 1; /* use the length, not strlen */
+    if (p->a[0] == 0xFFFFFFFFu) return NULL;
+    return p;
+}
+
+static ub_load_result parse_attributes(importer *im, u32 ri, const u8 *data, u32 len)
+{
+    ablob b = { data, len, 0, false };
+    u32 count = ab_u32(&b);
+    for (u32 a = 0; a < count && !b.bad; ++a) {
+        u32 kl;
+        const u8 *key = ab_str(&b, &kl);
+        u32 type = ab_u8(&b);
+        if (!key || b.bad) break;
+        char kb[202];
+        if (kl > 200) kl = 200;
+        kb[0] = '@';
+        memcpy(kb + 1, key, kl);
+        u32 name = add_name(im, (const u8 *)kb, kl + 1);
+        if (name == 0xFFFFFFFFu) return UB_LOAD_NO_MEMORY;
+        iprop *p = NULL;
+        u32 f[9];
+        switch (type) {
+        case 0x02: { /* String */
+            u32 sl;
+            const u8 *str = ab_str(&b, &sl);
+            if (!str) break;
+            if (!text_prop(im, ri, name, str, sl)) return UB_LOAD_NO_MEMORY;
+            break;
+        }
+        case 0x03: /* Bool */
+            f[0] = ab_u8(&b);
+            if (b.bad) break;
+            if (!(p = new_prop(im, ri, name, UB_PV_BOOL))) return UB_LOAD_NO_MEMORY;
+            p->a[0] = f[0] != 0;
+            break;
+        case 0x04: case 0x05: case 0x06: { /* Int32, Float32, Float64: all numbers to scripts */
+            f64 d;
+            if (type == 0x06) {
+                if (!ab_need(&b, 8)) break;
+                memcpy(&d, b.p + b.pos, 8);
+                b.pos += 8;
+            } else {
+                u32 u = ab_u32(&b);
+                d = type == 0x04 ? (f64)(i32)u : (f64)u2f(u);
+            }
+            if (b.bad) break;
+            if (!(p = new_prop(im, ri, name, UB_PV_DOUBLE))) return UB_LOAD_NO_MEMORY;
+            memcpy(p->a, &d, 8);
+            break;
+        }
+        case 0x09: case 0x0A: case 0x0F: case 0x10: case 0x11: case 0x1B: case 0x1C: { /* fixed floats */
+            static const struct { u8 id, n, t; } k[] = {
+                { 0x09, 2, UB_PV_UDIM }, { 0x0A, 4, UB_PV_UDIM2 }, { 0x0F, 3, UB_PV_COLOR3 },
+                { 0x10, 2, UB_PV_VECTOR2 }, { 0x11, 3, UB_PV_VECTOR3 }, { 0x1B, 2, UB_PV_NUMRANGE },
+                { 0x1C, 4, UB_PV_RECT },
+            };
+            int ki = 0;
+            while (k[ki].id != type) ki++;
+            for (u32 i = 0; i < k[ki].n; ++i) f[i] = ab_u32(&b);
+            if (b.bad) break;
+            if (!(p = new_prop(im, ri, name, k[ki].t))) return UB_LOAD_NO_MEMORY;
+            for (u32 i = 0; i < k[ki].n; ++i) p->a[i] = f[i]; /* UDim offsets are i32 in the same slots */
+            break;
+        }
+        case 0x0E: /* BrickColor */
+            f[0] = ab_u32(&b);
+            if (b.bad) break;
+            if (!(p = new_prop(im, ri, name, UB_PV_BRICKCOLOR))) return UB_LOAD_NO_MEMORY;
+            p->a[0] = f[0];
+            break;
+        case 0x14: /* CFrame: position, rotation id, matrix if the id is 0 */
+            for (int i = 0; i < 3; ++i) ab_u32(&b);
+            if (ab_u8(&b) == 0)
+                for (int i = 0; i < 9; ++i) ab_u32(&b);
+            break;
+        case 0x15: { /* EnumItem: enum name, value */
+            u32 sl;
+            ab_str(&b, &sl);
+            ab_u32(&b);
+            break;
+        }
+        case 0x17: case 0x19: { /* NumberSequence (envelope, time, value), ColorSequence (envelope, time, r, g, b) */
+            u32 kp = ab_u32(&b), fields = type == 0x17 ? 3 : 5;
+            if (b.bad || kp > 1000 || !ab_need(&b, kp * fields * 4)) { b.bad = true; break; }
+            const u8 *q = b.p + b.pos;
+            b.pos += kp * fields * 4;
+            if (kp < 2 || kp > UB_SEQ_MAX_KEYS) break;
+            u32 stride = type == 0x17 ? 3 : 4;
+            if (!grow_buf((void **)&im->seq, &im->seq_cap, im->seq_len + kp * stride, sizeof(f32)))
+                return UB_LOAD_NO_MEMORY;
+            if (!(p = new_prop(im, ri, name, type == 0x17 ? UB_PV_NUMSEQ : UB_PV_COLORSEQ))) return UB_LOAD_NO_MEMORY;
+            p->a[0] = im->seq_len;
+            p->a[1] = kp;
+            for (u32 i = 0; i < kp; ++i) {
+                const u8 *e = q + i * fields * 4;
+                f32 env = u2f(le32(e)), t = u2f(le32(e + 4));
+                im->seq[im->seq_len++] = t;
+                if (type == 0x17) {
+                    im->seq[im->seq_len++] = u2f(le32(e + 8));
+                    im->seq[im->seq_len++] = env;
+                } else
+                    for (int c = 0; c < 3; ++c) im->seq[im->seq_len++] = u2f(le32(e + 8 + c * 4));
+            }
+            break;
+        }
+        case 0x21: { /* Font: weight u16, style u8, family, cached face */
+            u32 wlo = ab_u8(&b), whi = ab_u8(&b), style = ab_u8(&b), fl, cl;
+            const u8 *fam = ab_str(&b, &fl);
+            ab_str(&b, &cl);
+            if (!fam || b.bad) break;
+            if (!(p = new_prop(im, ri, name, UB_PV_FONT))) return UB_LOAD_NO_MEMORY;
+            p->a[0] = add_text(im, fam, fl > 1000 ? 1000 : fl, false);
+            p->a[1] = wlo | (whi << 8);
+            p->a[2] = style;
+            if (p->a[0] == 0xFFFFFFFFu) return UB_LOAD_NO_MEMORY;
+            break;
+        }
+        default: b.bad = true; break; /* a type this reader does not know: the rest cannot be found */
+        }
+    }
+    return UB_LOAD_OK;
+}
+
+static ub_load_result meta_prop(importer *im, cls *c, bool tags, rd *r)
+{
+    u32 name = 0;
+    if (tags) {
+        name = add_name(im, (const u8 *)"Tags", 4);
+        if (name == 0xFFFFFFFFu) return UB_LOAD_NO_MEMORY;
+    }
+    for (u32 i = 0; i < c->count; ++i) {
+        u32 sl;
+        const u8 *s = rd_str(r, &sl);
+        if (!s) return UB_LOAD_CORRUPT;
+        if (!sl) continue;
+        ub_load_result res = UB_LOAD_OK;
+        if (tags) {
+            if (!text_prop(im, (u32)c->first_rec + i, name, s, sl)) res = UB_LOAD_NO_MEMORY;
+        } else
+            res = parse_attributes(im, (u32)c->first_rec + i, s, sl);
+        if (res != UB_LOAD_OK) return res;
+    }
+    return UB_LOAD_OK;
+}
+
 static ub_load_result chunk_prop(importer *im, rd *r)
 {
     u32 id = rd_u32(r), pl;
@@ -734,6 +933,8 @@ static ub_load_result chunk_prop(importer *im, rd *r)
         }
         return UB_LOAD_OK;
     }
+    if (type == 0x01 && (name_is(pname, pl, "AttributesSerialize") || name_is(pname, pl, "Tags")))
+        return meta_prop(im, c, name_is(pname, pl, "Tags"), r);
     bool joint = c->k == K_JOINT || c->k == K_WELD_CONSTRAINT, ws = c->k == K_WORKSPACE;
     bool script = c->k == K_SCRIPT || c->k == K_LOCALSCRIPT || c->k == K_MODULESCRIPT;
     if (script) {
