@@ -205,12 +205,8 @@ static i32 label(i32 parent, const char *name, f32 size, bool bold, f32 r, f32 g
 
 static void build_billboard(sprompt *p, i32 adornee)
 {
-    if (g_core < 0 || !ub_world_alive(W, g_core)) {
-        g_core = ub_world_add(W, -1, UB_CLASS_FOLDER, "CoreGui", "CoreGui");
-        if (g_core < 0) return;
-        W->inst[g_core].flags |= UB_INST_RUNTIME;
-        if (S.g->gui) ub_gui_set_core_root(S.g->gui, g_core);
-    }
+    g_core = S.g->core_gui;
+    if (g_core < 0 || !ub_world_alive(W, g_core)) return;
     i32 bb = make("BillboardGui", g_core, "Prompt");
     if (bb < 0) return;
     setv(bb, "Adornee", vref(adornee));
@@ -725,8 +721,33 @@ static int s_offline(lua_State *L)
     return luaL_error(L, "%s is not available offline", lua_tostring(L, lua_upvalueindex(1)));
 }
 
+/* Chat:Chat(part, message): a bubble over the part; the filters let text through (offline) */
+static int s_chat_bubble(lua_State *L)
+{
+    i32 part = check_inst(L, 2);
+    const char *msg = luaL_checkstring(L, 3);
+    i32 head = part;
+    if (part >= 0 && W->inst[part].part < 0) { /* a model or character: over its Head */
+        for (i32 c = W->inst[part].first_child; c >= 0; c = W->inst[c].next_sibling)
+            if (W->inst[c].part >= 0 && streq(ub_world_str(W, W->inst[c].name), "Head")) head = c;
+    }
+    if (head >= 0 && W->inst[head].part >= 0) ub_hud_bubble(S.g, head, msg);
+    return 0;
+}
+
+static int s_filter(lua_State *L)
+{
+    lua_pushvalue(L, 2);
+    return 1;
+}
+
 bool offline_index(lua_State *L, i32 idx, const char *k)
 {
+    if (idx == VIRT_CHAT) {
+        if (streq(k, "Chat")) { lua_pushcfunction(L, s_chat_bubble); return true; }
+        if (streq(k, "FilterStringAsync") || streq(k, "FilterStringForBroadcast")) { lua_pushcfunction(L, s_filter); return true; }
+        if (streq(k, "BubbleChatEnabled") || streq(k, "LoadDefaultChat")) { lua_pushboolean(L, 1); return true; }
+    }
     static const struct { i32 idx; const char *k; lua_CFunction f; } m[] = {
         { VIRT_POLICY, "GetPolicyInfoForPlayerAsync", s_policy },
         { VIRT_BADGE, "UserHasBadgeAsync", s_false }, { VIRT_BADGE, "UserHasBadge", s_false },
@@ -782,7 +803,7 @@ static u32 g_seen_spawn;
 static bool g_activated;
 static i32 g_hotbar = -1, g_hotbar_frames[MAX_SLOTS], g_hotbar_labels[MAX_SLOTS];
 static u32 g_hotbar_sig;
-bool g_backpack_hidden; /* StarterGui:SetCoreGuiEnabled(Backpack, false) */
+#define g_backpack_hidden (S.g->hud.core_off[UB_CORE_BACKPACK])
 
 static bool is_tool(i32 i)
 {
@@ -945,12 +966,8 @@ static void draw_hotbar(void)
     sig = sig * 31u + (g_backpack_hidden ? 1u : 0u) + W->epoch * 0u;
     if (sig == g_hotbar_sig && g_hotbar >= 0 && ub_world_alive(W, g_hotbar)) return;
     g_hotbar_sig = sig;
-    if (g_core < 0 || !ub_world_alive(W, g_core)) {
-        g_core = ub_world_add(W, -1, UB_CLASS_FOLDER, "CoreGui", "CoreGui");
-        if (g_core < 0) return;
-        W->inst[g_core].flags |= UB_INST_RUNTIME;
-        if (S.g->gui) ub_gui_set_core_root(S.g->gui, g_core);
-    }
+    g_core = S.g->core_gui;
+    if (g_core < 0 || !ub_world_alive(W, g_core)) return;
     if (g_hotbar >= 0 && ub_world_alive(W, g_hotbar)) ub_world_destroy(W, g_hotbar);
     g_hotbar = -1;
     if (!used || g_backpack_hidden) return;
@@ -1077,7 +1094,6 @@ void tools_reset(void)
     g_seen_spawn = 0;
     g_activated = false;
     g_hotbar_sig = 0;
-    g_backpack_hidden = false;
 }
 
 /* ---------------------------------------------------------------- teams

@@ -7,6 +7,7 @@
 
 #include <math.h>
 #include "app/app_play.h"
+#include "app/app_hud.h"
 #include "game/ub_demo_place.h"
 #include "game/ub_game.h"
 #include "gui/ub_gui.h"
@@ -526,6 +527,123 @@ static void test_demo_place(void)
     ub_game_stop(&g_g);
 }
 
+/* How many shown labels under `root` have exactly this text. */
+static int count_labels(const ub_world *w, i32 root, const char *text)
+{
+    int n = 0;
+    for (i32 c = w->inst[root].first_child; c >= 0; c = w->inst[c].next_sibling) {
+        if (!ub_world_alive(w, c)) continue;
+        const ub_value *t = ub_world_prop_named(w, c, "Text");
+        const ub_value *vis = ub_world_prop_named(w, c, "Visible");
+        const ub_value *en = ub_world_prop_named(w, c, "Enabled");
+        if (vis && vis->type == UB_PV_BOOL && !vis->v.b) continue; /* hidden, and all below it */
+        if (en && en->type == UB_PV_BOOL && !en->v.b) continue;    /* a ScreenGui turned off */
+        if (t && t->type == UB_PV_STRING && !strcmp(t->v.str.s, text)) n++;
+        n += count_labels(w, c, text);
+    }
+    return n;
+}
+
+static bool screen_on(const ub_world *w, i32 core, const char *name)
+{
+    i32 s = ub_world_find_child(w, core, name);
+    const ub_value *e = s >= 0 ? ub_world_prop_named(w, s, "Enabled") : NULL;
+    return e && e->type == UB_PV_BOOL && e->v.b;
+}
+
+/* The client UI (milestone 9A) on the demo place: the player list with
+ * the place's leaderstats, the chat and its bubbles, the script's
+ * notification, the health bar, and the game menu's reset. */
+static void test_client_ui(void)
+{
+    ub_world w;
+    ub_demo_place(&w);
+    CHECK(ub_game_start(&g_g, &w, true));
+    hud_begin_game(&g_g);
+    for (int i = 0; i < 10; ++i) gui_frame(&g_g, 400, 400, false, false, 0, i / 60.0);
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    const ub_world *W = &g_g.world;
+    i32 core = g_g.core_gui;
+    CHECK(core >= 0 && ub_world_find_child(W, core, "TopBar") >= 0);
+    /* the player list: the player and the Doors stat the place made */
+    CHECK(count_labels(W, core, "People") == 1 && count_labels(W, core, "Player1") == 1);
+    CHECK(count_labels(W, core, "Doors") == 1 && count_labels(W, core, "0") == 1);
+    /* the demo's LocalScript sent a notification */
+    CHECK(g_g.hud.notice_count == 1 && count_labels(W, core, "Uniblox demo") == 1);
+    /* through the door: the stat goes up */
+    i32 ws = ub_world_workspace(&g_g.world);
+    i32 door = ub_world_find_child(W, ub_world_find_child(W, ws, "House"), "Door");
+    f32 seen = 0;
+    walk_watching(&g_g, 2.0f, &seen, door);
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(count_labels(W, core, "1") == 1);
+    /* chatting: the line (rich text), the bubble over the head, Chatted */
+    ub_game_player_chat(&g_g, "fast");
+    CHECK(g_g.walk_speed == 32);
+    CHECK(g_g.hud.bubble_count == 1 && g_g.hud.bubbles[0].adornee == ub_world_find_child(W, g_g.char_model, "Head"));
+    hud_frame(800, 600, "hel", 1.0f / 60.0f);
+    char line[160];
+    snprintf(line, sizeof line, "<font color=\"#%06X\"><b>Player1:</b></font> fast", ub_hud_name_color("Player1"));
+    CHECK(count_labels(W, core, line) == 1);
+    CHECK(count_labels(W, core, "hel_") == 1 && screen_on(W, core, "Chat"));
+    i32 bub = ub_world_find_child(W, core, "Bubble");
+    const ub_value *ad = bub >= 0 ? ub_world_prop_named(W, bub, "Adornee") : NULL;
+    CHECK(ad && ad->type == UB_PV_REF && ad->v.ref == g_g.hud.bubbles[0].adornee);
+    CHECK(count_labels(W, core, "fast") == 1);
+    /* the chat button hides the window (but typing shows it) */
+    hud_toggle_chat();
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(!screen_on(W, core, "Chat"));
+    hud_toggle_chat();
+    /* Tab hides the list */
+    hud_toggle_list();
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(count_labels(W, core, "People") == 0);
+    hud_toggle_list();
+    /* hurt: the health bar shows */
+    ub_game_set_health(&g_g, g_g.max_health * 0.5f);
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    i32 health = ub_world_find_child(W, ub_world_find_child(W, core, "PlayerList"), "Health");
+    const ub_value *hv = health >= 0 ? ub_world_prop_named(W, health, "Visible") : NULL;
+    CHECK(hv && hv->type == UB_PV_BOOL && hv->v.b);
+    /* the menu: its buttons are where the hit test says, Reset asks first */
+    CHECK(!screen_on(W, core, "GameMenu"));
+    hud_set_menu(true);
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(screen_on(W, core, "GameMenu"));
+    const ub_hud_rect *b0 = hud_hit_rect(HUD_HIT_BTN0);
+    CHECK(b0 && b0->w > 0 && hud_hit(b0->x + b0->w / 2, b0->y + b0->h / 2) == HUD_HIT_BTN0);
+    CHECK(hud_button_meaning(0) == HUD_ASK_RESET && hud_button_meaning(1) == HUD_ASK_LEAVE && hud_button_meaning(2) == HUD_DO_RESUME);
+    CHECK(count_labels(W, core, "Reset character (R)") == 1);
+    hud_confirm(1);
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(count_labels(W, core, "<b>Reset your character?</b>") == 1);
+    CHECK(hud_button_meaning(0) == HUD_DO_RESET && hud_button_meaning(2) == HUD_DO_CANCEL);
+    hud_set_tab(2); /* Help */
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(hud_confirming() == 0 && count_labels(W, core, "<b>Esc</b> this menu") == 0);
+    hud_set_menu(false);
+    ub_game_reset_character(&g_g);
+    frames(2, v3(0, 0, 0));
+    CHECK(g_g.dead);
+    /* a place can turn the reset off */
+    frames(60 * 6, v3(0, 0, 0));
+    CHECK(!g_g.dead);
+    g_g.hud.reset_off = true;
+    ub_game_reset_character(&g_g);
+    frames(2, v3(0, 0, 0));
+    CHECK(!g_g.dead);
+    hud_set_menu(true);
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    CHECK(count_labels(W, core, "Reset character (R)") == 0);
+    hud_begin_game(NULL);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* Death and respawn: a kill brick, Died and CharacterAdded. */
 static void test_death(void)
 {
@@ -627,6 +745,13 @@ static void test_gui_api(void)
     CHECK(find_result(&g_g, "gui done") >= 0);
     bool ok = find_result(&g_g, "gui ok") >= 0;
     CHECK(ok);
+    /* what the script told the client UI */
+    const ub_hud_state *hs = &g_g.hud;
+    CHECK(hs->core_off[UB_CORE_HEALTH] && !hs->core_off[UB_CORE_PLAYERLIST] && !hs->core_off[UB_CORE_CHAT]);
+    CHECK(hs->reset_off);
+    CHECK(hs->chat_count == 1 && !strcmp(hs->chat[0].text, "[System] hello") && hs->chat[0].color == 0xFFC800);
+    CHECK(hs->notice_count == 1 && !strcmp(hs->notices[0].title, "Hi") && hs->notices[0].duration == 3);
+    CHECK(hs->bubble_count == 1 && hs->bubbles[0].adornee == ub_world_find_child(&g_g.world, ub_world_workspace(&g_g.world), "Door"));
     ub_script_stats st;
     ub_script_get_stats(&st);
     CHECK(st.errors == 0);
@@ -907,4 +1032,5 @@ void test_game(void)
     test_reuse();
     test_death();
     test_demo_place();
+    test_client_ui();
 }

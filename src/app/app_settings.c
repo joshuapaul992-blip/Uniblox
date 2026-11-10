@@ -23,6 +23,7 @@ void settings_defaults(ub_settings *s)
     s->scripts = true;
     s->zoom = 22;
     s->pitch_deg = -20;
+    s->hide_overlay = true; /* the client UI shows what players need; F3 adds the details */
 }
 
 static i32 parse_int(const char *s)

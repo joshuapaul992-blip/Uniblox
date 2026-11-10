@@ -49,6 +49,9 @@ static const char k_door_script[] =
     "\tif open or not hit.Parent:FindFirstChildOfClass('Humanoid') then return end\n"
     "\topen = true\n"
     "\tprint(hit.Parent.Name .. ' opened the door')\n"
+    "\tlocal player = game:GetService('Players'):GetPlayerFromCharacter(hit.Parent)\n"
+    "\tlocal stat = player and player:FindFirstChild('leaderstats') and player.leaderstats:FindFirstChild('Doors')\n"
+    "\tif stat then stat.Value += 1 end\n"
     "\tlocal events = game:GetService('ReplicatedStorage'):FindFirstChild('DemoEvents')\n"
     "\tif events then events:FireAllClients('door') end\n"
     "\tdoor.CanCollide = false\n"
@@ -115,6 +118,12 @@ static const char k_welcome_script[] =
     "local Players = game:GetService('Players')\n"
     "Players.PlayerAdded:Connect(function(player)\n"
     "\tprint('Welcome, ' .. player.Name .. '! Touch the door, press E at the lamp, click the spinning block, avoid the lava.')\n"
+    "\tlocal leaderstats = Instance.new('Folder')\n"
+    "\tleaderstats.Name = 'leaderstats'\n"
+    "\tlocal doors = Instance.new('IntValue')\n"
+    "\tdoors.Name = 'Doors'\n"
+    "\tdoors.Parent = leaderstats\n"
+    "\tleaderstats.Parent = player\n"
     "\tplayer.Chatted:Connect(function(message)\n"
     "\t\tlocal humanoid = player.Character and player.Character:FindFirstChildOfClass('Humanoid')\n"
     "\t\tif message == 'fast' and humanoid then humanoid.WalkSpeed = 32 print('Fast!')\n"
@@ -183,6 +192,7 @@ static const char k_hud_script[] =
     "\tshow('Back to the start')\n"
     "end)\n"
     "show('Welcome to Uniblox')\n"
+    "game:GetService('StarterGui'):SetCore('SendNotification', {Title = 'Uniblox demo', Text = 'Press / to chat, Tab for the player list, Esc for the menu.', Duration = 8})\n"
     "print('The demo panel is ready')\n";
 
 static const char k_server_script[] =
@@ -316,7 +326,7 @@ static void add_gui(i32 ws, i32 door)
 
     i32 panel = gui(hud, "Frame", "Panel");
     p_v2(panel, "AnchorPoint", 1, 0);
-    p_ud2(panel, "Position", 1, -12, 0, 12); /* top right: the overlay (F3) is on the left */
+    p_ud2(panel, "Position", 1, -12, 0, 64); /* top right, under the player list */
     p_ud2(panel, "Size", 0, 210, 0, 0);
     p_enum(panel, "AutomaticSize", 2); /* Y */
     p_rgb(panel, "BackgroundColor3", 0x1C2430);
