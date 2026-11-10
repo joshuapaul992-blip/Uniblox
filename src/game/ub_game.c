@@ -182,6 +182,78 @@ void ub_game_set_velocity(ub_game *g, vec3 v)
     if (g->phys_ok && !g->dead) ub_char_set_velocity(&g->chr, &g->phys, v);
 }
 
+/* ------------------------------------------------------------- teams */
+
+static bool bool_prop(const ub_world *w, i32 i, const char *k, bool dflt)
+{
+    const ub_value *v = ub_world_prop_named(w, i, k);
+    return v && v->type == UB_PV_BOOL ? v->v.b : dflt;
+}
+
+static i32 brick_prop(const ub_world *w, i32 i, const char *k)
+{
+    const ub_value *v = ub_world_prop_named(w, i, k);
+    return v && (v->type == UB_PV_BRICKCOLOR || v->type == UB_PV_INT) ? v->v.i : -1;
+}
+
+/* Where the player appears: their RespawnLocation, else a SpawnLocation
+ * for their team (or a neutral one), else the place's first. */
+void ub_game_pick_spawn(ub_game *g)
+{
+    ub_world *w = &g->world;
+    if (g->respawn_location >= 0 && ub_world_alive(w, g->respawn_location)) {
+        ub_game_set_respawn_location(g, g->respawn_location);
+        return;
+    }
+    bool neutral = g->player < 0 || bool_prop(w, g->player, "Neutral", true);
+    i32 color = g->player >= 0 ? brick_prop(w, g->player, "TeamColor") : -1;
+    i32 cand[64], nc = 0, neutral_cand[64], nn = 0;
+    i32 ws = ub_world_workspace(w);
+    for (i32 i = 0; i < w->count; ++i) {
+        if (w->inst[i].cls != UB_CLASS_SPAWN || w->inst[i].part < 0 || !ub_world_alive(w, i) ||
+            !ub_world_is_descendant(w, i, ws) || !bool_prop(w, i, "Enabled", true))
+            continue;
+        bool sn = bool_prop(w, i, "Neutral", true);
+        if (sn && nn < 64) neutral_cand[nn++] = i;
+        if (!neutral && !sn && brick_prop(w, i, "TeamColor") == color && nc < 64) cand[nc++] = i;
+    }
+    static u32 seed = 12345;
+    seed = seed * 1103515245u + 12345u;
+    i32 pick = nc ? cand[(seed >> 16) % (u32)nc] : nn ? neutral_cand[(seed >> 16) % (u32)nn] : -1;
+    if (pick >= 0) {
+        const ub_part *p = &w->parts[w->inst[pick].part];
+        g->spawn = v3_add(p->pos, v3_scale(p->rot.y, p->size.y * 0.5f));
+    } else {
+        g->spawn = g->spawn_default;
+    }
+}
+
+/* At the start: into the AutoAssignable team with the fewest players (the
+ * first, with one player). */
+static void assign_team(ub_game *g)
+{
+    ub_world *w = &g->world;
+    if (g->player < 0) return;
+    i32 teams = find_root_by_class(w, "Teams");
+    for (i32 c = teams >= 0 ? w->inst[teams].first_child : -1; c >= 0; c = w->inst[c].next_sibling) {
+        if (!ub_world_alive(w, c) || ub_strcmp(ub_world_str(w, w->inst[c].class_name), "Team") != 0) continue;
+        if (!bool_prop(w, c, "AutoAssignable", true)) continue;
+        ub_value v;
+        memset(&v, 0, sizeof v);
+        v.type = UB_PV_REF;
+        v.v.ref = c;
+        ub_world_set_prop_named(w, g->player, "Team", &v);
+        ub_value col;
+        memset(&col, 0, sizeof col);
+        col.type = UB_PV_BRICKCOLOR;
+        col.v.i = brick_prop(w, c, "TeamColor") >= 0 ? brick_prop(w, c, "TeamColor") : 194;
+        ub_world_set_prop_named(w, g->player, "TeamColor", &col);
+        ub_value nv = ub_vbool(false);
+        ub_world_set_prop_named(w, g->player, "Neutral", &nv);
+        return;
+    }
+}
+
 void ub_game_set_respawn_location(ub_game *g, i32 inst)
 {
     ub_world *w = &g->world;
@@ -222,7 +294,9 @@ void ub_game_set_health(ub_game *g, f32 health)
 
 static void respawn(ub_game *g)
 {
+    g->spawn_count++;
     g->dead = false;
+    ub_game_pick_spawn(g);
     g->health = g->max_health;
     ub_game_teleport(g, g->spawn);
     if (g->phys_ok) g->chr.walk_speed = g->walk_speed;
@@ -260,6 +334,7 @@ void ub_game_part_changed(ub_game *g, i32 part, u32 what)
         return;
     }
     make_live(g, part);
+    if (what & UB_CHANGE_PHYS) g->constraints_dirty = true; /* (its body may have changed) */
     if ((what & UB_CHANGE_PHYS) && g->phys_ok)
         ub_phys_sync_part(&g->phys, part, in_workspace(g, inst), part_watched(g, part));
 }
@@ -268,6 +343,7 @@ void ub_game_subtree_changed(ub_game *g, i32 inst)
 {
     ub_world *w = &g->world;
     if (inst < 0 || inst >= w->count) return;
+    g->constraints_dirty = true;
     /* walk the subtree (destroyed instances keep their children linked) */
     i32 cap = 64, sp = 0;
     i32 *stack = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap);
@@ -333,10 +409,17 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
     }
     g->spawn_default = g->spawn;
     g->respawn_location = -1;
+    /* (the player is made below; their team decides the spawn) */
     g->kill_height = UB_MIN(wd->fallen_height, g->spawn.y - 50.0f);
     g->feet = g->spawn;
     g->last_ground_part = -1;
     make_player(g);
+    assign_team(g);
+    ub_game_pick_spawn(g);
+    g->feet = g->spawn;
+    ub_rig_build(g);
+    g->spawn_count = 1;
+    g->constraints_dirty = true;
     {
         i32 added[64];
         ub_game_fill_player_gui(g, true, added, 64);
@@ -375,6 +458,8 @@ void ub_game_stop(ub_game *g)
     if (g->phys_ok) ub_phys_free(&g->phys);
     plat_free(g->live_flag);
     plat_free(g->live);
+    plat_free(g->carry);
+    plat_free(g->movers);
     ub_world_free(&g->world);
     memset(g, 0, sizeof *g);
 }
@@ -415,6 +500,7 @@ void ub_game_update(ub_game *g, f32 dt, vec3 move, bool jump)
         int steps = 0;
         while (g->accum >= UB_PHYS_DT && steps < UB_GAME_MAX_STEPS) {
             g->time += UB_PHYS_DT;
+            ub_constraints_step(g);
             ub_char_before_step(&g->chr, &g->phys, move, jump);
             ub_phys_step(&g->phys);
             ub_char_after_step(&g->chr, &g->phys);
@@ -457,6 +543,7 @@ void ub_game_update(ub_game *g, f32 dt, vec3 move, bool jump)
     } else {
         g->time += dt;
     }
+    ub_rig_pose(g, dt);
     u64 p1 = plat_time_us();
     if (g->scripts) ub_script_end_frame(dt);
     u64 s1 = plat_time_us();

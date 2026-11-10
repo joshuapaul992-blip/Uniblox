@@ -33,14 +33,24 @@ typedef struct {
     vec3 normal;              /* outward, unit length, in the unit cube */
 } ub_face;
 
-typedef struct {
+/* The shapes have at most UB_MESH_MAX_VERTS / UB_MESH_MAX_FACES; meshes
+ * made from parts' own geometry (ub_mesh_from_triangles) can have more. */
+typedef struct ub_mesh_s {
     int vert_count, face_count;
-    vec3 verts[UB_MESH_MAX_VERTS];
-    vec3 vnormals[UB_MESH_MAX_VERTS]; /* smooth-shading normals (unit cube) */
-    ub_face faces[UB_MESH_MAX_FACES];
+    vec3 *verts;
+    vec3 *vnormals;           /* smooth-shading normals (unit cube) */
+    ub_face *faces;
 } ub_mesh;
 
 void ub_meshes_init(void);
 const ub_mesh *ub_mesh_get(ub_shape s, ub_detail d);
+
+/* A mesh of flat triangles in the unit cube, made of convex pieces
+ * (piece_v / piece_t: each piece's end vertex and end triangle), with each
+ * face turned to face out of its piece, or (wound) facing the side its
+ * vertices go counter-clockwise round. One allocation: plat_free it.
+ * NULL if out of memory. */
+ub_mesh *ub_mesh_from_triangles(const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
+                                const u32 *piece_t, u32 npieces, bool wound);
 
 #endif

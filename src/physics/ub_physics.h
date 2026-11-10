@@ -73,9 +73,36 @@ typedef struct {
     mat3 wrot;
     vec3 lo, hi;          /* world bounding box */
     f32 friction, restitution;
+    const ub_hull *hull;  /* a piece of the part's own mesh (unit cube), or NULL: the shape's */
+    i32 next_piece;       /* the part's next piece (anchored unions and MeshParts), -1 none */
 } ub_pshape;
 
 typedef struct ub_manifold ub_manifold;
+
+/* Joints between bodies (milestone 8C), for Roblox's constraints. Anchors
+ * and axes are in each body's own space; body 0 is the static world. */
+typedef enum {
+    UB_PJ_BALL,           /* the anchors meet */
+    UB_PJ_HINGE,          /* the anchors meet; the axes stay together; it turns about them */
+    UB_PJ_PRISMATIC,      /* slides along the axis, never turns */
+    UB_PJ_ROPE,           /* the anchors at most `length` apart */
+    UB_PJ_ROD,            /* exactly `length` apart */
+    UB_PJ_SPRING,         /* pulled towards `length` by stiffness and damping (a force, not a constraint) */
+} ub_pjoint_kind;
+
+typedef struct {
+    u8 kind;              /* ub_pjoint_kind */
+    u8 limits;            /* hinge: lower..upper angle; prismatic: lower..upper distance */
+    u8 motor;             /* 0 none, 1 motor (motor_speed), 2 servo (towards target, at motor_speed) */
+    i32 a, b;             /* bodies */
+    vec3 la, lb;          /* anchors */
+    vec3 axa, axb;        /* hinge / slide axes (unit) */
+    vec3 refa, refb;      /* hinge: perpendicular reference axes, for its angle */
+    f32 length, stiffness, damping;
+    f32 lower, upper;
+    f32 motor_speed, motor_max, target;   /* rad/s or studs/s; max torque or force; servo target */
+    f32 angle;            /* hinge: its angle now (read back), prismatic: its position */
+} ub_pjoint;
 
 /* Two parts that started touching (world part indices; -1 = no part, i.e.
  * the character). */
@@ -128,6 +155,13 @@ typedef struct {
 
     /* touches that began in the last step */
     ub_touch *touches;
+    /* joints (8C) and the forces to apply in the next step */
+    ub_pjoint *joints;
+    i32 joint_count, joint_cap;
+    vec3 *force, *torque;     /* per body, cleared after each step */
+    vec3 *drive_v, *drive_f, *drive_w, *drive_t; /* per body: velocity targets and their limits */
+    u8 *driven;
+    i32 force_cap;
     i32 touch_count, touch_cap;
     u64 *sensor_keys, *sensor_prev;   /* sensor pairs touching (sorted) */
     i32 sensor_count, sensor_cap, sensor_prev_count, sensor_prev_cap;
@@ -185,6 +219,17 @@ bool ub_phys_part_pose(const ub_physics *ph, i32 part, f32 alpha, vec3 *pos, mat
 void ub_phys_body_pose(const ub_physics *ph, i32 body, f32 alpha, vec3 *pos, mat3 *rot);
 
 void ub_phys_get_stats(const ub_physics *ph, ub_phys_stats *out);
+
+/* Joints (8C): replaces all of them (bodies they join wake up). */
+bool ub_phys_set_joints(ub_physics *ph, const ub_pjoint *j, i32 count);
+/* A force and torque (world, through the centre of mass) on a body for
+ * the next step: body movers, VectorForce, Torque. */
+void ub_phys_add_force(ub_physics *ph, i32 body, vec3 force, vec3 torque);
+/* Moves a body's velocities towards targets, limited to what max force
+ * and max torque could do in one step (LinearVelocity, BodyVelocity,
+ * AngularVelocity, AlignPosition, BodyGyro...). A component is left
+ * alone where its max is 0. */
+void ub_phys_drive(ub_physics *ph, i32 body, vec3 v_target, vec3 max_force, vec3 w_target, vec3 max_torque);
 
 /* Material properties: density (mass per cubic stud), friction, bounce. */
 void ub_material_physics(u8 material, f32 *density, f32 *friction, f32 *restitution);

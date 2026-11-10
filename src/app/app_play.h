@@ -39,7 +39,7 @@ ub_camera play_view_camera(const ub_play_view *v, const ub_game *g);
 /* Between ub_render_begin and ub_render_end_scene. */
 void play_view_draw(ub_play_view *v, ub_game *g, bool character);
 
-ub_part_draw play_part_draw(const ub_part *p);
+ub_part_draw play_part_draw(const ub_world *w, const ub_part *p);
 /* Roblox-style lighting -> the renderer's sky, sun and fog. */
 ub_render_env play_env(const ub_world *w);
 void play_draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amount, f32 fallen);

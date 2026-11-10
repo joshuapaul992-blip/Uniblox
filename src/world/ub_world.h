@@ -29,6 +29,7 @@ enum {
     UB_PART_PLACEHOLDER = 1 << 2,  /* stands in for a mesh we cannot load */
     UB_PART_GLOW        = 1 << 3,  /* neon: lit at full brightness */
     UB_PART_REMOVED     = 1 << 4,  /* its instance was destroyed (only while running) */
+    UB_PART_CARRIED     = 1 << 5,  /* moved by the game (character rig, welded at run time): not simulated */
 };
 
 /* Shapes and materials use the renderer's numbering (ub_shape, ub_material). */
@@ -41,7 +42,29 @@ typedef struct {
     u8 material;
     u8 transparency;      /* 0 opaque .. 255 invisible */
     u8 flags;             /* UB_PART_* */
+    u16 mesh;             /* 0: its shape; else meshes[mesh - 1], for collision and looks (unions, MeshParts) */
+    u16 look;             /* 0: as `mesh`; else meshes[look - 1], for looks only (mesh files, SpecialMesh) */
 } ub_part;
+
+/* A part's own geometry (milestone 8C): triangles in the part's unit cube
+ * (-0.5..0.5, scaled by its size), in Uniblox's axes, made of convex
+ * pieces (vertices and triangles of each piece follow one another) that
+ * physics uses as collision hulls. Parts that look the same share one. */
+typedef struct {
+    f32 *v;               /* 3 floats per vertex */
+    u32 *tri;             /* 3 vertex indices per triangle */
+    u32 *piece_v, *piece_t; /* per piece: its end vertex and end triangle */
+    u32 nv, nt, npieces;
+    u32 flags;            /* UB_WMESH_* */
+    u32 hash;
+    void *render_cache;   /* the renderer's form of it (one allocation, freed with the world) */
+    void *phys_cache;     /* physics' collision hulls (one allocation, freed with the world) */
+} ub_wmesh;
+
+enum {
+    UB_WMESH_WOUND = 1,   /* triangles face the way they are wound (counter-clockwise = outside);
+                             otherwise each faces out of its convex piece */
+};
 
 /* Instance flags. The low byte is saved; the rest only exists while the
  * game runs. */
@@ -71,6 +94,7 @@ typedef enum {
     UB_PV_REF,            /* an instance, -1 = nil */
     UB_PV_FONT,           /* family (a content id), weight 100..900, style 0 normal / 1 italic */
     UB_PV_BRICKCOLOR,     /* a BrickColor number */
+    UB_PV_CFRAME,         /* 12 floats in Roblox's axes: x y z, then the rotation by rows (as GetComponents) */
     UB_PV_COUNT
 } ub_ptype;
 
@@ -93,6 +117,7 @@ typedef struct {
         struct { f32 lo, hi; } range;
         struct { f32 *k; u32 n; } seq;            /* n keypoints, 3 (NUMSEQ) or 4 (COLORSEQ) floats each */
         struct { char *family; u16 weight; u8 style; } font;
+        struct { f32 *m; } cf;
     } v;
 } ub_value;
 
@@ -167,6 +192,8 @@ typedef struct {
     i32 *key_hash;        /* open addressing: key ids, -1 empty */
     i32 key_hash_cap;
     u32 epoch;            /* bumped by every change to the tree, names and properties */
+    ub_wmesh *meshes;
+    i32 mesh_count, mesh_cap;
 } ub_world;
 
 void ub_world_init(ub_world *w);
@@ -292,6 +319,19 @@ const char *ub_load_result_name(ub_load_result r);
 
 /* Replace non-finite or absurd numbers in a part loaded from a file. */
 void ub_part_sanitize(ub_part *p);
+
+/* A mesh for parts (ub_part.mesh): the id to put in a part (1-based; an
+ * identical mesh already there is shared), or 0 if out of memory or
+ * invalid. The data is copied. Pieces as in ub_wmesh. */
+u16 ub_world_add_mesh(ub_world *w, const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
+                      const u32 *piece_t, u32 npieces, u32 flags);
+/* The renderer's form of mesh `id` (render/ub_mesh.h), made on first use;
+ * NULL if none or out of memory. */
+const struct ub_mesh_s *ub_world_render_mesh(const ub_world *w, u16 id);
+static inline const ub_wmesh *ub_world_mesh(const ub_world *w, u16 id)
+{
+    return id > 0 && (i32)id <= w->mesh_count ? &w->meshes[id - 1] : (const ub_wmesh *)0;
+}
 
 /* ------------------------------------------------- Roblox's axes
  * Scripts and the editor's numbers use Roblox's coordinates (right-handed,

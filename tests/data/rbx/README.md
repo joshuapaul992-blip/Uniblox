@@ -47,3 +47,11 @@ The same project's `models/<name>/binary.rbxm`, checked by `test_rbx_attributes`
 | `tags.rbxm` | `models/tags` | CollectionService tags |
 | `font-attribute.rbxm` | `models/folder-with-font-attribute` | A Font attribute |
 | `int32-attribute.rbxm` | `models/lighting-with-int32-attribute` | The Int32 attribute type |
+
+### XML twins (milestone 8C)
+
+`xml/<name>.rbxmx` and `xml/<name>.rbxm` are the same project's
+`models/<name>/xml.rbxmx` and `binary.rbxm`, and the units `unions.rbxm` and
+`unions-sharedstring.rbxm` its `models/unions` and `models/sharedstring`.
+`test_rbx_xml` loads each XML file and its binary twin and requires the
+same world from both, property by property.

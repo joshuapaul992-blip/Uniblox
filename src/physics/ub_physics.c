@@ -131,7 +131,7 @@ static void shape_update(ub_physics *ph, ub_pshape *s)
 static void cshape(const ub_pshape *s, ub_cshape *c)
 {
     c->sphere = s->shape == UB_SHAPE_BALL;
-    c->hull = c->sphere ? NULL : ub_hull_get((ub_shape)s->shape);
+    c->hull = c->sphere ? NULL : s->hull ? s->hull : ub_hull_get((ub_shape)s->shape);
     c->pos = s->wpos;
     c->rot = s->wrot;
     c->size = s->size;
@@ -294,6 +294,46 @@ static void dyn_remove(ub_physics *ph, i32 shape)
     ph->shapes[shape].in_dyn = 0;
 }
 
+/* The collision hulls of a mesh's pieces, made on first use and kept with
+ * the world's mesh (one allocation: [count][hulls]). NULL if none. */
+#define MAX_PIECES 64
+static const ub_hull *mesh_hulls(ub_world *w, u16 id, i32 *count)
+{
+    *count = 0;
+    if (id == 0 || (i32)id > w->mesh_count) return NULL;
+    ub_wmesh *m = &w->meshes[id - 1];
+    if (m->flags & UB_WMESH_WOUND) return NULL; /* a look, not convex pieces */
+    if (!m->phys_cache) {
+        u32 np = m->npieces < MAX_PIECES ? m->npieces : MAX_PIECES;
+        u8 *block = (u8 *)plat_alloc(sizeof(ub_hull) * (np + 1));
+        if (!block) return NULL;
+        i32 *n = (i32 *)block;
+        ub_hull *h = (ub_hull *)(block + sizeof(ub_hull)); /* (the count gets a hull-sized slot) */
+        *n = 0;
+        u32 v0 = 0, t0 = 0;
+        vec3 pts[256];
+        u32 tri[3 * 512];
+        for (u32 p = 0; p < m->npieces && (u32)*n < np; ++p) {
+            u32 nv = m->piece_v[p] - v0, nt = m->piece_t[p] - t0;
+            if (nv >= 4 && nv <= 256 && nt <= 512) {
+                for (u32 i = 0; i < nv; ++i) pts[i] = v3(m->v[(v0 + i) * 3], m->v[(v0 + i) * 3 + 1], m->v[(v0 + i) * 3 + 2]);
+                for (u32 i = 0; i < nt * 3; ++i) tri[i] = m->tri[t0 * 3 + i] - v0;
+                if (ub_hull_build(&h[*n], pts, (int)nv, tri, (int)nt)) (*n)++;
+            } else if (nv > 256) { /* a big piece: its sampled points, fitted (no exact faces) */
+                u32 step = (nv + 255) / 256, k = 0;
+                for (u32 i = 0; i < nv && k < 256; i += step, ++k)
+                    pts[k] = v3(m->v[(v0 + i) * 3], m->v[(v0 + i) * 3 + 1], m->v[(v0 + i) * 3 + 2]);
+                if (ub_hull_build(&h[*n], pts, (int)k, tri, 0)) (*n)++;
+            }
+            v0 = m->piece_v[p];
+            t0 = m->piece_t[p];
+        }
+        m->phys_cache = block;
+    }
+    *count = *(const i32 *)m->phys_cache;
+    return *count ? (const ub_hull *)((const u8 *)m->phys_cache + sizeof(ub_hull)) : NULL;
+}
+
 bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int kinematic_count)
 {
     memset(ph, 0, sizeof *ph);
@@ -319,7 +359,7 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
     }
     for (i32 i = 0; i < w->count; ++i) {
         i32 p = w->inst[i].part;
-        if (p >= 0 && p < np && ub_world_is_descendant(w, i, w->workspace)) {
+        if (p >= 0 && p < np && ub_world_is_descendant(w, i, w->workspace) && !(w->parts[p].flags & UB_PART_CARRIED)) {
             flags[p] = 1;
             inst_of[p] = i;
         }
@@ -349,6 +389,11 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
         u8 gf = flags[uf_find(group, i)];
         bool moving = (gf & 4) || !(gf & 2);
         if (moving || (w->parts[i].flags & UB_PART_CAN_COLLIDE)) nshapes++;
+        if (!moving && (w->parts[i].flags & UB_PART_CAN_COLLIDE) && w->parts[i].mesh) {
+            i32 pieces;
+            mesh_hulls(w, w->parts[i].mesh, &pieces);
+            if (pieces > 1) nshapes += pieces - 1;
+        }
     }
     ok = ok && grow((void **)&ph->shapes, &ph->shape_cap, nshapes + 8, sizeof(ub_pshape));
     if (!ok) goto done;
@@ -373,8 +418,22 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
         s->lrot = quat_to_mat3(q);
         f32 dens;
         ub_material_physics(p->material, &dens, &s->friction, &s->restitution);
+        s->next_piece = -1;
+        i32 pieces = 0;
+        const ub_hull *hulls = p->mesh ? mesh_hulls(w, p->mesh, &pieces) : NULL;
+        if (hulls) s->hull = &hulls[0];
         shape_update(ph, s);
         ph->part_shape[i] = ph->shape_count++;
+        /* the rest of its pieces: more shapes for the same part */
+        for (i32 k = 1; k < pieces; ++k) {
+            ub_pshape *t = &ph->shapes[ph->shape_count];
+            *t = *s;
+            t->hull = &hulls[k];
+            t->next_piece = -1;
+            ph->shapes[ph->shape_count - 1].next_piece = ph->shape_count;
+            shape_update(ph, t);
+            ph->shape_count++;
+        }
     }
     ph->bodies[0].shape_count = ph->static_count = ph->shape_count;
 
@@ -434,6 +493,7 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
 
                 ub_pshape *s = &ph->shapes[ph->shape_count];
                 memset(s, 0, sizeof *s);
+                s->next_piece = -1;
                 s->body = b;
                 s->part = j;
                 s->shape = p->shape < UB_SHAPE_COUNT ? p->shape : UB_SHAPE_BOX;
@@ -491,6 +551,8 @@ done:
 
 void ub_phys_free(ub_physics *ph)
 {
+    plat_free(ph->joints);
+    plat_free(ph->force); /* (torque, the drives share it) */
     plat_free(ph->free_body);
     plat_free(ph->bodies);
     plat_free(ph->shapes);
@@ -523,6 +585,7 @@ i32 ub_phys_add_character(ub_physics *ph, vec3 pos, const vec3 *offsets, int cou
     for (int i = 0; i < count; ++i) {
         ub_pshape *s = &ph->shapes[ph->shape_count];
         memset(s, 0, sizeof *s);
+        s->next_piece = -1;
         s->body = b;
         s->part = -1;
         s->shape = UB_SHAPE_BALL;
@@ -653,7 +716,7 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
         ph->part_count = w->part_count;
     }
     const ub_part *p = &w->parts[part];
-    alive = alive && !(p->flags & UB_PART_REMOVED);
+    alive = alive && !(p->flags & (UB_PART_REMOVED | UB_PART_CARRIED));
     bool collide = alive && (p->flags & UB_PART_CAN_COLLIDE);
     bool touch = alive && sensor && !collide;
     bool anchored = (p->flags & UB_PART_ANCHORED) != 0;
@@ -665,12 +728,16 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
         bool same_geom = s->shape == p->shape && close3(s->size, p->size);
         if (s->body == 0) {
             if (alive && anchored && !touch && same_geom && close3(s->wpos, p->pos) && close_rot(&s->wrot, &prot)) {
-                s->flags = want; /* just solid or not: stays in the static tree */
-                shape_from_part(s, p);
+                for (i32 k = si; k >= 0; k = ph->shapes[k].next_piece) {
+                    ph->shapes[k].flags = want; /* just solid or not: stays in the static tree */
+                    shape_from_part(&ph->shapes[k], p);
+                }
                 return;
             }
-            s->flags = 0; /* leaves the static tree for good */
-            s->part = -1;
+            for (i32 k = si; k >= 0; k = ph->shapes[k].next_piece) {
+                ph->shapes[k].flags = 0; /* leaves the static tree for good (as one box, if it comes back) */
+                ph->shapes[k].part = -1;
+            }
             ph->part_shape[part] = -1;
             si = -1;
         } else {
@@ -762,6 +829,7 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
     b->woke_step = ph->stats.steps;
     ub_pshape *s = &ph->shapes[shape_slot];
     memset(s, 0, sizeof *s);
+    s->next_piece = -1;
     s->body = bi;
     s->part = part;
     shape_from_part(s, p);
@@ -1335,6 +1403,11 @@ static void write_back(ub_physics *ph, ub_body *b)
     }
 }
 
+void ub_pjoints_solve(ub_physics *ph, f32 h);          /* ub_pjoint.c */
+void ub_pforces_apply(ub_physics *ph, f32 h);
+void ub_pforces_clear(ub_physics *ph);
+void ub_pjoints_keep_awake(ub_physics *ph);
+
 void ub_phys_step(ub_physics *ph)
 {
     const f32 dt = UB_PHYS_DT, h = dt / (f32)SUBSTEPS;
@@ -1365,15 +1438,19 @@ void ub_phys_step(ub_physics *ph)
     narrowphase(ph);
 
     soft sf = make_soft(h);
+    ub_pjoints_keep_awake(ph);
     prepare(ph);
     for (int sub = 0; sub < SUBSTEPS; ++sub) {
         integrate_velocities(ph, h);
+        ub_pforces_apply(ph, h);
         warm_start(ph);
         solve_contacts(ph, &sf, true);
+        ub_pjoints_solve(ph, h);
         integrate_positions(ph, h);
         solve_contacts(ph, &sf, false);
     }
     restitution(ph);
+    ub_pforces_clear(ph);
 
     i32 fallen = 0, kin = 0;
     for (i32 i = 1; i < ph->body_count; ++i) {

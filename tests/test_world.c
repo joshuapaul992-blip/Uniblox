@@ -1,3 +1,4 @@
+#include <stdio.h>
 /* Uniblox - tests for the world model, .ubx files and the .rbxl importer. */
 #include <math.h>
 #include <stdlib.h>
@@ -8,6 +9,8 @@
 #include "render/ub_texture.h"
 #include "world/ub_query.h"
 #include "world/ub_rbxl.h"
+#include "world/ub_rbxmesh.h"
+#include "world/ub_looks.h"
 #include "world/ub_classes.h"
 #include "world/ub_world.h"
 #include "test.h"
@@ -734,6 +737,300 @@ static void check_rbx_props(const char *name)
     free(data);
 }
 
+/* Unions keep their shape (milestone 8C): the convex pieces Roblox saves
+ * for collision become the part's mesh. */
+static void test_rbx_unions(void)
+{
+    static const struct { const char *file; u32 meshes, distinct; } k[] = {
+        { "tests/data/rbx/unions.rbxm", 3, 2 },               /* 2020: PhysicalConfigData, two the same */
+        { "tests/data/rbx/unions-sharedstring.rbxm", 8, 3 },  /* 2023: shared strings */
+    };
+    for (int f = 0; f < 2; ++f) {
+        u32 size = 0;
+        u8 *data = load_file(k[f].file, &size);
+        CHECK(data != NULL);
+        if (!data) continue;
+        ub_world w;
+        ub_world_init(&w);
+        ub_import_stats st;
+        CHECK(ub_rbxl_load(&w, data, size, &st) == UB_LOAD_OK);
+        printf("  %s: %u unions with their shape, %d meshes\n", k[f].file, st.meshes, w.mesh_count);
+        CHECK(st.meshes == k[f].meshes && st.placeholders == 0 && w.mesh_count == (i32)k[f].distinct);
+        /* every vertex inside the part's unit cube, and a renderable mesh */
+        for (i32 m = 0; m < w.mesh_count; ++m) {
+            const ub_wmesh *wm = &w.meshes[m];
+            bool inside = true;
+            for (u32 i = 0; i < wm->nv * 3; ++i) inside &= wm->v[i] >= -0.5001f && wm->v[i] <= 0.5001f;
+            CHECK(inside && wm->npieces >= 1);
+            const ub_mesh *rm = ub_world_render_mesh(&w, (u16)(m + 1));
+            CHECK(rm && rm->face_count > 0 && rm->face_count <= (int)wm->nt);
+        }
+        /* the first file's unions: 5x2x2 and 4x2x2 boxes made of pieces; the
+         * mesh spans the whole cube */
+        if (f == 0) {
+            const ub_wmesh *wm = &w.meshes[0];
+            f32 lo = 1, hi = -1;
+            for (u32 i = 0; i < wm->nv; ++i) {
+                lo = UB_MIN(lo, wm->v[i * 3]);
+                hi = UB_MAX(hi, wm->v[i * 3]);
+            }
+            CHECK(lo < -0.499f && hi > 0.499f);
+        }
+        /* survives .ubx */
+        u8 *a1, *b1;
+        u32 na, nb;
+        CHECK(ub_ubx_save(&w, &a1, &na));
+        ub_world w2;
+        ub_world_init(&w2);
+        CHECK(ub_ubx_load(&w2, a1, na) == UB_LOAD_OK && w2.mesh_count == w.mesh_count);
+        CHECK(ub_ubx_save(&w2, &b1, &nb) && na == nb && memcmp(a1, b1, na) == 0);
+        plat_free(a1);
+        plat_free(b1);
+        ub_world_free(&w2);
+        ub_world_free(&w);
+        free(data);
+    }
+}
+
+/* Roblox .mesh files (milestone 8C), built here byte by byte: a pyramid
+ * (5 points, 6 triangles) in versions 1.00, 2.00 and 4.00. */
+static u32 put32(u8 *b, u32 at, u32 v) { b[at] = (u8)v; b[at + 1] = (u8)(v >> 8); b[at + 2] = (u8)(v >> 16); b[at + 3] = (u8)(v >> 24); return at + 4; }
+static u32 putf(u8 *b, u32 at, f32 f) { u32 u; memcpy(&u, &f, 4); return put32(b, at, u); }
+static const f32 k_pyr[5][3] = { { -1, 0, -1 }, { 1, 0, -1 }, { 1, 0, 1 }, { -1, 0, 1 }, { 0, 3, 0 } };
+static const u32 k_pyr_t[6][3] = { { 0, 1, 2 }, { 0, 2, 3 }, { 0, 4, 1 }, { 1, 4, 2 }, { 2, 4, 3 }, { 3, 4, 0 } };
+
+static u32 make_mesh_file(u8 *b, int version)
+{
+    u32 at = 0;
+    if (version == 1) {
+        char *t = (char *)b;
+        at = (u32)sprintf(t, "version 1.01\n6\n");
+        for (int f = 0; f < 6; ++f)
+            for (int k = 0; k < 3; ++k) {
+                const f32 *v = k_pyr[k_pyr_t[f][k]];
+                at += (u32)sprintf(t + at, "[%g,%g,%g][0,1,0][0,0,0]", (double)v[0], (double)v[1], (double)v[2]);
+            }
+        return at;
+    }
+    const char *head = version == 2 ? "version 2.00\n" : "version 4.00\n";
+    memcpy(b, head, 13);
+    at = 13;
+    if (version == 2) {
+        b[at] = 12; b[at + 1] = 0; b[at + 2] = 36; b[at + 3] = 12;
+        put32(b, at + 4, 5);
+        put32(b, at + 8, 6);
+        at += 12;
+    } else {
+        memset(b + at, 0, 24);
+        b[at] = 24;
+        put32(b, at + 4, 5);
+        put32(b, at + 8, 6);
+        b[at + 12] = 2; /* two levels of detail: the first has every face */
+        at += 24;
+    }
+    for (int i = 0; i < 5; ++i) {
+        u32 s = at;
+        at = putf(b, at, k_pyr[i][0]);
+        at = putf(b, at, k_pyr[i][1]);
+        at = putf(b, at, k_pyr[i][2]);
+        while (at < s + (version == 2 ? 36u : 40u)) b[at++] = 0;
+    }
+    for (int f = 0; f < 6; ++f)
+        for (int k = 0; k < 3; ++k) at = put32(b, at, k_pyr_t[f][k]);
+    if (version == 4) {
+        at = put32(b, at, 0);
+        at = put32(b, at, 6);
+    }
+    return at;
+}
+
+static void test_mesh_files(void)
+{
+    static u8 buf[4096];
+    for (int ver = 1; ver <= 4; ver += (ver == 1 ? 1 : 2)) {
+        u32 n = make_mesh_file(buf, ver);
+        f32 *v;
+        u32 nv, nt, *tri;
+        bool ok = ub_rbxmesh_parse(buf, n, &v, &nv, &tri, &nt);
+        CHECK(ok && nt == 6);
+        if (!ok) continue;
+        f32 top = -1e9f;
+        for (u32 i = 0; i < nv; ++i) top = UB_MAX(top, v[i * 3 + 1]);
+        CHECK(fabsf(top - 3.0f) < 1e-4f);
+        plat_free(v);
+        CHECK(!ub_rbxmesh_parse(buf, n / 2, &v, &nv, &tri, &nt)); /* cut short */
+    }
+    /* looks: a MeshPart with its mesh in content/, and a part with a sphere SpecialMesh */
+    plat_make_dir("content");
+    u32 n = make_mesh_file(buf, 2);
+    CHECK(plat_file_write_all("content/4242.mesh", buf, n));
+    ub_world w;
+    ub_world_init(&w);
+    i32 ws = ub_world_add(&w, -1, UB_CLASS_WORKSPACE, "Workspace", "Workspace");
+    ub_part p;
+    memset(&p, 0, sizeof p);
+    p.rot = mat3_identity();
+    p.size = v3(4, 6, 4);
+    p.flags = UB_PART_ANCHORED | UB_PART_CAN_COLLIDE;
+    i32 mp = ub_world_add_part(&w, ws, UB_CLASS_PART, "MeshPart", "Rock", &p);
+    ub_value id = ub_vstr("rbxassetid://4242", 17);
+    ub_world_set_prop_named(&w, mp, "MeshId", &id);
+    i32 missing = ub_world_add_part(&w, ws, UB_CLASS_PART, "MeshPart", "Gone", &p);
+    ub_value id2 = ub_vstr("rbxassetid://999", 16);
+    ub_world_set_prop_named(&w, missing, "MeshId", &id2);
+    i32 ball = ub_world_add_part(&w, ws, UB_CLASS_PART, "Part", "Egg", &p);
+    i32 sm = ub_world_add(&w, ball, UB_CLASS_OTHER, "SpecialMesh", "Mesh");
+    ub_cdb_fill_defaults(&w, sm, "SpecialMesh");
+    ub_value mt = ub_venum(3); /* Sphere */
+    ub_world_set_prop_named(&w, sm, "MeshType", &mt);
+    CHECK(ub_world_resolve_looks(&w) == 2);
+    const ub_part *rock = &w.parts[w.inst[mp].part];
+    CHECK(rock->look != 0 && w.parts[w.inst[missing].part].look == 0 && w.parts[w.inst[ball].part].look != 0);
+    if (rock->look) { /* fitted to the part: the pyramid's top at the cube's top, its base at the bottom */
+        const ub_wmesh *m = ub_world_mesh(&w, rock->look);
+        f32 lo = 1, hi = -1;
+        for (u32 i = 0; i < m->nv; ++i) {
+            lo = UB_MIN(lo, m->v[i * 3 + 1]);
+            hi = UB_MAX(hi, m->v[i * 3 + 1]);
+        }
+        CHECK(fabsf(lo + 0.5f) < 1e-4f && fabsf(hi - 0.5f) < 1e-4f && (m->flags & UB_WMESH_WOUND));
+        const ub_mesh *rm = ub_world_render_mesh(&w, rock->look);
+        /* wound faces point out: the base's normal down, the sides' up and out */
+        bool out = rm != NULL;
+        for (int f = 0; rm && f < rm->face_count; ++f) {
+            vec3 c = v3(0, 0, 0);
+            for (int k = 0; k < 3; ++k) c = v3_add(c, rm->verts[rm->faces[f].v[k]]);
+            c = v3_scale(c, 1.0f / 3.0f);
+            out &= v3_dot(rm->faces[f].normal, v3_sub(c, v3(0, -0.1f, 0))) > 0;
+        }
+        CHECK(out);
+    }
+    /* .ubx keeps looks */
+    u8 *a1, *b1;
+    u32 na, nb;
+    CHECK(ub_ubx_save(&w, &a1, &na));
+    ub_world w2;
+    ub_world_init(&w2);
+    CHECK(ub_ubx_load(&w2, a1, na) == UB_LOAD_OK && w2.mesh_count == w.mesh_count);
+    CHECK(ub_ubx_save(&w2, &b1, &nb) && na == nb && memcmp(a1, b1, na) == 0);
+    plat_free(a1);
+    plat_free(b1);
+    ub_world_free(&w2);
+    ub_world_free(&w);
+}
+
+/* XML files (8C): each model loaded from XML must give the same world as
+ * its binary twin: instances, names, classes, parts and every property. */
+static void test_rbx_xml(void)
+{
+    static const char *const names[] = { "three-unique-parts", "attributes", "tags", "unions", "three-unique-frames",
+                                         "two-imagebuttons", "three-uigradients", "font", "text-label-with-font",
+                                         "three-vector3values", "funny-numbervalue", "ball-socket-constraint",
+                                         "body-movers", "three-screengui", "imagelabel-content", "cframe-special-cases",
+                                         "weldconstraint" };
+    int files = 0, insts = 0, props = 0, bad = 0;
+    for (size_t f = 0; f < sizeof names / sizeof names[0]; ++f) {
+        char pb[128], px[128];
+        snprintf(pb, sizeof pb, "tests/data/rbx/xml/%s.rbxm", names[f]);
+        snprintf(px, sizeof px, "tests/data/rbx/xml/%s.rbxmx", names[f]);
+        u32 nb = 0, nx = 0;
+        u8 *db = load_file(pb, &nb), *dx = load_file(px, &nx);
+        if (!db || !dx) { free(db); free(dx); continue; }
+        ub_world wb, wx;
+        ub_world_init(&wb);
+        ub_world_init(&wx);
+        ub_import_stats sb, sx;
+        CHECK(ub_rbxl_detect(dx, nx));
+        bool okb = ub_rbxl_load(&wb, db, nb, &sb) == UB_LOAD_OK, okx = ub_rbxl_load(&wx, dx, nx, &sx) == UB_LOAD_OK;
+        CHECK(okb && okx);
+        files++;
+        if (okb && okx) {
+            if (wb.count != wx.count) {
+                printf("    %s: %d instances from binary, %d from XML\n", names[f], wb.count, wx.count);
+                bad++;
+            }
+            for (i32 i = 0; i < wb.count && i < wx.count; ++i) {
+                insts++;
+                const char *why = NULL;
+                if (strcmp(ub_world_str(&wb, wb.inst[i].name), ub_world_str(&wx, wx.inst[i].name))) why = "name";
+                else if (strcmp(ub_world_str(&wb, wb.inst[i].class_name), ub_world_str(&wx, wx.inst[i].class_name))) why = "class";
+                else if ((wb.inst[i].part >= 0) != (wx.inst[i].part >= 0)) why = "part";
+                else if (wb.inst[i].part >= 0) {
+                    const ub_part *a = &wb.parts[wb.inst[i].part], *b = &wx.parts[wx.inst[i].part];
+                    if (v3_length(v3_sub(a->pos, b->pos)) > 1e-3f || v3_length(v3_sub(a->size, b->size)) > 1e-3f ||
+                        a->color != b->color || a->shape != b->shape || a->material != b->material || a->flags != b->flags ||
+                        (a->mesh != 0) != (b->mesh != 0))
+                        why = "part fields";
+                }
+                for (int k = 0; !why && k < ub_world_prop_count(&wb, i); ++k) {
+                    const ub_prop *pp = ub_world_prop_at(&wb, i, k);
+                    const char *kn = ub_world_key_name(&wb, pp->key);
+                    const ub_value *o = ub_world_prop_named(&wx, i, kn);
+                    props++;
+                    if (!o || !ub_value_equal(&pp->val, o)) {
+                        bool close = o && o->type == pp->val.type && o->type == UB_PV_DOUBLE &&
+                                     (fabs(o->v.d - pp->val.v.d) < 1e-6 || (o->v.d != o->v.d && pp->val.v.d != pp->val.v.d));
+                        if (!close) {
+                            static char m[128];
+                            snprintf(m, sizeof m, "property %s", kn);
+                            why = m;
+                        }
+                    }
+                }
+                if (why) {
+                    if (bad < 8)
+                        printf("    %s: %s differs at %s\n", names[f], why, ub_world_str(&wb, wb.inst[i].name));
+                    bad++;
+                }
+            }
+        }
+        ub_world_free(&wb);
+        ub_world_free(&wx);
+        free(db);
+        free(dx);
+    }
+    printf("  XML files: %d, %d instances and %d properties the same as the binary files'\n", files, insts, props);
+    CHECK(files >= 15 && bad == 0);
+}
+
+/* A big place (8C): 20,000 parts in 2,000 models, as XML, loaded and
+ * timed (the XML path is the slower one: it is converted first). */
+static void test_big_place(void)
+{
+    const int models = 2000, per = 10;
+    size_t cap = (size_t)models * per * 900 + 4096, n = 0;
+    char *x = (char *)malloc(cap);
+    if (!x) return;
+    n += (size_t)sprintf(x + n, "<roblox version=\"4\">\n<Item class=\"Workspace\" referent=\"W\"><Properties><string name=\"Name\">Workspace</string></Properties>\n");
+    int ref = 0;
+    for (int m = 0; m < models; ++m) {
+        n += (size_t)sprintf(x + n, "<Item class=\"Model\" referent=\"M%d\"><Properties><string name=\"Name\">House%d</string></Properties>\n", m, m);
+        for (int k = 0; k < per; ++k, ++ref)
+            n += (size_t)sprintf(x + n,
+                                 "<Item class=\"Part\" referent=\"P%d\"><Properties><string name=\"Name\">Wall</string>"
+                                 "<bool name=\"Anchored\">true</bool><bool name=\"CanCollide\">true</bool>"
+                                 "<CoordinateFrame name=\"CFrame\"><X>%d</X><Y>%d</Y><Z>%d</Z><R00>1</R00><R01>0</R01><R02>0</R02>"
+                                 "<R10>0</R10><R11>1</R11><R12>0</R12><R20>0</R20><R21>0</R21><R22>1</R22></CoordinateFrame>"
+                                 "<Vector3 name=\"size\"><X>4</X><Y>8</Y><Z>1</Z></Vector3>"
+                                 "<Color3uint8 name=\"Color3uint8\">4288914085</Color3uint8><token name=\"Material\">256</token>"
+                                 "<float name=\"Transparency\">0</float></Properties></Item>\n",
+                                 ref, (m % 50) * 20 + k * 2, 4, (m / 50) * 20);
+        n += (size_t)sprintf(x + n, "</Item>\n");
+    }
+    n += (size_t)sprintf(x + n, "</Item>\n</roblox>\n");
+    ub_world w;
+    ub_world_init(&w);
+    ub_import_stats st;
+    u64 t0 = plat_time_us();
+    ub_load_result r = ub_rbxl_load(&w, (const u8 *)x, (u32)n, &st);
+    u64 t1 = plat_time_us();
+    printf("  big XML place: %u KB, %d instances, %d parts, loaded in %u ms\n", (u32)(n / 1024), w.count, w.part_count,
+           (u32)((t1 - t0) / 1000));
+    CHECK(r == UB_LOAD_OK && w.part_count == models * per && st.parts == (u32)(models * per));
+    ub_world_free(&w);
+    free(x);
+}
+
 static void test_rbx_attributes(void);
 static void test_rbx_gui(void)
 {
@@ -745,6 +1042,10 @@ static void test_rbx_gui(void)
     };
     for (int i = 0; i < (int)(sizeof models / sizeof models[0]); ++i) check_rbx_props(models[i]);
     test_rbx_attributes();
+    test_rbx_unions();
+    test_mesh_files();
+    test_rbx_xml();
+    test_big_place();
 }
 
 static i32 load_model_first(ub_world *w, const char *path, const char *cls)

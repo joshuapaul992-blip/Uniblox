@@ -83,7 +83,8 @@ uncached. At 2560×1421 a whole frame took about 150 ms to send, against
 
 A place is a saved world: a tree of objects (models, folders, parts) plus
 lighting. Uniblox has its own format, `.ubx`, and can also open Roblox
-Studio places (`.rbxl`) and models (`.rbxm`) saved in the binary format.
+Studio places and models, binary (`.rbxl`, `.rbxm`) or XML (`.rbxlx`,
+`.rbxmx`).
 Saving the same world twice gives byte-identical files.
 
 Open a place by naming it on the command line, or by dragging it onto
@@ -110,6 +111,23 @@ converts a Roblox file into a `.ubx`.
   contents go into the Workspace, so they show up like a place.
 - Joints (`Weld`, `ManualWeld`, `Snap`, `Glue`, `Motor`, `Motor6D`,
   `WeldConstraint`) become welds. Motors are held still for now.
+- **Unions and MeshParts keep their shape.** Roblox stores their shapes
+  online, but every place file also holds the convex pieces it uses for
+  collision; Uniblox draws those and collides with them, so you can walk
+  through a union's doorway. A MeshPart whose `.mesh` file you put in
+  `content\` (see below) is drawn with it instead. `SpecialMesh`,
+  `BlockMesh` and `CylinderMesh` change how their part looks (spheres,
+  cylinders, wedges, mesh files, with `Scale` and `Offset`).
+- Constraints: `HingeConstraint` (with its motor, servo and limits),
+  `BallSocketConstraint`, `PrismaticConstraint`, `CylindricalConstraint`,
+  `RopeConstraint`, `RodConstraint` and `SpringConstraint` join their
+  attachments' parts, and the body movers push (`BodyVelocity`,
+  `BodyPosition`, `BodyGyro`, `BodyForce`, `BodyThrust`,
+  `BodyAngularVelocity`, `VectorForce`, `Torque`, `LinearVelocity`,
+  `AngularVelocity`, `AlignPosition`, `AlignOrientation`).
+- Attributes and CollectionService tags, Teams and team spawn locations,
+  tools in StarterPack, Sounds (played from `content\`), an Atmosphere's
+  colours.
 - `Workspace.Gravity` and `FallenPartsDestroyHeight`.
 - Lighting: `ClockTime`/`TimeOfDay`, `GeographicLatitude`, `Brightness`,
   `Ambient`, `OutdoorAmbient`, `FogEnd` and `FogColor`. The sun's position
@@ -125,16 +143,13 @@ converts a Roblox file into a `.ubx`.
 
 **What it doesn't read yet:**
 
-- Mesh parts and unions become plain grey boxes of the same size, because
-  their shapes are stored online, not in the file. Uniblox never downloads
-  anything.
-- Terrain is counted but skipped.
-- Hinges, springs, ropes and other constraints are ignored, so parts that
-  rely on them fall loose.
-- Textures and decals on parts are ignored.
-- Partly see-through parts are drawn solid.
-- The old XML format (`.rbxlx`) isn't supported. Studio can save the
-  binary format.
+- Terrain is counted but skipped: its voxel format is not documented.
+- Textures and decals on parts, and a MeshPart's texture, are ignored.
+- A MeshPart with neither its collision pieces in the file nor its mesh
+  file in `content\` (a "Box" collision fidelity) is a grey box of its
+  size. Uniblox never downloads anything.
+- Animations (they are assets online); the character walks with its own
+  swing.
 
 The importer is for places you made or have the right to use. Files are
 read only from disk.
@@ -251,9 +266,21 @@ end)
   and `string.rep` have work limits. Scripts may make up to 100,000
   instances; destroyed and forgotten ones are reused, so games that keep
   making and destroying parts don't grow.
-- **Your character** is a Model named `Player1` in the Workspace, with a
-  `HumanoidRootPart` and a `Humanoid`. When its health reaches 0 it falls
-  over and comes back at the spawn point 3 seconds later.
+- **Your character** is a Model named `Player1` in the Workspace, built
+  like Roblox's: an R15 rig (`Head`, `UpperTorso`, `LowerTorso`, the arms
+  and legs in three parts each), or R6 when the place asks for it, joined
+  by `Motor6D`s with Roblox's names and the attachments hats and tools look
+  for, plus a `HumanoidRootPart` and a `Humanoid`. Scripts can change the
+  joints' `C0`, `C1` and `Transform`. When its health reaches 0 it falls
+  over and comes back 3 seconds later, at its team's spawn if it has one.
+- **Joints and tools:** a `Weld`, `Motor6D` or `WeldConstraint` a script
+  makes carries the loose part with the other, so hats and held things
+  stay on. StarterPack's tools fill the Backpack at every spawn and show
+  in a hotbar; `Equipped`, `Activated`, `Deactivated`, `Unequipped`,
+  `Humanoid:EquipTool` and the `RightGrip` weld work as in Roblox.
+- **Teams:** players are put in an auto-assignable team, `Player.Team`,
+  `TeamColor` and `Neutral` work, and team spawn locations (and ones that
+  change your team when you step on them) are used.
 
 The demo place's door, spinning block (click it to turn it the other way),
 glowing lava strip, green button (which rains balls) and lamp (press E
@@ -473,7 +500,17 @@ fallback.
   `api2022.lua` the classes, new types and overlap queries, while the test
   clicks a ClickDetector, taps one ProximityPrompt's key, holds another's
   and jumps (StateChanged, Jumping, FreeFalling). Attributes and tags are
-  also read from rbx-test-files models and must survive `.ubx`. Then 28 hostile scripts run one after another, including
+  also read from rbx-test-files models and must survive `.ubx`.
+  For milestone 8C: rbx-test-files' unions must keep their shape (and
+  share identical ones); `.mesh` files of versions 1, 2 and 4 are built
+  byte by byte and read; 17 XML models must give the same world as their
+  binary twins; a 20,000-part XML place is loaded and timed. In whole
+  games, the character walks through a mesh arch's doorway and a ball rests
+  on its pillar; `character.lua` checks the R15 rig and its joints, welds
+  and WeldConstraints from scripts, a tool taken out with 1, used with a
+  click and put away, and teams with their spawns (also after dying);
+  `constraints.lua` checks a servo hinge door, a rope, a prismatic motor,
+  BodyVelocity, BodyPosition, VectorForce, AlignOrientation and a sound. Then 28 hostile scripts run one after another, including
   busy loops (also inside `pcall`, coroutines and events), memory, table,
   pattern and `string.rep` bombs, sandbox escapes, and destroying the
   services and the character. Each must be stopped or fail within 3
@@ -553,7 +590,7 @@ fallback.
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
 | `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, camera, `scripts` and `place` |
 | `places/` | Places saved with F7 in the game or from the editor (`autosave.ubx`: the editor's unsaved changes when it was closed) |
-| `content/` | Optional. Your own pictures for places' GUIs: `content\<asset id>.png` (or `.bmp`) for `rbxassetid://<asset id>`, and paths under it for `rbxasset://` addresses |
+| `content/` | Optional. Your own files for places' assets, named by asset id: pictures for GUIs (`content\<asset id>.png` or `.bmp`), meshes for MeshParts and SpecialMeshes (`content\<asset id>.mesh`, Roblox's `.mesh` versions 1 to 5) and sounds (`content\<asset id>.wav`), each for `rbxassetid://<asset id>`; paths under it for `rbxasset://` addresses |
 | `ubedit.log`, `ubedit.cfg` | The editor's log and settings (`renderer`, `quality`, `gl_shaders`, `fps_cap`, window size, `sw_height`, grid size) |
 | `sounds/jump.wav`, `sounds/land.wav`, `sounds/click.wav` | Optional. Replace the built-in sounds; any PCM 8/16-bit mono/stereo WAV works |
 
@@ -569,7 +606,9 @@ can't write the log or settings.
 | Hold right mouse button | Orbit the camera (left/right and up/down) |
 | Mouse wheel | Zoom (NT 4.0 and later, or NT 3.51 with a wheel driver) |
 | Space | Jump (hold to keep jumping) |
-| Left click | Beep, panned left/right and pitched by where you click |
+| Left click | Use the tool you hold, click a ClickDetector (and beep, panned and pitched by where you click) |
+| 1 to 9 | Take out the tool in that slot of the hotbar (again to put it away) |
+| E (or the prompt's key) | Use the ProximityPrompt shown near you; hold it for prompts that need holding |
 | Enter or `/` | Type a message (Enter sends, Esc cancels); scripts hear it as `Player.Chatted` |
 | F11 or Alt+Enter | Fullscreen on/off |
 | F5 | 10-second benchmark with the frame cap off; the result goes on screen and into `uniblox.log` |

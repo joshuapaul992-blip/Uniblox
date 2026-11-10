@@ -298,7 +298,9 @@ static void list_cb(void *user, const char *name, bool is_dir, u32 size)
     const char *dir = (const char *)user;
     (void)size;
     if (is_dir || g_nfiles >= MAX_FILES) return;
-    if (!ends_with(name, ".ubx") && !ends_with(name, ".rbxl") && !ends_with(name, ".rbxm")) return;
+    if (!ends_with(name, ".ubx") && !ends_with(name, ".rbxl") && !ends_with(name, ".rbxm") && !ends_with(name, ".rbxlx") &&
+        !ends_with(name, ".rbxmx"))
+        return;
     ub_fmt(g_files[g_nfiles++], sizeof g_files[0], "%s%s%s", dir, dir[0] ? "/" : "", name);
 }
 
@@ -422,7 +424,7 @@ static void rebuild_statics(void)
         const ub_instance *in = &w->inst[i];
         if (in->part < 0 || !ub_world_alive(w, i) || (live && live[i])) continue;
         if (w->parts[in->part].transparency >= 250 || !ub_world_is_descendant(w, i, ws)) continue;
-        g_statics[g_static_count++] = play_part_draw(&w->parts[in->part]);
+        g_statics[g_static_count++] = play_part_draw(w, &w->parts[in->part]);
     }
     ub_render_set_static(g_statics, g_static_count);
     g_static_scene = E.scene_version;
@@ -432,6 +434,7 @@ static void rebuild_statics(void)
 static void draw_box(vec3 pos, const mat3 *rot, vec3 size, u32 color)
 {
     ub_part_draw d;
+    memset(&d, 0, sizeof d);
     d.pos = pos;
     d.rot = *rot;
     d.size = size;
@@ -1393,7 +1396,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         if (i >= E.world.count || !ub_world_alive(&E.world, i) || E.world.inst[i].part < 0) continue;
         const ub_part *p = &E.world.parts[E.world.inst[i].part];
         if (p->transparency < 250) {
-            ub_part_draw d = play_part_draw(p);
+            ub_part_draw d = play_part_draw(&E.world, p);
             ub_render_part(&d);
         }
         if (k < MAX_OUTLINED) outline(p, 0x3DA5FF);

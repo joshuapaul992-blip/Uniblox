@@ -193,12 +193,13 @@ static bool load_place(const char *path, bool user_path)
     g_imported = roblox;
     u32 ms = (u32)((plat_time_us() - t0) / 1000u);
     if (roblox) {
-        ub_info("imported Roblox place \"%s\" in %u ms: %u instances, %u classes, %u parts, %u mesh/union "
-                "placeholders, %u invisible, %u terrain (not imported), %u scripts, compression %s",
-                path, ms, g_import.instances, g_import.classes, g_import.parts, g_import.placeholders,
-                g_import.invisible, g_import.terrain, g_import.scripts, g_import.compression);
-        ub_fmt(g_status, sizeof g_status, "Imported %s: %u parts, %u mesh boxes%s", w.name, g_import.parts,
-               g_import.placeholders, g_import.terrain ? ", terrain skipped" : "");
+        ub_info("imported Roblox place \"%s\" in %u ms: %u instances, %u classes, %u parts, %u unions/meshes "
+                "with their shape, %u with a mesh file or SpecialMesh look, %u mesh/union placeholders, %u invisible, "
+                "%u terrain (not imported), %u scripts, compression %s",
+                path, ms, g_import.instances, g_import.classes, g_import.parts, g_import.meshes, g_import.looks,
+                g_import.placeholders, g_import.invisible, g_import.terrain, g_import.scripts, g_import.compression);
+        ub_fmt(g_status, sizeof g_status, "Imported %s: %u parts, %u shaped meshes, %u mesh boxes%s", w.name,
+               g_import.parts, g_import.meshes, g_import.placeholders, g_import.terrain ? ", terrain skipped" : "");
     } else {
         ub_info("loaded place \"%s\" in %u ms", path, ms);
         ub_fmt(g_status, sizeof g_status, "Loaded %s", w.name);

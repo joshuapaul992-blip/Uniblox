@@ -207,6 +207,7 @@ static void set_extra(lua_State *L, i32 idx, const char *key, int vi)
 /* ------------------------------------------------------------ helpers */
 
 void get_extra_value(lua_State *L, i32 idx, const char *key) { get_extra(L, idx, key); }
+void set_extra_value(lua_State *L, i32 idx, const char *key, int v) { set_extra(L, idx, key, v); }
 
 void prop_changed(lua_State *L, i32 idx, const char *prop)
 {
@@ -448,6 +449,9 @@ static bool get_class_prop(lua_State *L, i32 idx, const char *k)
             i32 gp = g->phys_ok ? g->chr.ground_part : -1;
             push_enum(L, EN_MATERIAL, gp >= 0 ? material_from_ub(W->parts[gp].material) : 1792);
         } else if (streq(k, "Sit") || streq(k, "PlatformStand")) lua_pushboolean(L, 0);
+        else if (streq(k, "RigType")) push_enum(L, enum_type_named("HumanoidRigType"), g->r15 ? 1 : 0);
+        else if (streq(k, "UseJumpPower")) lua_pushboolean(L, 0);
+        else if (streq(k, "HipHeight")) lua_pushnumber(L, g->r15 ? 2.0 : 0.0);
         else return false;
         return true;
     }
@@ -795,6 +799,10 @@ static void do_destroy(lua_State *L, i32 i)
         return;
     }
     tags_moved(L, i, sapi_in_game(i), false);
+    for (i32 jj = 0; jj < n; ++jj) { /* joints in it let go; parts in it stop being carried */
+        ub_game_uncarry(S.g, sub[jj], sub[jj]);
+        ub_game_uncarry(S.g, sub[jj], -1);
+    }
     if (!ub_world_alive(W, i)) { /* a handler destroyed it already */
         plat_free(sub);
         return;
@@ -1737,6 +1745,10 @@ static int inst_index(lua_State *L)
     }
     if (streq(k, "Archivable")) { lua_pushboolean(L, 1); return 1; }
     if (is_part(idx) && get_part_prop(L, idx, k)) return 1;
+    if (joint_get(L, idx, k)) return 1;
+    if (attach_get(L, idx, k)) return 1;
+    if (teams_get(L, idx, k)) return 1;
+    if (sound_get(L, idx, k)) return 1;
     if (get_class_prop(L, idx, k)) return 1;
     if (gui_get(L, idx, k)) return 1;
     lua_CFunction m = find_method(k_inst_methods, k);
@@ -1990,6 +2002,7 @@ static int set_parent(lua_State *L, i32 idx, int v)
         start_scripts_in(idx);
     }
     tags_moved(L, idx, was_in, sapi_in_game(idx));
+    joints_moved(L, idx);
     fire_signal(L, idx, EV_ANCESTRYCHANGED, NULL, 0);
     return 0;
 }
@@ -2008,8 +2021,13 @@ int set_prop(lua_State *L, i32 idx, const char *k, int v)
     } else if (streq(k, "ClassName")) {
         return sapi_error(L, "ClassName cannot be assigned to");
     } else if (is_part(idx) && set_part_prop(L, idx, k, v)) {
+    } else if (joint_set(L, idx, k, v)) {
+    } else if (attach_set(L, idx, k, v)) {
+    } else if (teams_set(L, idx, k, v)) {
+    } else if (sound_set(L, idx, k, v)) {
     } else if (set_class_prop(L, idx, k, v)) {
     } else if (gui_set(L, idx, k, v)) {
+        if (ub_constraint_class(cls_of(idx))) S.g->constraints_dirty = true;
     } else {
         set_extra(L, idx, k, v); /* kept, so scripts for things Uniblox lacks still run */
     }

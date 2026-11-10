@@ -107,6 +107,12 @@ static void make_value(const cdb_default *d, ub_value *v, f32 *seq)
         v->v.seq.k = seq;
         v->v.seq.n = 2;
         break;
+    case UB_PV_CFRAME: /* defaults: a position, no rotation */
+        for (int k = 0; k < 12; ++k) seq[k] = 0;
+        seq[0] = d->n[0]; seq[1] = d->n[1]; seq[2] = d->n[2];
+        seq[3] = seq[7] = seq[11] = 1;
+        v->v.cf.m = seq;
+        break;
     case UB_PV_FONT:
         v->v.font.family = (char *)(d->s ? d->s : "");
         v->v.font.weight = (u16)d->n[0];
@@ -126,7 +132,7 @@ bool ub_cdb_fill_defaults(ub_world *w, i32 inst, const char *cls)
         u32 key = ub_world_key(w, k_cdb_props[d->prop].name);
         if (key == UB_NO_STRING) return false;
         if (ub_world_prop(w, inst, key)) continue;
-        f32 seq[8];
+        f32 seq[12];
         ub_value v;
         make_value(d, &v, seq);
         if (v.type != UB_PV_NONE && !ub_world_set_prop(w, inst, key, &v)) return false;
@@ -136,7 +142,7 @@ bool ub_cdb_fill_defaults(ub_world *w, i32 inst, const char *cls)
 
 bool ub_cdb_default(int cls, const char *prop, ub_value *out)
 {
-    static f32 seq[8]; /* sequences: valid until the next call */
+    static f32 seq[12]; /* sequences, CFrames: valid until the next call */
     if (cls < 0 || cls >= COUNT(k_cdb_classes)) return false;
     const cdb_class *k = &k_cdb_classes[cls];
     for (int i = 0; i < k->default_count; ++i) {

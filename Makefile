@@ -25,7 +25,7 @@ EXE     := $(OUT)/uniblox.exe
 LUA_SRCS := $(addprefix src/script/lua/,lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c \
 	lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c \
 	lauxlib.c lbaselib.c lstrlib.c ltablib.c lmathlib.c)
-SCRIPT_SRCS := src/script/ub_libc.c src/script/ub_script.c src/script/ub_sapi_types.c src/script/ub_sapi_inst.c src/script/ub_sapi_gui.c src/script/ub_luaulib.c src/script/ub_sapi_attr.c src/script/ub_sapi_types2.c src/script/ub_sapi_interact.c \
+SCRIPT_SRCS := src/script/ub_libc.c src/script/ub_script.c src/script/ub_sapi_types.c src/script/ub_sapi_inst.c src/script/ub_sapi_gui.c src/script/ub_luaulib.c src/script/ub_sapi_attr.c src/script/ub_sapi_types2.c src/script/ub_sapi_interact.c src/script/ub_sapi_joint.c src/script/ub_sapi_sound.c \
 	$(LUA_SRCS)
 
 # Lua is third-party code: build it against our libc headers, without the
@@ -48,13 +48,13 @@ CORE_SRCS := \
 	src/world/ub_world.c \
 	src/world/ub_props.c \
 	src/world/ub_classes.c \
-	src/world/ub_rbxl.c \
+	src/world/ub_rbxl.c src/world/ub_rbxmesh.c src/world/ub_looks.c src/world/ub_rbxlx.c \
 	src/world/ub_query.c \
 	src/physics/ub_hull.c \
 	src/physics/ub_collide.c \
-	src/physics/ub_physics.c \
+	src/physics/ub_physics.c src/physics/ub_pjoint.c \
 	src/physics/ub_character.c \
-	src/game/ub_game.c \
+	src/game/ub_game.c src/game/ub_rig.c src/game/ub_constraints.c \
 	src/game/ub_demo_place.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \

@@ -1,4 +1,5 @@
 #include "core/ub_path.h"
+#include "core/ub_string.h"
 
 static bool path_char_ok(char c)
 {
@@ -54,3 +55,49 @@ bool ub_path_is_safe(const char *path)
         }
     }
 }
+
+/* ------------------------------------------------- content addresses */
+
+static bool starts_ci(const char *s, const char *p)
+{
+    while (*p) {
+        if ((*s | 32) != (*p | 32)) return false;
+        ++s;
+        ++p;
+    }
+    return true;
+}
+
+bool ub_content_path(const char *content, char *path, int cap, const char *ext)
+{
+    path[0] = 0;
+    const char *s = content;
+    while (*s == ' ') ++s;
+    /* an asset id: rbxassetid://N, ...roblox.com/asset/?id=N, or just N */
+    const char *id = NULL;
+    if (starts_ci(s, "rbxassetid://")) id = s + 13;
+    else if (starts_ci(s, "http://") || starts_ci(s, "https://")) {
+        const char *q = s;
+        while (*q && !(starts_ci(q, "id=") && (q[-1] == '?' || q[-1] == '&'))) ++q;
+        if (*q) id = q + 3;
+    } else if (*s >= '0' && *s <= '9') id = s;
+    if (id) {
+        char num[24];
+        int n = 0;
+        while (id[n] >= '0' && id[n] <= '9' && n < 20) {
+            num[n] = id[n];
+            ++n;
+        }
+        num[n] = 0;
+        if (!n) return false;
+        ub_fmt(path, cap, "content/%s.%s", num, ext);
+        return true;
+    }
+    if (starts_ci(s, "rbxasset://")) {
+        ub_fmt(path, cap, "content/%s", s + 11);
+        for (char *c = path; *c; ++c) if (*c == '\\') *c = '/';
+        return ub_path_is_safe(path);
+    }
+    return false;
+}
+

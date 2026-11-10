@@ -3,6 +3,7 @@
 #include "gui/ub_gui.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
+#include "core/ub_string.h"
 #include "render/ub_mesh.h"
 #include "render/ub_texture.h"
 #include "crt/ub_crt.h"
@@ -11,9 +12,12 @@
 #define LOOK_SENSITIVITY 0.006f
 
 /* A part as the renderer wants it. */
-ub_part_draw play_part_draw(const ub_part *p)
+ub_part_draw play_part_draw(const ub_world *w, const ub_part *p)
 {
     ub_part_draw d;
+    memset(&d, 0, sizeof d);
+    u16 id = p->look ? p->look : p->mesh;
+    d.mesh = id ? ub_world_render_mesh(w, id) : NULL;
     d.pos = p->pos;
     d.rot = p->rot;
     d.size = p->size;
@@ -48,6 +52,32 @@ ub_render_env play_env(const ub_world *w)
         e.sky_horizon = day > 0.3f ? 0xE0905A : 0x1C2A48;
     }
     e.fog_density = l->fog_end > 1.0f && l->fog_end < 20000.0f ? 3.0f / l->fog_end : 0.0012f;
+    /* an Atmosphere in Lighting (8C): its Color tints the horizon, Decay the
+     * sky above, Density the haze */
+    for (i32 i = 0; i < w->count; ++i) {
+        if (w->inst[i].parent < 0 || !ub_world_alive(w, i)) continue;
+        if (ub_strcmp(ub_world_str(w, w->inst[i].class_name), "Atmosphere") != 0) continue;
+        i32 par = w->inst[i].parent;
+        if (w->inst[par].cls != UB_CLASS_LIGHTING) continue;
+        const ub_value *c = ub_world_prop_named(w, i, "Color"), *dc = ub_world_prop_named(w, i, "Decay");
+        const ub_value *dn = ub_world_prop_named(w, i, "Density");
+        if (c && c->type == UB_PV_COLOR3 && day > 0.3f)
+            e.sky_horizon = ((u32)(ub_clampf(c->v.c3.r, 0, 1) * 255) << 16) | ((u32)(ub_clampf(c->v.c3.g, 0, 1) * 255) << 8) |
+                            (u32)(ub_clampf(c->v.c3.b, 0, 1) * 255);
+        if (dc && dc->type == UB_PV_COLOR3 && day > 0.3f) {
+            u32 t = e.sky_top;
+            f32 k = 0.35f;
+            u32 r2 = (u32)((f32)((t >> 16) & 255) * (1 - k) + ub_clampf(dc->v.c3.r, 0, 1) * 255 * k);
+            u32 g2 = (u32)((f32)((t >> 8) & 255) * (1 - k) + ub_clampf(dc->v.c3.g, 0, 1) * 255 * k);
+            u32 b2 = (u32)((f32)(t & 255) * (1 - k) + ub_clampf(dc->v.c3.b, 0, 1) * 255 * k);
+            e.sky_top = (r2 << 16) | (g2 << 8) | b2;
+        }
+        if (dn && dn->type == UB_PV_FLOAT && dn->v.f > 0) {
+            f32 dens = ub_clampf(dn->v.f, 0, 1) * 0.02f;
+            if (dens > e.fog_density) e.fog_density = dens;
+        }
+        break;
+    }
     return e;
 }
 
@@ -63,6 +93,7 @@ static void draw_limb(vec3 base, const mat3 *body, vec3 pivot, vec3 size, f32 sw
     rot.z = mat3_apply(body, r.z);
     vec3 hang = mat3_apply(&rot, v3(0, -size.y * 0.5f, 0));
     ub_part_draw p;
+    memset(&p, 0, sizeof p);
     p.pos = v3_add(v3_add(base, mat3_apply(body, pivot)), hang);
     p.rot = rot;
     p.size = size;
@@ -83,6 +114,7 @@ void play_draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amount,
     draw_limb(base, &body, v3(-0.5f, 2.0f, 0), v3(0.9f, 2.0f, 1.0f), swing, pants, UB_MAT_PLASTIC);
     draw_limb(base, &body, v3(0.5f, 2.0f, 0), v3(0.9f, 2.0f, 1.0f), -swing, pants, UB_MAT_PLASTIC);
     ub_part_draw torso;
+    memset(&torso, 0, sizeof torso);
     torso.pos = v3_add(base, mat3_apply(&body, v3(0, 3.0f, 0)));
     torso.rot = body;
     torso.size = v3(2.0f, 2.0f, 1.0f);
@@ -128,7 +160,7 @@ static void rebuild_statics(ub_play_view *v, ub_game *g)
     }
     v->static_count = 0;
     for (i32 i = 0; i < w->part_count && v->statics; ++i)
-        if (ub_game_part_visible(g, i) && !ub_game_part_live(g, i)) v->statics[v->static_count++] = play_part_draw(&w->parts[i]);
+        if (ub_game_part_visible(g, i) && !ub_game_part_live(g, i)) v->statics[v->static_count++] = play_part_draw(w, &w->parts[i]);
     ub_render_set_static(v->statics, v->static_count);
     g->statics_dirty = false;
 }
@@ -192,6 +224,12 @@ void play_view_update(ub_play_view *v, ub_game *g, f32 dt)
     bool walking = v->moving && hspeed > 2.0f && !g->dead;
     v->walk_amount = ub_clampf(v->walk_amount + (walking ? dt : -dt) * 6.0f, 0.0f, 1.0f);
     if (walking) v->walk_phase = ub_wrap_angle(v->walk_phase + dt * 10.0f * hspeed / UB_CHAR_WALK_SPEED);
+    /* the game poses the character's rig with these */
+    g->pose_from_app = true;
+    g->pose_facing = v->facing;
+    g->pose_phase = v->walk_phase;
+    g->pose_amount = v->walk_amount;
+    g->pose_fallen = v->death_t;
 }
 
 ub_camera play_view_camera(const ub_play_view *v, const ub_game *g)
@@ -217,14 +255,33 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
     for (i32 i = 0; i < g->live_count; ++i) {
         i32 pi = g->live[i];
         if (!ub_game_part_visible(g, pi)) continue;
-        ub_part_draw d = play_part_draw(&g->world.parts[pi]);
+        ub_part_draw d = play_part_draw(&g->world, &g->world.parts[pi]);
         ub_game_part_pose(g, pi, &d.pos, &d.rot);
         ub_render_part(&d);
     }
-    if (character) {
-        play_draw_character(g->feet.x, g->feet.y, g->feet.z, v->facing, v->walk_phase, v->walk_amount, v->death_t);
-        play_draw_blob_shadow(g);
+    /* visible ropes, rods and springs: thin cylinders between their ends */
+    vec3 la[64], lb[64];
+    u32 lc[64];
+    int nl = ub_constraints_lines(g, la, lb, lc, 64);
+    for (int i = 0; i < nl; ++i) {
+        vec3 d = v3_sub(lb[i], la[i]);
+        f32 len = v3_length(d);
+        if (len < 0.01f) continue;
+        vec3 y = v3_scale(d, 1.0f / len);
+        vec3 x = v3_normalize(v3_cross(ub_absf(y.y) < 0.9f ? v3(0, 1, 0) : v3(1, 0, 0), y));
+        ub_part_draw r;
+        memset(&r, 0, sizeof r);
+        r.pos = v3_add(la[i], v3_scale(d, 0.5f));
+        r.rot.x = x;
+        r.rot.y = y;
+        r.rot.z = v3_cross(x, y);
+        r.size = v3(0.15f, len, 0.15f);
+        r.color = lc[i];
+        r.shape = UB_SHAPE_CYLINDER;
+        r.material = UB_MAT_PLASTIC;
+        ub_render_part(&r);
     }
+    if (character) play_draw_blob_shadow(g); /* (the character itself is its rig's parts, drawn above) */
 }
 
 /* A soft round shadow on the ground under the character, for when the
@@ -241,6 +298,7 @@ void play_draw_blob_shadow(ub_game *g)
     if (height < 0) height = 0;
     f32 k = 1.0f - height / 40.0f; /* 1 on the ground, 0 at 40 studs */
     ub_part_draw d;
+    memset(&d, 0, sizeof d);
     d.pos = v3_add(h.point, v3(0, 0.04f, 0));
     d.rot = mat3_identity();
     d.size = v3(3.2f * (0.4f + 0.6f * k), 0.05f, 3.2f * (0.4f + 0.6f * k));

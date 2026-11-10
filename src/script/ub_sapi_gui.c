@@ -1034,6 +1034,15 @@ void push_pvalue(lua_State *L, const ub_value *v, int enum_type)
     case UB_PV_COLORSEQ: push_cseq(L, v->v.seq.k, v->v.seq.n); break;
     case UB_PV_REF: push_inst(L, ub_world_alive(W, v->v.ref) ? v->v.ref : -1); break;
     case UB_PV_FONT: push_font(L, v->v.font.family, v->v.font.weight, v->v.font.style); break;
+    case UB_PV_CFRAME: {
+        const f32 *m = v->v.cf.m;
+        mat3 r;
+        r.x = v3(m[3], m[6], m[9]); /* columns from the rows */
+        r.y = v3(m[4], m[7], m[10]);
+        r.z = v3(m[5], m[8], m[11]);
+        push_cf(L, v3(m[0], m[1], m[2]), &r);
+        break;
+    }
     case UB_PV_BRICKCOLOR: push_brickcolor(L, brickcolor_number_rgb(v->v.e)); break;
     default: lua_pushnil(L); break;
     }
@@ -1043,7 +1052,7 @@ static const char *ptype_name(u8 t)
 {
     static const char *const n[UB_PV_COUNT] = { "nil", "bool", "int", "float", "double", "string", "EnumItem",
                                                 "Color3", "Vector2", "Vector3", "UDim", "UDim2", "Rect", "NumberRange",
-                                                "NumberSequence", "ColorSequence", "Object", "Font", "BrickColor" };
+                                                "NumberSequence", "ColorSequence", "Object", "Font", "BrickColor", "CFrame" };
     return t < UB_PV_COUNT ? n[t] : "?";
 }
 
@@ -1185,6 +1194,15 @@ bool to_pvalue(lua_State *L, int i, u8 type, int enum_type, ub_value *out, f32 *
         out->v.font.family = f->family;
         out->v.font.weight = f->weight;
         out->v.font.style = f->style;
+        return true;
+    }
+    case UB_PV_CFRAME: {
+        if (!is_cf(L, i)) break;
+        scf *c = check_cf(L, i);
+        f32 m[12] = { c->p.x, c->p.y, c->p.z, c->r.x.x, c->r.y.x, c->r.z.x, c->r.x.y, c->r.y.y, c->r.z.y,
+                      c->r.x.z, c->r.y.z, c->r.z.z };
+        memcpy(seq, m, sizeof m);
+        out->v.cf.m = seq;
         return true;
     }
     case UB_PV_BRICKCOLOR:
@@ -1482,11 +1500,6 @@ static int m_objects_at(lua_State *L)
 
 static int m_noop(lua_State *L) { return 0; }
 
-static int m_true(lua_State *L)
-{
-    lua_pushboolean(L, 1);
-    return 1;
-}
 
 static int m_nil(lua_State *L)
 {
@@ -1510,6 +1523,33 @@ static int m_setcore(lua_State *L)
         lua_pop(L, 2);
     }
     return 0;
+}
+
+/* StarterGui:SetCoreGuiEnabled(type, on): the Backpack (2) and All (5) hide
+ * the hotbar; the other core GUIs Uniblox does not draw. */
+extern bool g_backpack_hidden;
+static int m_setcoregui(lua_State *L)
+{
+    int t = lua_isnumber(L, 2) ? (int)lua_tointeger(L, 2) : -1;
+    if (t < 0) {
+        lua_getfield(L, 2, "Value");
+        t = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    if (t == 2 || t == 5) g_backpack_hidden = !lua_toboolean(L, 3);
+    return 0;
+}
+
+static int m_getcoregui(lua_State *L)
+{
+    int t = lua_isnumber(L, 2) ? (int)lua_tointeger(L, 2) : -1;
+    if (t < 0) {
+        lua_getfield(L, 2, "Value");
+        t = (int)lua_tointeger(L, -1);
+        lua_pop(L, 1);
+    }
+    lua_pushboolean(L, (t == 2 || t == 5) ? !g_backpack_hidden : 1);
+    return 1;
 }
 
 lua_CFunction gui_method(i32 idx, const char *k)
@@ -1540,8 +1580,9 @@ lua_CFunction gui_method(i32 idx, const char *k)
         if (streq(k, "GetTopbarTransparency")) return m_half;
     }
     if (streq(cls, "StarterGui")) {
-        if (streq(k, "SetCoreGuiEnabled") || streq(k, "RegisterSetCore") || streq(k, "RegisterGetCore")) return m_noop;
-        if (streq(k, "GetCoreGuiEnabled")) return m_true;
+        if (streq(k, "SetCoreGuiEnabled")) return m_setcoregui;
+        if (streq(k, "RegisterSetCore") || streq(k, "RegisterGetCore")) return m_noop;
+        if (streq(k, "GetCoreGuiEnabled")) return m_getcoregui;
         if (streq(k, "SetCore")) return m_setcore;
         if (streq(k, "GetCore")) return m_nil;
     }

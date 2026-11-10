@@ -37,7 +37,17 @@ CLASSES = [
     "ColorCorrectionEffect", "SunRaysEffect", "DepthOfFieldEffect", "Animation", "SelectionBox", "Dialog",
     "SpecialMesh", "BlockMesh", "CylinderMesh", "Explosion", "ForceField", "Accessory", "Hat", "Shirt", "Pants",
     "ShirtGraphic", "BodyColors", "HumanoidDescription", "StarterGear",
+    # milestone 8C: the place's character settings
+    "StarterPlayer",
+    # milestone 8C: constraints and movers
+    "BallSocketConstraint", "HingeConstraint", "PrismaticConstraint", "CylindricalConstraint", "RopeConstraint",
+    "RodConstraint", "SpringConstraint", "WeldConstraint", "NoCollisionConstraint", "AlignPosition",
+    "AlignOrientation", "LinearVelocity", "AngularVelocity", "VectorForce", "Torque", "LineForce",
+    "BodyVelocity", "BodyPosition", "BodyGyro", "BodyForce", "BodyAngularVelocity", "BodyThrust",
 ]
+
+# properties scripts cannot see that Uniblox still keeps from files
+KEEP_HIDDEN = {("StarterPlayer", "GameSettingsAvatar")}
 
 EXTRA_ENUMS = [
     "KeyCode", "UserInputType", "UserInputState", "MouseBehavior", "CoreGuiType", "NormalId", "FontWeight",
@@ -59,6 +69,7 @@ TYPES = {
     "Vector2": "UB_PV_VECTOR2", "Vector3": "UB_PV_VECTOR3", "UDim": "UB_PV_UDIM", "UDim2": "UB_PV_UDIM2",
     "Rect": "UB_PV_RECT", "NumberRange": "UB_PV_NUMRANGE", "NumberSequence": "UB_PV_NUMSEQ",
     "ColorSequence": "UB_PV_COLORSEQ", "Ref": "UB_PV_REF", "Font": "UB_PV_FONT", "BrickColor": "UB_PV_BRICKCOLOR",
+    "CFrame": "UB_PV_CFRAME",
 }
 
 WEIGHTS = {"Thin": 100, "ExtraLight": 200, "Light": 300, "Regular": 400, "Medium": 500, "SemiBold": 600,
@@ -125,6 +136,8 @@ def default_values(t, v):
         return [-1, 0, 0, 0], None
     if kind == "Font":
         return [WEIGHTS.get(val["weight"], 400), 1 if val["style"] == "Italic" else 0, 0, 0], val["family"]
+    if kind == "CFrame":  # only the position; every default has no rotation
+        return list(val["position"]) + [0], None
     raise ValueError(kind)
 
 
@@ -156,7 +169,9 @@ def main(path):
         first = len(props)
         for pn in sorted(c["Properties"]):
             p = c["Properties"][pn]
-            if pn in SKIP_PROPS or "NotScriptable" in p["Tags"] or p["Scriptability"] not in ("ReadWrite", "Read"):
+            hidden_kept = (name, pn) in KEEP_HIDDEN
+            if not hidden_kept and (pn in SKIP_PROPS or "NotScriptable" in p["Tags"] or
+                                    p["Scriptability"] not in ("ReadWrite", "Read")):
                 continue
             if "Alias" in p["Kind"]:
                 continue
@@ -164,8 +179,8 @@ def main(path):
             if not t:
                 continue
             ser = p["Kind"]["Canonical"]["Serialization"]
-            readonly = p["Scriptability"] == "Read"
-            stored = not readonly and (ser == "Serializes" or isinstance(ser, dict) or pn == "Font")
+            readonly = p["Scriptability"] == "Read" or hidden_kept
+            stored = (not readonly or hidden_kept) and (ser == "Serializes" or isinstance(ser, dict) or pn == "Font")
             flags = []
             if readonly:
                 flags.append("UB_CDB_READONLY")

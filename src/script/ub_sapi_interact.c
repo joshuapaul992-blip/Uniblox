@@ -468,6 +468,15 @@ static int m_holdend(lua_State *L)
     return 0;
 }
 
+static void tools_pump(lua_State *L);
+void teams_pump(lua_State *L);
+lua_CFunction teams_method(i32 idx, const char *k);
+int tools_event(i32 idx, const char *k);
+lua_CFunction tools_method(i32 idx, const char *k);
+void tools_reset(void);
+void get_extra_value(lua_State *L, i32 idx, const char *key);
+void set_extra_value(lua_State *L, i32 idx, const char *key, int v);
+
 /* -------------------------------------------------------------- Humanoid */
 
 static int g_state = -1;     /* HumanoidStateType value */
@@ -527,6 +536,10 @@ int humanoid_state(void) { return g_state < 0 ? 8 : g_state; }
 
 int interact_event(i32 idx, const char *k)
 {
+    int tev = tools_event(idx, k);
+    if (tev >= 0) return tev;
+    tev = sound_event(idx, k);
+    if (tev >= 0) return tev;
     if (idx == VIRT_PROMPTSERVICE || (idx >= 0 && is_class(idx, "ProximityPrompt"))) {
         if (streq(k, "Triggered") || streq(k, "PromptTriggered")) return EV_TRIGGERED;
         if (streq(k, "TriggerEnded") || streq(k, "PromptTriggerEnded")) return EV_TRIGGERENDED;
@@ -552,6 +565,12 @@ int interact_event(i32 idx, const char *k)
 
 lua_CFunction interact_method(i32 idx, const char *k)
 {
+    lua_CFunction tf = tools_method(idx, k);
+    if (tf) return tf;
+    tf = sound_method(idx, k);
+    if (tf) return tf;
+    tf = teams_method(idx, k);
+    if (tf) return tf;
     if (idx >= 0 && is_class(idx, "ProximityPrompt")) {
         if (streq(k, "InputHoldBegin")) return m_holdbegin;
         if (streq(k, "InputHoldEnd")) return m_holdend;
@@ -565,10 +584,15 @@ void interact_pump(lua_State *L, f32 dt)
     click_pump(L);
     prompt_pump(L, dt);
     humanoid_pump(L);
+    tools_pump(L);
+    teams_pump(L);
+    sound_pump(L);
 }
 
 void interact_reset(void)
 {
+    tools_reset();
+    sound_reset();
     g_hover = g_down = g_rdown = -1;
     g_np = 0;
     g_scan_t = -1;
@@ -740,4 +764,469 @@ bool offline_index(lua_State *L, i32 idx, const char *k)
         }
     }
     return false;
+}
+
+/* ---------------------------------------------------------------- tools
+ * StarterPack's tools are copied into the Backpack at every spawn; keys 1
+ * to 9 equip the tool in that slot of the hotbar (again to put it away);
+ * the left mouse button activates the held tool. Equipping parents the
+ * tool to the character and grips its Handle in the right hand with a
+ * Weld named RightGrip (C1 = the tool's Grip), as Roblox does. The hotbar
+ * is drawn under CoreGui in Uniblox's own style. */
+
+#define MAX_SLOTS 9
+
+static i32 g_slot[MAX_SLOTS];
+static i32 g_equipped = -1, g_grip = -1;
+static u32 g_seen_spawn;
+static bool g_activated;
+static i32 g_hotbar = -1, g_hotbar_frames[MAX_SLOTS], g_hotbar_labels[MAX_SLOTS];
+static u32 g_hotbar_sig;
+bool g_backpack_hidden; /* StarterGui:SetCoreGuiEnabled(Backpack, false) */
+
+static bool is_tool(i32 i)
+{
+    return i >= 0 && ub_world_alive(W, i) && (is_class(i, "Tool") || is_class(i, "HopperBin"));
+}
+
+static i32 find_child_named(i32 parent, const char *name)
+{
+    for (i32 c = W->inst[parent].first_child; c >= 0; c = W->inst[c].next_sibling)
+        if (ub_world_alive(W, c) && streq(ub_world_str(W, W->inst[c].name), name)) return c;
+    return -1;
+}
+
+static void set_parent_l(lua_State *L, i32 inst, i32 parent)
+{
+    push_inst(L, parent);
+    set_prop(L, inst, "Parent", lua_gettop(L));
+    lua_pop(L, 1);
+}
+
+static void refill_backpack(lua_State *L)
+{
+    i32 bp = S.g->backpack;
+    if (bp < 0) return;
+    /* the old ones go (held and in the backpack) */
+    if (g_equipped >= 0 && ub_world_alive(W, g_equipped)) ub_world_destroy(W, g_equipped);
+    if (g_grip >= 0 && ub_world_alive(W, g_grip)) ub_world_destroy(W, g_grip);
+    g_equipped = g_grip = -1;
+    for (i32 c = W->inst[bp].first_child; c >= 0;) {
+        i32 next = W->inst[c].next_sibling;
+        if (is_tool(c)) ub_world_destroy(W, c);
+        c = next;
+    }
+    for (int s = 0; s < MAX_SLOTS; ++s) g_slot[s] = -1;
+    i32 sp = -1;
+    for (i32 i = 0; i < W->count && sp < 0; ++i)
+        if (W->inst[i].parent < 0 && is_class(i, "StarterPack")) sp = i;
+    if (sp < 0) return;
+    i32 kids[64];
+    int nk = 0;
+    for (i32 c = W->inst[sp].first_child; c >= 0 && nk < 64; c = W->inst[c].next_sibling)
+        if (ub_world_alive(W, c)) kids[nk++] = c;
+    for (int k = 0; k < nk; ++k) {
+        i32 copy = ub_world_clone(W, kids[k]);
+        if (copy < 0) break;
+        W->inst[copy].flags |= UB_INST_RUNTIME;
+        set_parent_l(L, copy, bp);
+        start_scripts_in(copy);
+    }
+}
+
+/* keeps the hotbar's slots: tools stay in their slot; new ones take the first free */
+static void update_slots(void)
+{
+    i32 bp = S.g->backpack;
+    for (int s = 0; s < MAX_SLOTS; ++s) {
+        i32 t = g_slot[s];
+        bool here = is_tool(t) && (W->inst[t].parent == bp || W->inst[t].parent == S.g->char_model);
+        if (!here) g_slot[s] = -1;
+    }
+    for (i32 c = bp >= 0 ? W->inst[bp].first_child : -1; c >= 0; c = W->inst[c].next_sibling) {
+        if (!is_tool(c)) continue;
+        bool has = false;
+        for (int s = 0; s < MAX_SLOTS; ++s) has |= g_slot[s] == c;
+        for (int s = 0; s < MAX_SLOTS && !has; ++s)
+            if (g_slot[s] < 0) {
+                g_slot[s] = c;
+                has = true;
+            }
+    }
+    /* a tool a script put in the character is held */
+    if (g_equipped >= 0 && (!is_tool(g_equipped) || W->inst[g_equipped].parent != S.g->char_model)) g_equipped = -1;
+    for (i32 c = S.g->char_model >= 0 ? W->inst[S.g->char_model].first_child : -1; c >= 0 && g_equipped < 0;
+         c = W->inst[c].next_sibling)
+        if (is_tool(c)) g_equipped = c;
+}
+
+static i32 right_hand(void)
+{
+    if (S.g->char_model < 0) return -1;
+    i32 h = find_child_named(S.g->char_model, S.g->r15 ? "RightHand" : "Right Arm");
+    return h >= 0 ? h : S.g->char_root;
+}
+
+static void grip(lua_State *L, i32 tool)
+{
+    i32 handle = find_child_named(tool, "Handle");
+    i32 hand = right_hand();
+    if (handle < 0 || W->inst[handle].part < 0 || hand < 0) return;
+    g_grip = ub_world_add(W, hand, UB_CLASS_OTHER, "Weld", "RightGrip");
+    if (g_grip < 0) return;
+    W->inst[g_grip].flags |= UB_INST_RUNTIME;
+    ub_value v;
+    memset(&v, 0, sizeof v);
+    v.type = UB_PV_REF;
+    v.v.ref = hand;
+    ub_world_set_prop_named(W, g_grip, "Part0", &v);
+    v.v.ref = handle;
+    ub_world_set_prop_named(W, g_grip, "Part1", &v);
+    /* C0: the hand's grip point, the tool pointing forward; C1: the tool's Grip */
+    mat3 r = mat3_from_euler(0, -UB_HALF_PI, 0);
+    push_cf(L, v3(0, S.g->r15 ? -0.15f : -1.0f, 0), &r);
+    set_extra_value(L, g_grip, "C0", lua_gettop(L));
+    lua_pop(L, 1);
+    get_extra_value(L, tool, "Grip");
+    if (is_cf(L, -1)) set_extra_value(L, g_grip, "C1", lua_gettop(L));
+    lua_pop(L, 1);
+    joint_changed(L, g_grip);
+}
+
+static void unequip(lua_State *L)
+{
+    i32 t = g_equipped;
+    if (t < 0) return;
+    g_equipped = -1;
+    if (g_grip >= 0 && ub_world_alive(W, g_grip)) {
+        ub_game_uncarry(S.g, -1, g_grip);
+        ub_world_destroy(W, g_grip);
+    }
+    g_grip = -1;
+    if (!ub_world_alive(W, t)) return;
+    if (g_activated) {
+        g_activated = false;
+        fire_signal(L, t, EV_DEACTIVATED, NULL, 0);
+    }
+    if (S.g->backpack >= 0) set_parent_l(L, t, S.g->backpack);
+    fire_signal(L, t, EV_UNEQUIPPED, NULL, 0);
+}
+
+static void equip(lua_State *L, i32 t)
+{
+    if (!is_tool(t) || S.g->dead || S.g->char_model < 0) return;
+    if (g_equipped == t) return;
+    unequip(L);
+    g_equipped = t;
+    set_parent_l(L, t, S.g->char_model);
+    grip(L, t);
+    push_inst(L, VIRT_MOUSE);
+    fire_signal(L, t, EV_EQUIPPED, NULL, 1);
+}
+
+static f64 tool_num(i32 t, const char *k, f64 dflt) { return num_prop(t, k, dflt); }
+
+static void activate(lua_State *L, i32 t)
+{
+    if (t < 0 || !ub_world_alive(W, t) || tool_num(t, "Enabled", 1) == 0) return;
+    g_activated = true;
+    fire_signal(L, t, EV_ACTIVATED, NULL, 0);
+}
+
+/* the hotbar: a row of slots at the bottom of the screen */
+static void draw_hotbar(void)
+{
+    u32 sig = (u32)(g_equipped + 7);
+    int used = 0;
+    for (int s = 0; s < MAX_SLOTS; ++s) {
+        sig = sig * 31u + (u32)(g_slot[s] + 3);
+        if (g_slot[s] >= 0) used = s + 1;
+    }
+    sig = sig * 31u + (g_backpack_hidden ? 1u : 0u) + W->epoch * 0u;
+    if (sig == g_hotbar_sig && g_hotbar >= 0 && ub_world_alive(W, g_hotbar)) return;
+    g_hotbar_sig = sig;
+    if (g_core < 0 || !ub_world_alive(W, g_core)) {
+        g_core = ub_world_add(W, -1, UB_CLASS_FOLDER, "CoreGui", "CoreGui");
+        if (g_core < 0) return;
+        W->inst[g_core].flags |= UB_INST_RUNTIME;
+        if (S.g->gui) ub_gui_set_core_root(S.g->gui, g_core);
+    }
+    if (g_hotbar >= 0 && ub_world_alive(W, g_hotbar)) ub_world_destroy(W, g_hotbar);
+    g_hotbar = -1;
+    if (!used || g_backpack_hidden) return;
+    g_hotbar = make("ScreenGui", g_core, "Hotbar");
+    if (g_hotbar < 0) return;
+    for (int s = 0; s < used; ++s) {
+        i32 f = make("Frame", g_hotbar, "Slot");
+        g_hotbar_frames[s] = f;
+        if (f < 0) continue;
+        bool held = g_slot[s] >= 0 && g_slot[s] == g_equipped;
+        f32 x0 = -(f32)used * 33.0f;
+        setv(f, "Position", vudim2(0.5f, (i32)(x0 + (f32)s * 66.0f), 1, -72));
+        setv(f, "Size", vudim2(0, 60, 0, 60));
+        frame_look(f, held ? 0.20f : 0.09f, held ? 0.42f : 0.10f, held ? 0.62f : 0.13f, 0.25f, 8);
+        char num[4] = { (char)('1' + s), 0 };
+        i32 n = label(f, "Number", 13, true, 0.75f, 0.78f, 0.84f, 0);
+        setv(n, "Position", vudim2(0, 5, 0, 2));
+        setv(n, "Size", vudim2(1, -10, 0, 14));
+        ub_value nv = ub_vstr(num, 1);
+        setv(n, "Text", nv);
+        i32 t = label(f, "Name", 13, false, 1, 1, 1, 2);
+        g_hotbar_labels[s] = t;
+        setv(t, "Position", vudim2(0, 3, 0, 18));
+        setv(t, "Size", vudim2(1, -6, 1, -20));
+        setv(t, "TextWrapped", ub_vbool(true));
+        if (g_slot[s] >= 0) {
+            const char *name = ub_world_str(W, W->inst[g_slot[s]].name);
+            ub_value tv = ub_vstr(name, (u32)strlen(name));
+            setv(t, "Text", tv);
+        } else {
+            ub_value tv = ub_vstr("", 0);
+            setv(t, "Text", tv);
+        }
+    }
+}
+
+static void tools_pump(lua_State *L)
+{
+    if (S.g->spawn_count != g_seen_spawn) {
+        g_seen_spawn = S.g->spawn_count;
+        refill_backpack(L);
+    }
+    if (S.g->dead && g_equipped >= 0) unequip(L);
+    update_slots();
+    const ub_game_input *in = IN();
+    if (!in->gui_keys && !S.g->dead && !g_backpack_hidden)
+        for (int s = 0; s < MAX_SLOTS; ++s)
+            if (in->key_pressed['1' + s]) {
+                if (g_slot[s] >= 0 && g_slot[s] == g_equipped) unequip(L);
+                else if (g_slot[s] >= 0) equip(L, g_slot[s]);
+            }
+    if (g_equipped >= 0 && is_tool(g_equipped)) {
+        bool manual = tool_num(g_equipped, "ManualActivationOnly", 0) != 0;
+        if (in->pressed[0] && !in->gui_mouse && !manual) activate(L, g_equipped);
+        if (in->released[0] && g_activated) {
+            g_activated = false;
+            fire_signal(L, g_equipped, EV_DEACTIVATED, NULL, 0);
+        }
+    }
+    draw_hotbar();
+}
+
+/* Tool:Activate(), Tool:Deactivate(); Humanoid:EquipTool(tool), :UnequipTools() */
+static int m_tool_activate(lua_State *L)
+{
+    i32 t = check_inst(L, 1);
+    if (t == g_equipped) activate(L, t);
+    return 0;
+}
+
+static int m_tool_deactivate(lua_State *L)
+{
+    i32 t = check_inst(L, 1);
+    if (t == g_equipped && g_activated) {
+        g_activated = false;
+        fire_signal(L, t, EV_DEACTIVATED, NULL, 0);
+    }
+    return 0;
+}
+
+static int m_equiptool(lua_State *L)
+{
+    i32 t = check_inst(L, 2);
+    update_slots();
+    equip(L, t);
+    update_slots();
+    return 0;
+}
+
+static int m_unequiptools(lua_State *L)
+{
+    (void)L;
+    unequip(L);
+    return 0;
+}
+
+int tools_event(i32 idx, const char *k)
+{
+    if (!is_tool(idx)) return -1;
+    if (streq(k, "Equipped")) return EV_EQUIPPED;
+    if (streq(k, "Unequipped")) return EV_UNEQUIPPED;
+    if (streq(k, "Activated")) return EV_ACTIVATED;
+    if (streq(k, "Deactivated")) return EV_DEACTIVATED;
+    return -1;
+}
+
+lua_CFunction tools_method(i32 idx, const char *k)
+{
+    if (is_tool(idx)) {
+        if (streq(k, "Activate")) return m_tool_activate;
+        if (streq(k, "Deactivate")) return m_tool_deactivate;
+    }
+    if (idx >= 0 && idx == S.g->humanoid) {
+        if (streq(k, "EquipTool")) return m_equiptool;
+        if (streq(k, "UnequipTools")) return m_unequiptools;
+    }
+    return NULL;
+}
+
+void tools_reset(void)
+{
+    for (int s = 0; s < MAX_SLOTS; ++s) g_slot[s] = -1;
+    g_equipped = g_grip = g_hotbar = -1;
+    g_seen_spawn = 0;
+    g_activated = false;
+    g_hotbar_sig = 0;
+    g_backpack_hidden = false;
+}
+
+/* ---------------------------------------------------------------- teams
+ * Player.Team, TeamColor and Neutral (the game picks spawns from them),
+ * Team:GetPlayers(), Teams:GetTeams(), and spawns that change your team
+ * when you step on them (AllowTeamChangeOnTouch). */
+
+static void set_team(lua_State *L, i32 team)
+{
+    i32 pl = S.g->player;
+    if (pl < 0) return;
+    ub_value v;
+    memset(&v, 0, sizeof v);
+    v.type = UB_PV_REF;
+    v.v.ref = team;
+    ub_world_set_prop_named(W, pl, "Team", &v);
+    ub_value nv = ub_vbool(team < 0);
+    ub_world_set_prop_named(W, pl, "Neutral", &nv);
+    if (team >= 0) {
+        const ub_value *tc = ub_world_prop_named(W, team, "TeamColor");
+        ub_value c;
+        memset(&c, 0, sizeof c);
+        c.type = UB_PV_BRICKCOLOR;
+        c.v.i = tc ? tc->v.i : 194;
+        ub_world_set_prop_named(W, pl, "TeamColor", &c);
+    }
+    prop_changed(L, pl, "Team");
+    prop_changed(L, pl, "TeamColor");
+    prop_changed(L, pl, "Neutral");
+}
+
+static i32 player_team(void)
+{
+    const ub_value *v = S.g->player >= 0 ? ub_world_prop_named(W, S.g->player, "Team") : NULL;
+    return v && v->type == UB_PV_REF && v->v.ref >= 0 && ub_world_alive(W, v->v.ref) ? v->v.ref : -1;
+}
+
+bool teams_get(lua_State *L, i32 idx, const char *k)
+{
+    if (idx < 0 || idx != S.g->player) return false;
+    if (streq(k, "Team")) {
+        push_inst(L, player_team());
+        return true;
+    }
+    if (streq(k, "TeamColor")) {
+        const ub_value *v = ub_world_prop_named(W, idx, "TeamColor");
+        push_brickcolor(L, brickcolor_number_rgb(v ? (u32)v->v.i : 194));
+        return true;
+    }
+    if (streq(k, "Neutral")) {
+        const ub_value *v = ub_world_prop_named(W, idx, "Neutral");
+        lua_pushboolean(L, !v || v->v.b);
+        return true;
+    }
+    return false;
+}
+
+bool teams_set(lua_State *L, i32 idx, const char *k, int v)
+{
+    if (idx < 0 || idx != S.g->player) return false;
+    if (streq(k, "Team")) {
+        i32 t = opt_inst(L, v);
+        if (t >= 0 && !is_class(t, "Team")) return sapi_error(L, "Team must be a Team"), true;
+        set_team(L, t);
+        return true;
+    }
+    if (streq(k, "TeamColor")) {
+        u32 rgb = brickcolor_rgb(L, v), num = brickcolor_rgb_number(rgb);
+        i32 teams = -1, found = -1;
+        for (i32 i = 0; i < W->count && teams < 0; ++i)
+            if (W->inst[i].parent < 0 && is_class(i, "Teams")) teams = i;
+        for (i32 c = teams >= 0 ? W->inst[teams].first_child : -1; c >= 0 && found < 0; c = W->inst[c].next_sibling) {
+            const ub_value *tc = is_class(c, "Team") ? ub_world_prop_named(W, c, "TeamColor") : NULL;
+            if (tc && (u32)tc->v.i == num) found = c;
+        }
+        set_team(L, found);
+        if (found < 0) { /* a colour no team has: keeps it, neutral as Roblox does */
+            ub_value c;
+            memset(&c, 0, sizeof c);
+            c.type = UB_PV_BRICKCOLOR;
+            c.v.i = (i32)num;
+            ub_world_set_prop_named(W, idx, "TeamColor", &c);
+        }
+        return true;
+    }
+    if (streq(k, "Neutral")) {
+        if (lua_toboolean(L, v)) set_team(L, -1);
+        else {
+            ub_value nv = ub_vbool(false);
+            ub_world_set_prop_named(W, idx, "Neutral", &nv);
+            prop_changed(L, idx, "Neutral");
+        }
+        return true;
+    }
+    return false;
+}
+
+static int m_team_players(lua_State *L)
+{
+    i32 t = check_inst(L, 1);
+    lua_newtable(L);
+    if (player_team() == t) {
+        push_inst(L, S.g->player);
+        lua_rawseti(L, -2, 1);
+    }
+    return 1;
+}
+
+static int m_get_teams(lua_State *L)
+{
+    i32 t = check_inst(L, 1);
+    lua_newtable(L);
+    int n = 0;
+    for (i32 c = W->inst[t].first_child; c >= 0; c = W->inst[c].next_sibling)
+        if (is_class(c, "Team")) {
+            push_inst(L, c);
+            lua_rawseti(L, -2, ++n);
+        }
+    return 1;
+}
+
+lua_CFunction teams_method(i32 idx, const char *k)
+{
+    if (is_class(idx, "Team") && streq(k, "GetPlayers")) return m_team_players;
+    if (is_class(idx, "Teams") && streq(k, "GetTeams")) return m_get_teams;
+    return NULL;
+}
+
+static i32 g_last_spawn_touch = -1;
+
+void teams_pump(lua_State *L)
+{
+    i32 gp = S.g->chr.ground_part, inst = gp >= 0 ? ub_world_part_inst(W, gp) : -1;
+    if (inst == g_last_spawn_touch) return;
+    g_last_spawn_touch = inst;
+    if (inst < 0 || W->inst[inst].cls != UB_CLASS_SPAWN) return;
+    const ub_value *allow = ub_world_prop_named(W, inst, "AllowTeamChangeOnTouch");
+    const ub_value *neutral = ub_world_prop_named(W, inst, "Neutral");
+    if (!allow || !allow->v.b || !neutral || neutral->v.b) return;
+    const ub_value *tc = ub_world_prop_named(W, inst, "TeamColor");
+    if (!tc) return;
+    i32 teams = -1;
+    for (i32 i = 0; i < W->count && teams < 0; ++i)
+        if (W->inst[i].parent < 0 && is_class(i, "Teams")) teams = i;
+    for (i32 c = teams >= 0 ? W->inst[teams].first_child : -1; c >= 0; c = W->inst[c].next_sibling) {
+        const ub_value *t = is_class(c, "Team") ? ub_world_prop_named(W, c, "TeamColor") : NULL;
+        if (t && t->v.i == tc->v.i && player_team() != c) {
+            set_team(L, c);
+            return;
+        }
+    }
 }

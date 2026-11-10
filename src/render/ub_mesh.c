@@ -1,10 +1,14 @@
 #include "render/ub_mesh.h"
+#include "platform/platform.h"
 
 static const int k_cyl_sides[UB_DETAIL_COUNT] = { 12, 32 };
 static const int k_ball_stacks[UB_DETAIL_COUNT] = { 6, 16 };
 static const int k_ball_slices[UB_DETAIL_COUNT] = { 10, 32 };
 
 static ub_mesh g_meshes[UB_DETAIL_COUNT][UB_SHAPE_COUNT];
+static vec3 g_verts[UB_DETAIL_COUNT][UB_SHAPE_COUNT][UB_MESH_MAX_VERTS];
+static vec3 g_vnormals[UB_DETAIL_COUNT][UB_SHAPE_COUNT][UB_MESH_MAX_VERTS];
+static ub_face g_faces[UB_DETAIL_COUNT][UB_SHAPE_COUNT][UB_MESH_MAX_FACES];
 
 static int add_vert(ub_mesh *m, f32 x, f32 y, f32 z)
 {
@@ -145,6 +149,9 @@ void ub_meshes_init(void)
         for (int i = 0; i < UB_SHAPE_COUNT; ++i) {
             g_meshes[d][i].vert_count = 0;
             g_meshes[d][i].face_count = 0;
+            g_meshes[d][i].verts = g_verts[d][i];
+            g_meshes[d][i].vnormals = g_vnormals[d][i];
+            g_meshes[d][i].faces = g_faces[d][i];
         }
         build_box(&g_meshes[d][UB_SHAPE_BOX]);
         build_wedge(&g_meshes[d][UB_SHAPE_WEDGE]);
@@ -159,4 +166,46 @@ const ub_mesh *ub_mesh_get(ub_shape s, ub_detail d)
     if (!g_meshes_ready) ub_meshes_init(); /* first use (queries can come before any renderer) */
     return &g_meshes[(unsigned)d < UB_DETAIL_COUNT ? d : UB_DETAIL_LOW]
                     [(unsigned)s < UB_SHAPE_COUNT ? s : UB_SHAPE_BOX];
+}
+
+ub_mesh *ub_mesh_from_triangles(const f32 *v, u32 nv, const u32 *tri, u32 nt, const u32 *piece_v,
+                                const u32 *piece_t, u32 npieces, bool wound)
+{
+    if (nv > 0xFFFF) return NULL; /* faces index vertices with 16 bits */
+    size_t bytes = sizeof(ub_mesh) + sizeof(vec3) * 2 * nv + sizeof(ub_face) * nt;
+    u8 *block = (u8 *)plat_alloc(bytes);
+    if (!block) return NULL;
+    ub_mesh *m = (ub_mesh *)block;
+    m->verts = (vec3 *)(block + sizeof(ub_mesh));
+    m->vnormals = m->verts + nv;
+    m->faces = (ub_face *)(m->vnormals + nv);
+    m->vert_count = (int)nv;
+    for (u32 i = 0; i < nv; ++i) {
+        m->verts[i] = v3(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
+        m->vnormals[i] = v3(0, 1, 0);
+    }
+    u32 v0 = 0, t0 = 0;
+    for (u32 p = 0; p < npieces; ++p) {
+        vec3 c = v3(0, 0, 0);
+        for (u32 i = v0; i < piece_v[p]; ++i) c = v3_add(c, m->verts[i]);
+        if (piece_v[p] > v0) c = v3_scale(c, 1.0f / (f32)(piece_v[p] - v0));
+        for (u32 t = t0; t < piece_t[p]; ++t) {
+            u32 a = tri[t * 3], b = tri[t * 3 + 1], cc = tri[t * 3 + 2];
+            vec3 n = v3_cross(v3_sub(m->verts[b], m->verts[a]), v3_sub(m->verts[cc], m->verts[a]));
+            f32 len = v3_length(n);
+            if (len < 1e-12f) continue; /* degenerate */
+            n = v3_scale(n, 1.0f / len);
+            ub_face *f = &m->faces[m->face_count++];
+            f->count = 3;
+            f->smooth = false;
+            bool flip = !wound && v3_dot(n, v3_sub(m->verts[a], c)) < 0; /* convex piece: out is away from its middle */
+            f->v[0] = (u16)a;
+            f->v[1] = (u16)(flip ? cc : b);
+            f->v[2] = (u16)(flip ? b : cc);
+            f->normal = flip ? v3_scale(n, -1.0f) : n;
+        }
+        v0 = piece_v[p];
+        t0 = piece_t[p];
+    }
+    return m;
 }

@@ -102,6 +102,7 @@ static ub_camera cam_at(vec3 pos, f32 yaw, f32 pitch, f32 fov_deg)
 static ub_part_draw part(ub_shape shape, vec3 pos, vec3 size, u32 color, ub_material mat)
 {
     ub_part_draw p;
+    memset(&p, 0, sizeof p);
     p.pos = pos;
     p.rot = mat3_identity();
     p.size = size;

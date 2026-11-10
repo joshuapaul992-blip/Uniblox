@@ -568,7 +568,7 @@ void sw_part(const ub_part_draw *p)
         }
     }
 
-    const ub_mesh *mesh = ub_mesh_get((ub_shape)p->shape, UB_DETAIL_LOW);
+    const ub_mesh *mesh = p->mesh ? p->mesh : ub_mesh_get((ub_shape)p->shape, UB_DETAIL_LOW);
     ub_material mat = (ub_material)(p->material < UB_MAT_COUNT ? p->material : UB_MAT_PLASTIC);
     bool textured = ub_texture(mat) != NULL;
     f32 texels_per_unit = (f32)UB_TEX_SIZE / ub_materials[mat].world_size;
@@ -578,7 +578,20 @@ void sw_part(const ub_part_draw *p)
     vec3 ay = to_view(v3_scale(p->rot.y, size.y));
     vec3 az = to_view(v3_scale(p->rot.z, size.z));
 
-    vec3 view[UB_MESH_MAX_VERTS];
+    static vec3 view_fixed[UB_MESH_MAX_VERTS];
+    static vec3 *view_big;
+    static int view_big_cap;
+    vec3 *view = view_fixed;
+    if (mesh->vert_count > UB_MESH_MAX_VERTS) { /* a part's own mesh */
+        if (mesh->vert_count > view_big_cap) {
+            vec3 *nb = (vec3 *)plat_alloc(sizeof(vec3) * (size_t)mesh->vert_count);
+            if (!nb) return;
+            plat_free(view_big);
+            view_big = nb;
+            view_big_cap = mesh->vert_count;
+        }
+        view = view_big;
+    }
     for (int i = 0; i < mesh->vert_count; ++i) {
         vec3 l = mesh->verts[i];
         view[i] = v3(centre.x + ax.x * l.x + ay.x * l.y + az.x * l.z,

@@ -10,6 +10,7 @@
 #include "game/ub_demo_place.h"
 #include "game/ub_game.h"
 #include "gui/ub_gui.h"
+#include "physics/ub_hull.h"
 #include "world/ub_classes.h"
 #include "render/ub_texture.h"
 #include "script/ub_script.h"
@@ -471,7 +472,7 @@ static void test_demo_place(void)
         ub_render_begin(&fr, &cam, &env);
         for (i32 pi = 0; pi < g_g.world.part_count; ++pi)
             if (ub_game_part_visible(&g_g, pi)) {
-                ub_part_draw d = play_part_draw(&g_g.world.parts[pi]);
+                ub_part_draw d = play_part_draw(&g_g.world, &g_g.world.parts[pi]);
                 ub_render_part(&d);
             }
         play_gui_input(&g_g, &fr, &(ub_input){ .has_focus = true }, &cam, false, 31.0);
@@ -493,6 +494,17 @@ static void test_demo_place(void)
             if (r > gg + 40 && r > b + 40) printf("    the door's label is hidden: 0x%06x at %d,%d\n", c, (int)sx, (int)sy);
         }
         ub_render_shutdown();
+    }
+    /* the rope swing: the ball hangs at the rope's length under the beam */
+    i32 swing = ub_world_find_child(&g_g.world, ws, "RopeSwing");
+    i32 rball = swing >= 0 ? ub_world_find_child(&g_g.world, swing, "Ball") : -1;
+    CHECK(rball >= 0);
+    if (rball >= 0) {
+        vec3 bp;
+        mat3 br;
+        ub_game_part_pose(&g_g, g_g.world.inst[rball].part, &bp, &br);
+        printf("  demo place: the rope's ball hangs at y = %.2f (rope from 12 down 7)\n", (double)bp.y);
+        CHECK(bp.y > 2.8f && bp.y < 4.4f);
     }
     /* the lamp by the path: E at its prompt switches it on */
     i32 lamp = ub_world_find_child(&g_g.world, ws, "Lamp");
@@ -622,6 +634,188 @@ static void test_gui_api(void)
     ub_game_stop(&g_g);
 }
 
+/* ------------------------------------------------ meshes (8C) */
+
+/* A box piece of a mesh: 8 corners and 12 triangles, appended. */
+static void mesh_box(f32 *v, u32 *nv, u32 *tri, u32 *nt, vec3 lo, vec3 hi)
+{
+    u32 b = *nv;
+    for (int i = 0; i < 8; ++i) {
+        v[(*nv) * 3] = (i & 1) ? hi.x : lo.x;
+        v[(*nv) * 3 + 1] = (i & 2) ? hi.y : lo.y;
+        v[(*nv) * 3 + 2] = (i & 4) ? hi.z : lo.z;
+        (*nv)++;
+    }
+    static const u32 q[6][4] = { { 0, 2, 3, 1 }, { 4, 5, 7, 6 }, { 0, 1, 5, 4 }, { 2, 6, 7, 3 }, { 0, 4, 6, 2 }, { 1, 3, 7, 5 } };
+    for (int f = 0; f < 6; ++f) {
+        u32 t[6] = { q[f][0], q[f][1], q[f][2], q[f][0], q[f][2], q[f][3] };
+        for (int k = 0; k < 6; ++k) tri[(*nt) * 3 + k] = b + t[k];
+        *nt += 2;
+    }
+}
+
+/* An anchored arch made as one mesh part (two pillars and a lintel): the
+ * character walks through the gap, and a ball dropped on a pillar stays
+ * on top of it. */
+static void test_mesh_collision(void)
+{
+    ub_world w;
+    door_world(&w, NULL);
+    i32 ws = ub_world_workspace(&w);
+    /* move the door walls away: the arch stands at z = 20 */
+    f32 v[3 * 24];
+    u32 tri[3 * 36], nv = 0, nt = 0, pv[3], pt[3];
+    mesh_box(v, &nv, tri, &nt, v3(-0.5f, -0.5f, -0.5f), v3(-0.2f, 0.5f, 0.5f));
+    pv[0] = nv; pt[0] = nt;
+    mesh_box(v, &nv, tri, &nt, v3(0.2f, -0.5f, -0.5f), v3(0.5f, 0.5f, 0.5f));
+    pv[1] = nv; pt[1] = nt;
+    mesh_box(v, &nv, tri, &nt, v3(-0.2f, 0.3f, -0.5f), v3(0.2f, 0.5f, 0.5f));
+    pv[2] = nv; pt[2] = nt;
+    u16 mesh = ub_world_add_mesh(&w, v, nv, tri, nt, pv, pt, 3, 0);
+    CHECK(mesh == 1);
+    i32 arch = add_box(&w, ws, "Arch", v3(0, 5, 20), v3(12, 10, 2), 0x808080);
+    w.parts[w.inst[arch].part].mesh = mesh;
+    i32 ball = add_box(&w, ws, "Ball", v3(-4.2f, 14, 20), v3(1.5f, 1.5f, 1.5f), 0xFF0000);
+    w.parts[w.inst[ball].part].flags &= (u8)~UB_PART_ANCHORED;
+    w.parts[w.inst[ball].part].shape = UB_SHAPE_BALL;
+    i32 door = ub_world_find_child(&w, ws, "Door");
+    if (door >= 0) w.parts[w.inst[door].part].pos = v3(0, -50, 0); /* out of the way */
+    CHECK(ub_game_start(&g_g, &w, false));
+    ub_game_teleport(&g_g, v3(0, 0.1f, 14));
+    f32 z = walk_watching(&g_g, 2.0f, NULL, -1);
+    printf("  mesh part: walked through the arch to z = %.1f\n", (double)z);
+    CHECK(z > 24);
+    const ub_part *bp = &g_g.world.parts[g_g.world.inst[ball].part];
+    printf("  mesh part: the ball rests at y = %.2f on the pillar (top 10)\n", (double)bp->pos.y);
+    CHECK(bp->pos.y > 10.3f && bp->pos.y < 11.0f);
+    /* the hull builder: a box piece is exact; a round one is fitted */
+    ub_hull h;
+    vec3 pts[8];
+    for (int i = 0; i < 8; ++i) pts[i] = v3(v[i * 3], v[i * 3 + 1], v[i * 3 + 2]);
+    CHECK(ub_hull_build(&h, pts, 8, tri, 12) && h.vert_count == 8 && h.face_count == 6 && h.edge_count == 12);
+    CHECK(fabsf(h.volume - 0.3f) < 1e-4f);
+    vec3 ballpts[200];
+    int nb = 0;
+    for (int a = 0; a < 10; ++a)
+        for (int b = 0; b < 20; ++b) {
+            f32 th = 3.14159f * ((f32)a + 0.5f) / 10.0f, ph = 6.28318f * (f32)b / 20.0f;
+            ballpts[nb++] = v3(0.5f * sinf(th) * cosf(ph), 0.5f * cosf(th), 0.5f * sinf(th) * sinf(ph));
+        }
+    CHECK(ub_hull_build(&h, ballpts, nb, NULL, 0) && h.face_count <= UB_HULL_MAX_FACES && h.face_count >= 14);
+    CHECK(h.volume > 0.45f && h.volume < 0.75f); /* a sphere of radius 0.5 is 0.52 */
+    ub_game_stop(&g_g);
+}
+
+/* Characters, joints, tools and teams (8C). */
+static void test_character(void)
+{
+    char *src = read_text("tests/data/scripts/character.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    i32 ws = ub_world_workspace(&w);
+    /* teams and their spawns (the door_world's spawn stays neutral) */
+    i32 teams = ub_world_add(&w, -1, UB_CLASS_OTHER, "Teams", "Teams");
+    i32 red = add_gui(&w, teams, "Team", "Red"), blue = add_gui(&w, teams, "Team", "Blue");
+    ub_value c;
+    memset(&c, 0, sizeof c);
+    c.type = UB_PV_BRICKCOLOR;
+    c.v.i = 21;
+    ub_world_set_prop_named(&w, red, "TeamColor", &c);
+    c.v.i = 23;
+    ub_world_set_prop_named(&w, blue, "TeamColor", &c);
+    ub_value no = ub_vbool(false);
+    ub_world_set_prop_named(&w, blue, "AutoAssignable", &no);
+    for (int k = 0; k < 2; ++k) {
+        ub_part sp;
+        memset(&sp, 0, sizeof sp);
+        sp.pos = v3(k ? -20.0f : 20.0f, 0.05f, 0);
+        sp.rot = mat3_identity();
+        sp.size = v3(4, 0.1f, 4);
+        sp.flags = UB_PART_ANCHORED | UB_PART_CAN_COLLIDE;
+        i32 s = ub_world_add_part(&w, ws, UB_CLASS_SPAWN, "SpawnLocation", k ? "BlueSpawn" : "RedSpawn", &sp);
+        c.v.i = k ? 23 : 21;
+        ub_world_set_prop_named(&w, s, "TeamColor", &c);
+        ub_world_set_prop_named(&w, s, "Neutral", &no);
+    }
+    /* a sword in StarterPack */
+    i32 pack = ub_world_add(&w, -1, UB_CLASS_OTHER, "StarterPack", "StarterPack");
+    i32 tool = add_gui(&w, pack, "Tool", "Sword");
+    add_box(&w, tool, "Handle", v3(0, -100, 0), v3(0.4f, 4, 0.4f), 0xC0C0C0);
+    w.parts[w.inst[ub_world_find_child(&w, tool, "Handle")].part].flags = 0; /* loose, not solid */
+    /* a post and a flag */
+    add_box(&w, ws, "Post", v3(8, 3, 30), v3(1, 6, 1), 0x806040);
+    i32 flag = add_box(&w, ws, "Flag", v3(9.5f, 5, 30), v3(2, 1, 0.2f), 0xFF0000);
+    w.parts[w.inst[flag].part].flags = UB_PART_CAN_COLLIDE;
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Char", src);
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    int ready = -1;
+    for (int i = 0; i < 1200 && find_result(&g_g, "char done") < 0; ++i) {
+        if (ready < 0 && find_result(&g_g, "char ready") >= 0) ready = i;
+        int k = ready >= 0 ? i - ready : -1;
+        gui_frame(&g_g, 400, 400, k == 20, k == 21, (k == 5 || k == 40) ? '1' : 0, i / 60.0);
+    }
+    CHECK(find_result(&g_g, "char done") >= 0);
+    bool ok = find_result(&g_g, "char ok") >= 0;
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
+/* Constraints and body movers (8C). */
+static void write_wav(const char *path, u32 rate, u32 frames)
+{
+    u32 data = frames * 2, size = 44 + data;
+    u8 *b = (u8 *)calloc(1, size);
+    memcpy(b, "RIFF", 4);
+    u32 v = size - 8;
+    memcpy(b + 4, &v, 4);
+    memcpy(b + 8, "WAVEfmt ", 8);
+    v = 16; memcpy(b + 16, &v, 4);
+    u16 fmt = 1, ch = 1, align = 2, bits = 16;
+    memcpy(b + 20, &fmt, 2);
+    memcpy(b + 22, &ch, 2);
+    memcpy(b + 24, &rate, 4);
+    v = rate * 2; memcpy(b + 28, &v, 4);
+    memcpy(b + 32, &align, 2);
+    memcpy(b + 34, &bits, 2);
+    memcpy(b + 36, "data", 4);
+    memcpy(b + 40, &data, 4);
+    plat_make_dir("content");
+    plat_file_write_all(path, b, size);
+    free(b);
+}
+
+static void test_constraints(void)
+{
+    write_wav("content/777.wav", 8000, 2000);
+    char *src = read_text("tests/data/scripts/constraints.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    add_box(&w, ub_world_workspace(&w), "BigFloor", v3(0, -1.5f, 0), v3(400, 1, 400), 0x406040);
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Con", src);
+    free(src);
+    CHECK(ub_game_start(&g_g, &w, true));
+    for (int i = 0; i < 600 && find_result(&g_g, "con done") < 0; ++i) ub_game_update(&g_g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    CHECK(find_result(&g_g, "con done") >= 0);
+    bool ok = find_result(&g_g, "con ok") >= 0;
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* ------------------------------------------ the wider 2022 API (8B) */
 
 /* A frame with the camera behind the spawn point looking at workspace.Button:
@@ -706,6 +900,9 @@ void test_game(void)
     test_luaulib();
     test_gui_api();
     test_api2022();
+    test_mesh_collision();
+    test_character();
+    test_constraints();
     test_hostile();
     test_reuse();
     test_death();
