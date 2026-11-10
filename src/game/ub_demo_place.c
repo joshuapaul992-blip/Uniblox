@@ -4,6 +4,7 @@
 #include "core/ub_string.h"
 #include "render/ub_texture.h"
 #include "render/ub_mesh.h"
+#include "world/ub_classes.h"
 #include "crt/ub_crt.h"
 
 static ub_world *W;
@@ -48,6 +49,8 @@ static const char k_door_script[] =
     "\tif open or not hit.Parent:FindFirstChildOfClass('Humanoid') then return end\n"
     "\topen = true\n"
     "\tprint(hit.Parent.Name .. ' opened the door')\n"
+    "\tlocal events = game:GetService('ReplicatedStorage'):FindFirstChild('DemoEvents')\n"
+    "\tif events then events:FireAllClients('door') end\n"
     "\tdoor.CanCollide = false\n"
     "\tfor t = 0, 0.7, 0.1 do door.Transparency = t task.wait(0.03) end\n"
     "\ttask.wait(3)\n"
@@ -123,6 +126,262 @@ static void add_script(i32 parent, const char *name, const char *source)
     if (s >= 0) ub_world_set_source(W, s, source);
 }
 
+/* ------------------------------------------------------------- the GUI */
+
+static const char k_hud_script[] =
+    "-- the demo's on-screen panel: a LocalScript in a ScreenGui from StarterGui\n"
+    "local events = game:GetService('ReplicatedStorage'):WaitForChild('DemoEvents')\n"
+    "local gui = script.Parent\n"
+    "local panel = gui:WaitForChild('Panel')\n"
+    "local stats = panel:WaitForChild('Stats')\n"
+    "local toast = gui:WaitForChild('Toast')\n"
+    "local doors = 0\n"
+    "local shown = 0\n"
+    "local function show(message)\n"
+    "\tshown += 1\n"
+    "\tlocal mine = shown\n"
+    "\ttoast.Text = message\n"
+    "\ttoast.Visible = true\n"
+    "\ttoast.Position = UDim2.new(0.5, 0, 1, 60)\n"
+    "\ttoast:TweenPosition(UDim2.new(0.5, 0, 1, -24), Enum.EasingDirection.Out, Enum.EasingStyle.Quad, 0.3, true)\n"
+    "\ttask.delay(2.5, function()\n"
+    "\t\tif shown == mine then toast.Visible = false end\n"
+    "\tend)\n"
+    "end\n"
+    "events.OnClientEvent:Connect(function(what)\n"
+    "\tif what == 'door' then\n"
+    "\t\tdoors += 1\n"
+    "\t\tstats.Text = 'Doors opened: ' .. doors\n"
+    "\t\tshow('The door opened')\n"
+    "\tend\n"
+    "end)\n"
+    "panel:WaitForChild('Home').Activated:Connect(function()\n"
+    "\tevents:FireServer('home')\n"
+    "\tshow('Back to the start')\n"
+    "end)\n"
+    "show('Welcome to Uniblox')\n"
+    "print('The demo panel is ready')\n";
+
+static const char k_server_script[] =
+    "-- answers the demo panel\n"
+    "local events = game:GetService('ReplicatedStorage'):WaitForChild('DemoEvents')\n"
+    "events.OnServerEvent:Connect(function(player, what)\n"
+    "\tlocal root = player.Character and player.Character:FindFirstChild('HumanoidRootPart')\n"
+    "\tlocal spawn = workspace:FindFirstChild('SpawnLocation')\n"
+    "\tif what == 'home' and root and spawn then\n"
+    "\t\troot.CFrame = spawn.CFrame + Vector3.new(0, 3, 0)\n"
+    "\t\tprint(player.Name .. ' went back to the start')\n"
+    "\tend\n"
+    "end)\n";
+
+static i32 gui(i32 parent, const char *cls, const char *name)
+{
+    i32 i = ub_world_add(W, parent, UB_CLASS_OTHER, cls, name);
+    if (i >= 0) ub_cdb_fill_defaults(W, i, cls);
+    return i;
+}
+
+static void p_ud2(i32 i, const char *k, f32 sx, i32 ox, f32 sy, i32 oy)
+{
+    ub_value v;
+    v.type = UB_PV_UDIM2;
+    v.v.ud2.sx = sx;
+    v.v.ud2.ox = ox;
+    v.v.ud2.sy = sy;
+    v.v.ud2.oy = oy;
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_ud(i32 i, const char *k, f32 sc, i32 o)
+{
+    ub_value v;
+    v.type = UB_PV_UDIM;
+    v.v.ud.s = sc;
+    v.v.ud.o = o;
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_rgb(i32 i, const char *k, u32 rgb)
+{
+    ub_value v;
+    v.type = UB_PV_COLOR3;
+    v.v.c3.r = (f32)((rgb >> 16) & 255) / 255.0f;
+    v.v.c3.g = (f32)((rgb >> 8) & 255) / 255.0f;
+    v.v.c3.b = (f32)(rgb & 255) / 255.0f;
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_num(i32 i, const char *k, f32 f)
+{
+    ub_value v = ub_vfloat(f);
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_int(i32 i, const char *k, i32 n)
+{
+    ub_value v = ub_vint(n);
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_enum(i32 i, const char *k, u32 e)
+{
+    ub_value v = ub_venum(e);
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_bool(i32 i, const char *k, bool b)
+{
+    ub_value v = ub_vbool(b);
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_str(i32 i, const char *k, const char *s)
+{
+    ub_value v = ub_vstr(s, (u32)ub_strlen(s));
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_v2(i32 i, const char *k, f32 x, f32 y)
+{
+    ub_value v;
+    v.type = UB_PV_VECTOR2;
+    v.v.v2.x = x;
+    v.v.v2.y = y;
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+static void p_v3(i32 i, const char *k, f32 x, f32 y, f32 z)
+{
+    ub_value v;
+    v.type = UB_PV_VECTOR3;
+    v.v.v3.x = x;
+    v.v.v3.y = y;
+    v.v.v3.z = z;
+    ub_world_set_prop_named(W, i, k, &v);
+}
+
+/* A label in Uniblox's own look: white text on nothing. */
+static i32 label(i32 parent, const char *name, const char *text, f32 size, u32 color, int font)
+{
+    i32 l = gui(parent, "TextLabel", name);
+    p_str(l, "Text", text);
+    p_num(l, "TextSize", size);
+    p_rgb(l, "TextColor3", color);
+    p_num(l, "BackgroundTransparency", 1);
+    p_enum(l, "Font", (u32)font);
+    p_enum(l, "TextXAlignment", 0); /* Left */
+    return l;
+}
+
+static void rounded(i32 parent, i32 radius)
+{
+    i32 c = gui(parent, "UICorner", "Corner");
+    p_ud(c, "CornerRadius", 0, radius);
+}
+
+/* The panel in the corner, the message line, a sign by the spawn and a
+ * label over the door. */
+static void add_gui(i32 ws, i32 door)
+{
+    i32 rs = ub_world_add(W, -1, UB_CLASS_FOLDER, "ReplicatedStorage", "ReplicatedStorage");
+    gui(rs, "RemoteEvent", "DemoEvents");
+    i32 sg = gui(-1, "StarterGui", "StarterGui");
+    W->inst[sg].cls = UB_CLASS_FOLDER;
+    i32 hud = gui(sg, "ScreenGui", "DemoHud");
+    p_bool(hud, "ResetOnSpawn", false);
+    p_enum(hud, "ZIndexBehavior", 1); /* Sibling */
+
+    i32 panel = gui(hud, "Frame", "Panel");
+    p_v2(panel, "AnchorPoint", 1, 0);
+    p_ud2(panel, "Position", 1, -12, 0, 12); /* top right: the overlay (F3) is on the left */
+    p_ud2(panel, "Size", 0, 210, 0, 0);
+    p_enum(panel, "AutomaticSize", 2); /* Y */
+    p_rgb(panel, "BackgroundColor3", 0x1C2430);
+    p_num(panel, "BackgroundTransparency", 0.2f);
+    rounded(panel, 10);
+    i32 stroke = gui(panel, "UIStroke", "Edge");
+    p_rgb(stroke, "Color", 0xFFFFFF);
+    p_num(stroke, "Transparency", 0.75f);
+    i32 pad = gui(panel, "UIPadding", "Padding");
+    p_ud(pad, "PaddingTop", 0, 10);
+    p_ud(pad, "PaddingBottom", 0, 10);
+    p_ud(pad, "PaddingLeft", 0, 12);
+    p_ud(pad, "PaddingRight", 0, 12);
+    i32 list = gui(panel, "UIListLayout", "List");
+    p_ud(list, "Padding", 0, 6);
+    p_enum(list, "SortOrder", 2); /* LayoutOrder */
+    i32 title = label(panel, "Title", "Uniblox demo", 20, 0xFFFFFF, 4 /* SourceSansBold */);
+    p_ud2(title, "Size", 1, 0, 0, 22);
+    p_int(title, "LayoutOrder", 1);
+    i32 stats = label(panel, "Stats", "Doors opened: 0", 15, 0xC8D2DC, 3 /* SourceSans */);
+    p_ud2(stats, "Size", 1, 0, 0, 18);
+    p_int(stats, "LayoutOrder", 2);
+    i32 home = gui(panel, "TextButton", "Home");
+    p_str(home, "Text", "Back to the start");
+    p_num(home, "TextSize", 15);
+    p_enum(home, "Font", 4);
+    p_rgb(home, "TextColor3", 0xFFFFFF);
+    p_rgb(home, "BackgroundColor3", 0x2F7BE0);
+    p_ud2(home, "Size", 1, 0, 0, 30);
+    p_int(home, "LayoutOrder", 3);
+    p_int(home, "BorderSizePixel", 0);
+    rounded(home, 6);
+    i32 grad = gui(home, "UIGradient", "Shine");
+    {
+        f32 keys[8] = { 0, 1, 1, 1, 1, 0.78f, 0.86f, 1 };
+        ub_value v;
+        v.type = UB_PV_COLORSEQ;
+        v.v.seq.k = keys;
+        v.v.seq.n = 2;
+        ub_world_set_prop_named(W, grad, "Color", &v);
+        p_num(grad, "Rotation", 90);
+    }
+
+    i32 toast = label(hud, "Toast", "", 18, 0xFFFFFF, 4);
+    p_v2(toast, "AnchorPoint", 0.5f, 1);
+    p_ud2(toast, "Position", 0.5f, 0, 1, -24);
+    p_ud2(toast, "Size", 0, 260, 0, 36);
+    p_enum(toast, "TextXAlignment", 2); /* Center */
+    p_rgb(toast, "BackgroundColor3", 0x1C2430);
+    p_num(toast, "BackgroundTransparency", 0.25f);
+    p_bool(toast, "Visible", false);
+    rounded(toast, 18);
+    i32 ls = ub_world_add(W, hud, UB_CLASS_OTHER, "LocalScript", "HudScript");
+    if (ls >= 0) {
+        ub_world_set_source(W, ls, k_hud_script);
+        W->inst[ls].flags |= UB_INST_CLIENT;
+    }
+
+    /* a sign by the spawn: a SurfaceGui on the side facing the player */
+    i32 sign = add_part(ws, "Sign", UB_SHAPE_BOX, -7, 3.2f, 8, 6, 3, 0.3f, 0xE8E2D4, UB_MAT_WOOD);
+    add_part(ws, "SignPost", UB_SHAPE_BOX, -7, 0.9f, 8, 0.3f, 1.8f, 0.3f, 0x6E4A26, UB_MAT_WOOD);
+    i32 sgui = gui(sign, "SurfaceGui", "Board");
+    p_enum(sgui, "Face", 2);       /* Back: Roblox's +Z, towards the spawn */
+    p_enum(sgui, "SizingMode", 1); /* PixelsPerStud */
+    p_num(sgui, "PixelsPerStud", 50);
+    i32 big = label(sgui, "Heading", "Welcome to Uniblox", 34, 0x2B3A4A, 4);
+    p_ud2(big, "Size", 1, 0, 0.5f, 0);
+    p_ud2(big, "Position", 0, 0, 0.12f, 0);
+    p_enum(big, "TextXAlignment", 2);
+    i32 small = label(sgui, "Hint", "Walk to the door. Mind the lava.", 20, 0x5A6470, 3);
+    p_ud2(small, "Size", 1, 0, 0.3f, 0);
+    p_ud2(small, "Position", 0, 0, 0.58f, 0);
+    p_enum(small, "TextXAlignment", 2);
+
+    /* over the door: a BillboardGui */
+    i32 bb = gui(door, "BillboardGui", "Label");
+    p_ud2(bb, "Size", 0, 150, 0, 36);
+    /* in world axes (StudsOffset is the camera's): up, and out towards the spawn (Roblox's +Z) */
+    p_v3(bb, "StudsOffsetWorldSpace", 0, 5.5f, 1.5f);
+    p_num(bb, "MaxDistance", 90);
+    i32 tag = label(bb, "Text", "Touch to open", 18, 0xFFFFFF, 4);
+    p_ud2(tag, "Size", 1, 0, 1, 0);
+    p_enum(tag, "TextXAlignment", 2);
+    p_rgb(tag, "BackgroundColor3", 0x1C2430);
+    p_num(tag, "BackgroundTransparency", 0.3f);
+    rounded(tag, 18);
+}
+
 /* The built-in demo place: a walled room (open roof) with a door facing
  * the spawn point, and some things outside. Room interior: x -18..18,
  * z 22..58. */
@@ -143,8 +402,8 @@ void ub_demo_place(ub_world *w)
     add_part(house, "WestWall", UB_SHAPE_BOX, -18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);
     add_part(house, "EastWall", UB_SHAPE_BOX, 18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);
     add_part(house, "SouthWallLeft", UB_SHAPE_BOX, -11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);
-    add_script(add_part(house, "Door", UB_SHAPE_BOX, 0, 4, 21.5f, 8, 8, 0.8f, 0x8B5A2B, UB_MAT_WOOD), "DoorScript",
-               k_door_script);
+    i32 door = add_part(house, "Door", UB_SHAPE_BOX, 0, 4, 21.5f, 8, 8, 0.8f, 0x8B5A2B, UB_MAT_WOOD);
+    add_script(door, "DoorScript", k_door_script);
     add_part(house, "SouthWallRight", UB_SHAPE_BOX, 11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);
     add_part(house, "Lintel", UB_SHAPE_BOX, 0, 10, 21.5f, 8, 4, 1, 0xB04A30, UB_MAT_BRICK);
     for (int i = 0; i < 4; ++i)
@@ -216,4 +475,6 @@ void ub_demo_place(ub_world *w)
                "Balls", k_button_script);
     i32 sss = ub_world_add(W, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
     add_script(sss, "Welcome", k_welcome_script);
+    add_script(sss, "PanelServer", k_server_script);
+    add_gui(ws, door);
 }

@@ -1217,7 +1217,6 @@ static void lay_out_layer(ub_gui *g, ub_world *w, glayer *l)
     l->laid_gen = g->gen;
     l->dirty = true;
     if (l->kind == K_SCREEN) g->scr_dirty = true;
-    g->stats.objects += (u32)l->n;
 }
 
 /* Reports properties the layout works out that changed (AbsoluteSize...). */
@@ -1254,7 +1253,6 @@ static void lay_out_all(ub_gui *g, ub_world *w, const ub_camera *cam)
     u64 t0 = plat_time_us();
     resolve_keys(g, w);
     bool world_changed = w->epoch != g->epoch || g->need_layout;
-    g->stats.objects = 0;
     if (world_changed) {
         collect_layers(g, w);
         g->gen++;
@@ -1301,6 +1299,8 @@ static void lay_out_all(ub_gui *g, ub_world *w, const ub_camera *cam)
         g->need_layout = false;
     }
     g->stats.layers = (u32)g->nlayers;
+    g->stats.objects = 0;
+    for (int i = 0; i < g->nlayers; ++i) g->stats.objects += (u32)g->layers[i].n;
     g->stats.layout_us = (u32)(plat_time_us() - t0);
 }
 

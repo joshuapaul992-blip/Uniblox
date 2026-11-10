@@ -743,13 +743,19 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
                      g_game.phys.stats.awake, g_game.phys.stats.contacts, phys10 / 10, phys10 % 10,
                      g_game.chr.grounded ? "" : "  (in the air)");
             }
+            if (g_game.gui) {
+                ub_gui_stats gs;
+                ub_gui_get_stats(g_game.gui, &gs);
+                if (gs.layers)
+                    LINE("GUI: %u layer(s), %u objects; layout %u.%u ms, drawing %u.%u ms", gs.layers, gs.objects,
+                         gs.layout_us / 1000u, gs.layout_us / 100u % 10u, gs.drawn_us / 1000u, gs.drawn_us / 100u % 10u);
+            }
             if (g_game.scripts) {
                 ub_script_stats st;
                 ub_script_get_stats(&st);
                 u32 s10 = g_game.script_us / 100u;
-                LINE("Scripts: %u running, %u waiting, %u KB, %u.%u ms%s%s", st.scripts, st.threads, st.memory_kb,
-                     s10 / 10, s10 % 10, st.errors ? "  - errors below" : "",
-                     st.skipped_client ? "  (LocalScripts not run yet)" : "");
+                LINE("Scripts: %u running, %u waiting, %u KB, %u.%u ms%s", st.scripts, st.threads, st.memory_kb,
+                     s10 / 10, s10 % 10, st.errors ? "  - errors below" : "");
                 const char *out[UB_SCRIPT_OUTPUT_LINES];
                 bool err[UB_SCRIPT_OUTPUT_LINES];
                 int n = ub_script_output(out, err, 4);

@@ -342,6 +342,8 @@ static void test_reuse(void)
     ub_game_stop(&g_g);
 }
 
+static void gui_frame(ub_game *g, f32 x, f32 y, bool press, bool release, int key, f64 t);
+
 static void frames(int n, vec3 move)
 {
     for (int i = 0; i < n; ++i) ub_game_update(&g_g, 1.0f / 60.0f, move, false);
@@ -355,7 +357,7 @@ static void test_demo_place(void)
     CHECK(ub_game_start(&g_g, &w, true));
     ub_script_stats st;
     ub_script_get_stats(&st);
-    CHECK(st.scripts == 5);
+    CHECK(st.scripts == 6); /* the server's; the panel's LocalScript starts with the first frame */
     i32 ws = ub_world_workspace(&g_g.world);
     i32 house = ub_world_find_child(&g_g.world, ws, "House");
     i32 door = ub_world_find_child(&g_g.world, house, "Door");
@@ -386,6 +388,80 @@ static void test_demo_place(void)
     CHECK(g_g.dead);
     frames(60 * 4, v3(0, 0, 0));
     CHECK(!g_g.dead);
+    /* the panel came with the player, kept its count through the death
+     * (ResetOnSpawn off) and is drawn; so are the sign and the door's label */
+    ub_script_get_stats(&st);
+    CHECK(st.scripts == 7);
+    i32 hud = ub_world_find_child(&g_g.world, g_g.player_gui, "DemoHud");
+    i32 panel = hud >= 0 ? ub_world_find_child(&g_g.world, hud, "Panel") : -1;
+    i32 stats = panel >= 0 ? ub_world_find_child(&g_g.world, panel, "Stats") : -1;
+    const ub_value *sv = stats >= 0 ? ub_world_prop_named(&g_g.world, stats, "Text") : NULL;
+    CHECK(sv && !strcmp(sv->v.str.s, "Doors opened: 1"));
+    if (sv) printf("  demo place: the panel says \"%s\"\n", sv->v.str.s);
+    ub_camera cam;
+    memset(&cam, 0, sizeof cam);
+    cam.pos = v3(0, 4, -8);
+    cam.fov_y = 1.2f;
+    cam.far_dist = 600;
+    gui_frame(&g_g, 400, 400, false, false, 0, 30.0);
+    ub_gui_render(g_g.gui, &g_g.world, &cam);
+    const int *rects;
+    int nr;
+    CHECK(ub_gui_screen(g_g.gui, &rects, &nr) != NULL && nr >= 1);
+    const ub_gui_quad *q;
+    int nq = ub_gui_quads(g_g.gui, &q);
+    CHECK(nq == 2); /* the sign and the door's label, both in view */
+    /* drawn by the software renderer over the real scene: the door's label
+     * is in front of the wall, so it shows (dark, see-through) */
+    {
+        static u32 px[320 * 240];
+        static u8 px8[320 * 240];
+        ub_framebuffer fb;
+        memset(&fb, 0, sizeof fb);
+        fb.format = UB_PIXEL_XRGB32;
+        fb.pixels = px;
+        fb.pixels8 = px8;
+        fb.width = 320;
+        fb.height = 240;
+        fb.pitch = 320;
+        ub_frame fr;
+        memset(&fr, 0, sizeof fr);
+        fr.backend = UB_BACKEND_SOFTWARE;
+        fr.width = 320;
+        fr.height = 240;
+        fr.fb = &fb;
+        char desc[64];
+        CHECK(ub_render_init(&fr, desc, sizeof desc));
+        fb.palette = ub_render_palette();
+        ub_render_env env = play_env(&g_g.world);
+        cam.pos = v3(0, 7, -12);
+        cam.pitch = -0.15f;
+        ub_render_begin(&fr, &cam, &env);
+        for (i32 pi = 0; pi < g_g.world.part_count; ++pi)
+            if (ub_game_part_visible(&g_g, pi)) {
+                ub_part_draw d = play_part_draw(&g_g.world.parts[pi]);
+                ub_render_part(&d);
+            }
+        play_gui_input(&g_g, &fr, &(ub_input){ .has_focus = true }, &cam, false, 31.0);
+        play_gui_draw_world(&g_g, &cam);
+        ub_render_end(NULL);
+        nq = ub_gui_quads(g_g.gui, &q);
+        f32 sx = 0, sy = 0;
+        int found = -1;
+        for (int i = 0; i < nq; ++i)
+            if (q[i].corners[0].z > 15) found = i; /* the door's, not the sign's */
+        CHECK(found >= 0);
+        if (found >= 0) {
+            vec3 mid = v3_scale(v3_add(q[found].corners[0], q[found].corners[2]), 0.5f);
+            CHECK(ub_render_project(&cam, 320, 240, mid, &sx, &sy));
+            u32 c = px[(int)sy * 320 + (int)sx];
+            int r = (int)(c >> 16 & 255), gg = (int)(c >> 8 & 255), b = (int)(c & 255);
+            /* the wall is brick red; the label's panel is a dark blue-grey */
+            CHECK(!(r > gg + 40 && r > b + 40));
+            if (r > gg + 40 && r > b + 40) printf("    the door's label is hidden: 0x%06x at %d,%d\n", c, (int)sx, (int)sy);
+        }
+        ub_render_shutdown();
+    }
     /* chat commands */
     ub_script_chatted("fast");
     CHECK(g_g.walk_speed == 32);

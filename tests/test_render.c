@@ -298,9 +298,58 @@ void test_render(void)
 
 /* Meshes: both detail levels are closed, outward-facing and within limits;
  * smooth faces have unit vertex normals. HD textures match the 64x64 ones. */
+/* GUI pictures in the world (BillboardGui, SurfaceGui): drawn where they
+ * are, hidden behind parts in front of them unless "on top", and the
+ * screen's GUI over everything. */
+static void test_image_quads(void)
+{
+    static u32 img_px[16 * 8];
+    for (int i = 0; i < 16 * 8; ++i) img_px[i] = 0xFFFF00FFu; /* opaque magenta */
+    ub_render_image img = { img_px, 16, 8, 16, 1, 1 };
+    CHECK(sw_init());
+    for (int pass = 0; pass < 2; ++pass) {
+        ub_framebuffer fb = make_fb(pass ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32);
+        fb.palette = ub_render_palette();
+        ub_camera cam = cam_at(v3(0, 0, -10), 0, 0, 60);
+        ub_render_env env = flat_env();
+        /* a wall at z = 5; a 4x2 picture in front of it (z = 2) and one behind (z = 8) */
+        ub_part_draw wall = part(UB_SHAPE_BOX, v3(0, 0, 5), v3(20, 20, 1), 0x404040, UB_MAT_PLASTIC);
+        for (int which = 0; which < 3; ++which) {
+            f32 z = which == 0 ? 2.0f : 8.0f;
+            vec3 c[4] = { v3(-2, 1, z), v3(2, 1, z), v3(2, -1, z), v3(-2, -1, z) };
+            sw_begin(&fb, &cam, &env);
+            sw_part(&wall);
+            ub_image_quad q;
+            q.img = img;
+            memcpy(q.c, c, sizeof c);
+            q.on_top = which == 2;
+            q.brightness = 1;
+            sw_image_quad(&q);
+            sw_end(NULL);
+            u32 mid = pass ? ub_palette[g_px8[(H / 2) * W + W / 2]] : g_px32[(H / 2) * W + W / 2];
+            bool magenta = (mid >> 16 & 255) > 200 && (mid >> 8 & 255) < 60 && (mid & 255) > 200;
+            if (which == 1) CHECK(!magenta); /* behind the wall */
+            else CHECK(magenta);
+            if ((which == 1) == magenta) printf("    quad %d (%s): centre 0x%06x\n", which, pass ? "8-bit" : "32-bit", mid);
+        }
+        /* the screen's GUI: blended over the frame, only in its rectangles */
+        static u32 ov[W * H];
+        memset(ov, 0, sizeof ov);
+        for (int y = 10; y < 20; ++y)
+            for (int x = 10; x < 20; ++x) ov[y * W + x] = 0x80008000u; /* green at half opacity, premultiplied */
+        ub_render_image oimg = { ov, W, H, W, 2, 1 };
+        int rect[4] = { 10, 10, 20, 20 };
+        u32 before = pass ? ub_palette[g_px8[15 * W + 15]] : g_px32[15 * W + 15];
+        sw_overlay(&fb, &oimg, rect, 1);
+        u32 after = pass ? ub_palette[g_px8[15 * W + 15]] : g_px32[15 * W + 15];
+        CHECK(after != before && (after >> 8 & 255) > (before >> 8 & 255));
+    }
+}
+
 /* The front end's 2D: rectangles, clipping, text widths, rays. */
 void test_render_2d(void)
 {
+    test_image_quads();
     for (int pass = 0; pass < 2; ++pass) {
         ub_framebuffer fb = make_fb(pass ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32);
         ub_frame frame;

@@ -54,7 +54,8 @@ src/core/       types, strings, UTF-8, safe paths, log, math (later containers, 
 src/audio/      WAV loader, software mixer (32 voices, pitch, pan)
 src/platform/   OS interface; win32/ backend (later posix/ for the server)
 src/render/     software and OpenGL renderers: meshes, procedural textures, palette
-src/world/      object tree, welds, place files (.ubx) and the Roblox importer
+src/world/      object tree, welds, typed properties, the class table, place files (.ubx) and the Roblox importer
+src/gui/        Roblox's GUIs: layout, a 2D rasteriser, text, PNG/BMP images, input
 src/physics/    convex hull + sphere collision, soft-step solver, sleeping islands, character
 src/game/       a running place: world + physics + character + scripts; the demo place
 src/script/     sandboxed Lua 5.1 + Roblox-style API, on its own small C library
@@ -79,9 +80,11 @@ tests/          host unit tests (make test)
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | **Built.** The door opens when walked into (unit test and Wine smoke test), and 28 hostile scripts are stopped or fail while the game carries on. Needs a run on a real install |
 | 6 | In-game editor | Build an obstacle course without writing code | **Built** as a separate program, `ubedit.exe`. A course built with editor actions only is played to the finish by the character (unit test); the real editor is driven through its UI in tests and under Wine. Needs a run on a real install |
 | 7 | Renderer polish + settings menu | In-game settings UI; more effects | **Built.** Settings menu (Esc) in the game, a shadow under the character, and NT 3.51/4.0 polish for modern PCs: only changed parts of the screen are sent, fullscreen display modes on NT 4.0+, steady-TSC timing, font fallback, icons. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
-| 8 | Loopback networking | Single-player runs entirely through replication | |
-| 9 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
-| 10 | Platform services | Server browser, accounts, publish/download places | |
+| 8A | Roblox GUIs (up to 2022) | Places' ScreenGuis, BillboardGuis and SurfaceGuis look and work as in Roblox, driven by their LocalScripts | **Built.** Every GUI class and property imported and saved, Roblox's layout rules, rounded/stroked/gradient drawing, rich text, images from a local folder, input, LocalScripts, remotes, UserInputService, Mouse, Camera. The demo has a working GUI. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
+| 8B | Roblox scripts (up to 2022) | 2022-era game scripts run unchanged | Luau syntax (type annotations, if-expressions, generalised iteration, string interpolation...), attributes and tags from files, more classes and services |
+| 9 | Loopback networking | Single-player runs entirely through replication | |
+| 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
+| 11 | Platform services | Server browser, accounts, publish/download places | |
 
 ## Multiplayer design notes
 
@@ -485,7 +488,50 @@ tests/          host unit tests (make test)
   a slow machine. That Esc cancels the text and does not open the menu,
   because text entry reports whether it was open at any point that frame.
 
+## Milestone 8A notes
+
+- **Typed properties** (`src/world/ub_props.c`): any instance can carry
+  named, typed values (UDim2, Color3, sequences, fonts, references...),
+  saved in a `PROP` chunk of `.ubx` files (key names are offsets into the
+  string pool, so files stay byte-stable). Clone copies them and points
+  references inside the copy at the copies.
+- **The class table** (`src/world/ub_classdb.inc`, from
+  `tools/gen_classdb.py`): the GUI classes, value objects, remotes and
+  bindables, their properties (type, enum, read-only or stored) and the
+  values a new one has, plus 62 of Roblox's enums, taken from rbx-dom's
+  reflection database. `Instance.new` fills in the defaults; the importer
+  fills in whatever an older file lacks.
+- **The importer** keeps every property of those classes, of every type
+  the binary format has but CFrame, Faces/Axes and physical properties.
+  Checked against rbx-test-files' XML copies, property by property.
+- **The GUI engine** (`src/gui/`): layers are laid out into flat element
+  lists only when the world's epoch moves (any property, name or parent
+  change bumps it) or the screen or the GUI's own state changes, and drawn
+  only when something visible changed. The screen's GUI is one premultiplied
+  picture; the software renderer blends just its covered rectangles into
+  the frame (through the palette in 256 colours), and OpenGL keeps it as a
+  texture, re-sending only the rectangles that changed. BillboardGuis and
+  SurfaceGuis are pictures on quads, depth-tested against the scene (in
+  OpenGL before the anti-aliasing resolve, which copies colour only).
+- **Text:** GDI draws each glyph white on black at four times its size and
+  Uniblox averages it down, so it is anti-aliased the same on every
+  Windows. A line is TextSize tall, as in Roblox (the em is scaled so
+  ascent + descent = TextSize). Advances come from one 256-pixel-per-em
+  table per face, so TextScaled's search costs no drawing.
+- **Scripts:** LocalScripts start on the first frame, once the screen size
+  is known, so AbsoluteSize and ViewportSize are right from the first line.
+  GUI events are queued by the engine and delivered at the start of the
+  next script frame, as are the computed properties' changed signals.
+  Remotes fire straight across (arguments are not copied, unlike Roblox).
+  StudsOffset is in the camera's axes, as in Roblox; the world-axes offset
+  is StudsOffsetWorldSpace (the demo's door label uses that).
+
 ## Open items
+
+- Milestone 8A on a real install: the demo's panel, message line, sign and
+  door label in the software renderer (NT 3.51, 32-bit and 256 colours) and
+  in OpenGL; click the panel's button; type in a text box. Send
+  `uniblox.log` and a screenshot.
 
 - Milestone 7 on a real install: on NT 3.51 with WINVBE, stand still and
   read the `Present:` line (it should show only a few percent changed). Try
