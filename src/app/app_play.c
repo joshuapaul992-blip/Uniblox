@@ -1,5 +1,6 @@
 /* Uniblox - playing a place on screen (see app_play.h). */
 #include "app/app_play.h"
+#include "gui/ub_gui.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
 #include "render/ub_mesh.h"
@@ -203,7 +204,8 @@ ub_camera play_view_camera(const ub_play_view *v, const ub_game *g)
     vec3 fwd = v3(fx * cp, ub_sinf(v->pitch), fz * cp);
     cam.pos = v3_sub(target, v3_scale(fwd, v->zoom));
     cam.focus = target;
-    cam.fov_y = (v->fov_deg > 10 ? v->fov_deg : 70.0f) * UB_PI / 180.0f;
+    f32 fov = g->script_fov > 1 ? g->script_fov : v->fov_deg > 10 ? v->fov_deg : 70.0f;
+    cam.fov_y = ub_clampf(fov, 1, 120) * UB_PI / 180.0f;
     cam.far_dist = 600.0f;
     return cam;
 }
@@ -247,4 +249,79 @@ void play_draw_blob_shadow(ub_game *g)
     d.material = UB_MAT_PLASTIC;
     d.flags = ub_draw_see_through((u8)(255 - (int)(150.0f * k))); /* about half covered on the ground */
     ub_render_part(&d);
+}
+
+/* ------------------------------------------------------------------ GUI */
+
+void play_gui_screen_size(const ub_frame *frame, int *w, int *h)
+{
+    if (frame->backend != UB_BACKEND_OPENGL && frame->fb) {
+        *w = frame->fb->width;
+        *h = frame->fb->height;
+    } else {
+        *w = frame->width;
+        *h = frame->height;
+    }
+}
+
+void play_gui_input(ub_game *g, const ub_frame *frame, const ub_input *in, const ub_camera *cam, bool look, f64 time)
+{
+    if (!g->gui) return;
+    int sw, sh;
+    play_gui_screen_size(frame, &sw, &sh);
+    ub_gui_input gi;
+    memset(&gi, 0, sizeof gi);
+    /* window pixels -> GUI screen pixels (smaller when software renders below the window size) */
+    gi.mouse_x = frame->width > 0 ? (f32)in->mouse_x * (f32)sw / (f32)frame->width : 0;
+    gi.mouse_y = frame->height > 0 ? (f32)in->mouse_y * (f32)sh / (f32)frame->height : 0;
+    for (int b = 0; b < 3; ++b) {
+        gi.down[b] = in->mouse_down[b];
+        gi.pressed[b] = in->mouse_pressed[b];
+        gi.released[b] = in->mouse_released[b];
+    }
+    gi.wheel = in->wheel / UB_WHEEL_NOTCH;
+    gi.text = in->text;
+    memcpy(gi.key_pressed, in->key_repeat, sizeof gi.key_pressed);
+    gi.mouse_free = !look && in->has_focus && !in->mouse_captured;
+    ub_gui_update(g->gui, &g->world, sw, sh, cam, &gi, time);
+    /* and the same input for scripts */
+    ub_game_input *si = &g->input;
+    si->mouse_dx = (f32)in->mouse_dx;
+    si->mouse_dy = (f32)in->mouse_dy;
+    si->mouse_x = gi.mouse_x;
+    si->mouse_y = gi.mouse_y;
+    memcpy(si->down, gi.down, sizeof si->down);
+    memcpy(si->pressed, gi.pressed, sizeof si->pressed);
+    memcpy(si->released, gi.released, sizeof si->released);
+    si->wheel = gi.wheel;
+    memcpy(si->key_down, in->key_down, sizeof si->key_down);
+    memcpy(si->key_pressed, in->key_pressed, sizeof si->key_pressed);
+    memcpy(si->key_released, in->key_released, sizeof si->key_released);
+    si->gui_mouse = ub_gui_mouse_taken(g->gui);
+    si->gui_keys = ub_gui_keyboard_taken(g->gui);
+    si->focused = in->has_focus;
+    si->screen_w = sw;
+    si->screen_h = sh;
+    if (cam) {
+        si->cam = *cam;
+        si->have_cam = true;
+    }
+}
+
+void play_gui_draw_world(ub_game *g, const ub_camera *cam)
+{
+    if (!g->gui) return;
+    ub_gui_render(g->gui, &g->world, cam);
+    const ub_gui_quad *q;
+    int n = ub_gui_quads(g->gui, &q);
+    for (int i = 0; i < n; ++i) ub_render_image_quad(&q[i].image, q[i].corners, q[i].on_top, q[i].brightness);
+}
+
+void play_gui_draw_screen(ub_game *g)
+{
+    if (!g->gui) return;
+    const int *rects;
+    int n;
+    const ub_render_image *img = ub_gui_screen(g->gui, &rects, &n);
+    if (img) ub_render_overlay(img, rects, n);
 }

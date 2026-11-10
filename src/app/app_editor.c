@@ -19,6 +19,7 @@
 #include "app/app.h"
 #include "app/app_editor.h"
 #include "app/app_play.h"
+#include "gui/ub_gui.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
 #include "core/ub_string.h"
@@ -1265,15 +1266,27 @@ void app_shutdown(void)
     ub_render_shutdown();
 }
 
+static ub_camera g_play_cam;
+static bool g_play_have_cam;
+static f64 g_play_t;
+
 static void play_frame(ub_frame *frame, const ub_input *in, f32 dt)
 {
-    if (in->key_pressed[UB_KEY_F5] || in->key_pressed[UB_KEY_ESCAPE]) {
+    /* the place's GUI first; a focused TextBox keeps Esc for itself */
+    bool gui_keys = g_game.gui && ub_gui_keyboard_taken(g_game.gui);
+    if (in->key_pressed[UB_KEY_F5] || (in->key_pressed[UB_KEY_ESCAPE] && !gui_keys)) {
         play_stop();
+        g_play_have_cam = false;
         return;
     }
+    g_play_t += dt;
+    play_gui_input(&g_game, frame, in, g_play_have_cam ? &g_play_cam : NULL, in->mouse_captured, g_play_t);
+    gui_keys = gui_keys || (g_game.gui && ub_gui_keyboard_taken(g_game.gui));
+    ub_input pin = *in;
+    if (g_game.gui && ub_gui_wheel_taken(g_game.gui)) pin.wheel = 0;
     vec3 move;
     bool jump;
-    play_view_input(&g_view, in, dt, true, true, &move, &jump);
+    play_view_input(&g_view, &pin, dt, !gui_keys, true, &move, &jump);
     ub_game_update(&g_game, dt, move, jump);
     g_game.jumped = false;
     g_game.landed_speed = 0;
@@ -1282,6 +1295,11 @@ static void play_frame(ub_frame *frame, const ub_input *in, f32 dt)
     ub_render_env env = play_env(&g_game.world);
     ub_render_begin(frame, &cam, &env);
     play_view_draw(&g_view, &g_game, true);
+    play_gui_draw_world(&g_game, &cam);
+    ub_render_end_scene();
+    play_gui_draw_screen(&g_game);
+    g_play_cam = cam;
+    g_play_have_cam = true;
     ui_begin(in, g_w, g_h, dt);
     int lh = ui_line_height();
     ui_panel_begin("playbar", ui_r(0, 0, g_w, lh + 12), false);

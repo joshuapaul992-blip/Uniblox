@@ -27,6 +27,8 @@ static struct {
     int text_px;               /* 0 = follows the window */
     bool text_in_frame;        /* software: draw text into the frame */
     int clip_x0, clip_y0, clip_x1, clip_y1; /* window pixels; x1 <= x0 = off */
+    ub_image_quad quads[64];   /* GUI in the world, this frame */
+    int nquads;
 } F;
 
 /* Fonts for measuring and for drawing text into a software frame. The same
@@ -143,6 +145,7 @@ void ub_render_begin(ub_frame *frame, const ub_camera *cam, const ub_render_env 
     F.cam = *cam;
     F.env = *env;
     F.count = 0;
+    F.nquads = 0;
     F.scene_done = false;
     F.clip_x1 = F.clip_x0 = 0;
     frame->text_count = 0;
@@ -158,18 +161,38 @@ void ub_render_part(const ub_part_draw *p)
     if (F.count < MAX_QUEUED_PARTS) F.parts[F.count++] = *p;
 }
 
+void ub_render_image_quad(const ub_render_image *img, const vec3 corners[4], bool on_top, f32 brightness)
+{
+    if (!img || !img->px || img->w <= 0 || img->h <= 0 || F.nquads >= 64 || F.scene_done) return;
+    ub_image_quad *q = &F.quads[F.nquads++];
+    q->img = *img;
+    for (int k = 0; k < 4; ++k) q->c[k] = corners[k];
+    q->on_top = on_top;
+    q->brightness = brightness;
+}
+
+void ub_render_overlay(const ub_render_image *img, const int *rects, int nrects)
+{
+    if (!F.ready || !F.frame || !img || !img->px || nrects <= 0) return;
+    ub_render_end_scene();
+    if (F.backend == UB_BACKEND_OPENGL) gl_overlay(img, rects, nrects);
+    else if (F.frame->fb) sw_overlay(F.frame->fb, img, rects, nrects);
+}
+
 void ub_render_end_scene(void)
 {
     if (!F.ready || F.scene_done) return;
     F.scene_done = true;
     if (F.backend == UB_BACKEND_OPENGL) {
-        gl_draw_scene(F.frame->width, F.frame->height, &F.cam, &F.env, F.parts, F.count, &F.stats);
+        gl_draw_scene(F.frame->width, F.frame->height, &F.cam, &F.env, F.parts, F.count, F.quads, F.nquads,
+                      &F.stats);
         gl_begin_2d(F.frame->width, F.frame->height);
         if (F.clip_x1 > F.clip_x0) gl_clip(F.clip_x0, F.clip_y0, F.clip_x1 - F.clip_x0, F.clip_y1 - F.clip_y0);
     } else if (F.frame->fb) {
         sw_begin(F.frame->fb, &F.cam, &F.env);
         for (int i = 0; i < F.static_count; ++i) sw_part(&F.statics[i]);
         for (int i = 0; i < F.count; ++i) sw_part(&F.parts[i]);
+        for (int i = 0; i < F.nquads; ++i) sw_image_quad(&F.quads[i]);
         sw_end(&F.stats);
     }
 }

@@ -6,8 +6,11 @@
 #include <time.h>
 
 #include <math.h>
+#include "app/app_play.h"
 #include "game/ub_demo_place.h"
 #include "game/ub_game.h"
+#include "gui/ub_gui.h"
+#include "world/ub_classes.h"
 #include "render/ub_texture.h"
 #include "script/ub_script.h"
 #include "test.h"
@@ -422,10 +425,91 @@ static void test_death(void)
     ub_game_stop(&g_g);
 }
 
+/* ------------------------------------------------------- the GUI API */
+
+static i32 add_gui(ub_world *w, i32 parent, const char *cls, const char *name)
+{
+    i32 i = ub_world_add(w, parent, UB_CLASS_OTHER, cls, name);
+    ub_cdb_fill_defaults(w, i, cls);
+    return i;
+}
+
+/* One frame as the game runs it: the GUI's input (mouse at x, y), the
+ * game, then the GUI drawn. */
+static void gui_frame(ub_game *g, f32 x, f32 y, bool press, bool release, int key, f64 t)
+{
+    ub_frame fr;
+    memset(&fr, 0, sizeof fr);
+    fr.backend = UB_BACKEND_SOFTWARE;
+    fr.width = 800;
+    fr.height = 636;
+    static ub_input in;
+    memset(&in, 0, sizeof in);
+    in.has_focus = true;
+    in.mouse_x = (int)x;
+    in.mouse_y = (int)y;
+    in.mouse_down[0] = press;
+    in.mouse_pressed[0] = press;
+    in.mouse_released[0] = release;
+    if (key) in.key_pressed[key] = in.key_down[key] = in.key_repeat[key] = true;
+    play_gui_input(g, &fr, &in, NULL, false, t);
+    ub_game_update(g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    ub_gui_render(g->gui, &g->world, NULL);
+}
+
+static void test_gui_api(void)
+{
+    char *src = read_text("tests/data/scripts/gui.lua");
+    CHECK(src != NULL);
+    if (!src) return;
+    ub_world w;
+    door_world(&w, NULL);
+    i32 sg = ub_world_add(&w, -1, UB_CLASS_FOLDER, "StarterGui", "StarterGui");
+    ub_cdb_fill_defaults(&w, sg, "StarterGui");
+    i32 hud = add_gui(&w, sg, "ScreenGui", "Hud");
+    i32 btn = add_gui(&w, hud, "TextButton", "Btn");
+    ub_value v;
+    v.type = UB_PV_UDIM2;
+    v.v.ud2.sx = 0; v.v.ud2.ox = 100; v.v.ud2.sy = 0; v.v.ud2.oy = 40;
+    ub_world_set_prop_named(&w, btn, "Size", &v);
+    v.v.ud2.ox = 10; v.v.ud2.oy = 10;
+    ub_world_set_prop_named(&w, btn, "Position", &v);
+    i32 ls = ub_world_add(&w, hud, UB_CLASS_OTHER, "LocalScript", "GuiTest");
+    ub_world_set_source(&w, ls, src);
+    w.inst[ls].flags |= UB_INST_CLIENT;
+    free(src);
+    i32 rs = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ReplicatedStorage", "ReplicatedStorage");
+    add_gui(&w, rs, "RemoteEvent", "Ping");
+    add_gui(&w, rs, "RemoteFunction", "Ask");
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Server",
+               "local RS = game:GetService('ReplicatedStorage')\n"
+               "RS.Ping.OnServerEvent:Connect(function(player, x) RS.Ping:FireClient(player, x * 2) end)\n"
+               "RS.Ask.OnServerInvoke = function(player, a, b) return a + b, player.Name end\n");
+    CHECK(ub_game_start(&g_g, &w, true));
+    /* the screen is 800x636; the button's middle is at (60, 30) in GUI coordinates */
+    int ready_at = -1;
+    for (int i = 0; i < 900 && find_result(&g_g, "gui done") < 0; ++i) {
+        if (ready_at < 0 && find_result(&g_g, "gui ready") >= 0) ready_at = i;
+        int k = ready_at >= 0 ? i - ready_at : -1;
+        bool on = k >= 2; /* away from the button until the script is ready, then onto it */
+        gui_frame(&g_g, on ? 60 : 500, on ? 36 + 30 : 500, k == 5, k == 6, k == 8 ? 'E' : 0, i / 60.0);
+    }
+    CHECK(find_result(&g_g, "gui done") >= 0);
+    bool ok = find_result(&g_g, "gui ok") >= 0;
+    CHECK(ok);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (!ok || st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 void test_game(void)
 {
     test_door();
     test_api();
+    test_gui_api();
     test_hostile();
     test_reuse();
     test_death();

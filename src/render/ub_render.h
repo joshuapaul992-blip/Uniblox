@@ -140,6 +140,16 @@ void ub_render_clip(int x, int y, int w, int h);
 void ub_render_screen_ray(const ub_camera *cam, int width, int height, f32 x, f32 y, vec3 *origin, vec3 *dir);
 /* Where a point lands in the window; false if it is behind the camera. */
 bool ub_render_project(const ub_camera *cam, int width, int height, vec3 p, f32 *sx, f32 *sy);
+/* GUI in the world (BillboardGui, SurfaceGui): a picture on the quad of
+ * its four corners (top-left, top-right, bottom-right, bottom-left, world
+ * positions), hidden behind parts in front of it unless `on_top`. Between
+ * begin and the end of the scene; drawn after the parts. */
+void ub_render_image_quad(const ub_render_image *img, const vec3 corners[4], bool on_top, f32 brightness);
+/* The screen's GUI over the scene: a picture the size of the frame, of
+ * which only `nrects` rectangles (x0, y0, x1, y1 each) hold anything.
+ * After the scene, before text. */
+void ub_render_overlay(const ub_render_image *img, const int *rects, int nrects);
+
 void ub_render_end(ub_render_stats *stats);
 
 /* The 8-bit palette, for ub_framebuffer.palette. */

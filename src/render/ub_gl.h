@@ -92,6 +92,12 @@ typedef char GLchar;
 #define GL_TEXTURE_WRAP_T 0x2803
 #define GL_REPEAT 0x2901
 #define GL_POLYGON_OFFSET_FILL 0x8037
+#ifndef GL_ONE
+#define GL_ONE 1
+#endif
+#ifndef GL_RGBA
+#define GL_RGBA 0x1908
+#endif
 #define GL_VERTEX_ARRAY 0x8074
 #define GL_NORMAL_ARRAY 0x8075
 #define GL_COLOR_ARRAY 0x8076
@@ -149,6 +155,7 @@ typedef char GLchar;
     X(void, glDeleteTextures, (GLsizei, const GLuint *), NULL) \
     X(void, glBindTexture, (GLenum, GLuint), NULL) \
     X(void, glTexImage2D, (GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *), NULL) \
+    X(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *), NULL) \
     X(void, glTexParameteri, (GLenum, GLenum, GLint), NULL) \
     X(void, glTexParameterf, (GLenum, GLenum, GLfloat), NULL) \
     X(void, glTexEnvi, (GLenum, GLenum, GLint), NULL) \
@@ -165,6 +172,7 @@ typedef char GLchar;
     X(void, glBegin, (GLenum), NULL) \
     X(void, glEnd, (void), NULL) \
     X(void, glVertex2f, (GLfloat, GLfloat), NULL) \
+    X(void, glVertex3f, (GLfloat, GLfloat, GLfloat), NULL) \
     X(void, glColor4f, (GLfloat, GLfloat, GLfloat, GLfloat), NULL) \
     X(void, glTexCoord2f, (GLfloat, GLfloat), NULL) \
     X(void, glLightfv, (GLenum, GLenum, const GLfloat *), NULL) \

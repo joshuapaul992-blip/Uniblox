@@ -662,3 +662,125 @@ void sw_part(const ub_part_draw *p)
         raster_poly(pv, n, span);
     }
 }
+
+/* ------------------------------------------------------- GUI pictures */
+
+/* the picture the current span draws (BillboardGui, SurfaceGui) */
+static const ub_image_quad *g_q;
+static u32 g_q_bright;   /* brightness, 8.8 fixed point */
+static bool g_q_ztest;
+
+static inline u32 over32(u32 dst, u32 src, u32 bright)
+{
+    u32 a = src >> 24;
+    if (!a) return dst;
+    u32 r = (src >> 16) & 255, g = (src >> 8) & 255, b = src & 255;
+    if (bright != 256) {
+        r = UB_MIN(r * bright >> 8, 255u);
+        g = UB_MIN(g * bright >> 8, 255u);
+        b = UB_MIN(b * bright >> 8, 255u);
+    }
+    if (a == 255) return (r << 16) | (g << 8) | b;
+    u32 ia = 255 - a;
+    u32 dr = (dst >> 16) & 255, dg = (dst >> 8) & 255, db = dst & 255;
+    dr = UB_MIN(r + (dr * ia + 127) / 255, 255u);
+    dg = UB_MIN(g + (dg * ia + 127) / 255, 255u);
+    db = UB_MIN(b + (db * ia + 127) / 255, 255u);
+    return (dr << 16) | (dg << 8) | db;
+}
+
+/* 8-bit frames: blend in RGB through the palette, then back to an index */
+static inline u8 over8(const u32 *pal, u8 dst, u32 src, u32 bright, int x, int y)
+{
+    u32 a = src >> 24;
+    if (!a) return dst;
+    u32 c = over32(pal ? pal[dst] : 0, src, bright);
+    return ub_palette_match((int)((c >> 16) & 255), (int)((c >> 8) & 255), (int)(c & 255), (x & 1) | ((y & 1) << 1));
+}
+
+static void span_img(int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
+{
+    const ub_render_image *im = &g_q->img;
+    u32 *zrow = R.zbuf + y * R.zw;
+    u32 zf = (u32)(i64)(iz * ZSCALE);
+    u32 dz = (u32)clamp_fixed(R.g.diz_dx * ZSCALE);
+    bool idx8 = R.fb->format == UB_PIXEL_INDEX8;
+    for (int x = x0; x < x1; ++x, iz += R.g.diz_dx, uz += R.g.duz_dx, vz += R.g.dvz_dx, zf += dz) {
+        if (g_q_ztest && zf <= zrow[x]) continue; /* behind a part */
+        f32 z = 1.0f / (iz > 1e-6f ? iz : 1e-6f);
+        int tx = (int)(uz * z), ty = (int)(vz * z);
+        if (tx < 0 || ty < 0 || tx >= im->w || ty >= im->h) continue;
+        u32 s = im->px[(size_t)ty * im->pitch + tx];
+        if (!(s >> 24)) continue;
+        if (idx8) {
+            u8 *p = &R.fb->pixels8[y * R.fb->pitch + x];
+            *p = over8(R.fb->palette, *p, s, g_q_bright, x, y);
+        } else {
+            u32 *p = &R.fb->pixels[y * R.fb->pitch + x];
+            *p = over32(*p, s, g_q_bright);
+        }
+    }
+    R.st.pixels_tested += (u32)(x1 - x0);
+}
+
+void sw_image_quad(const ub_image_quad *q)
+{
+    if (!R.ready || !R.fb || !R.zbuf || !q->img.px) return;
+    cvert a[MAX_CLIP], b[MAX_CLIP];
+    const f32 uv[4][2] = { { 0, 0 }, { (f32)q->img.w, 0 }, { (f32)q->img.w, (f32)q->img.h }, { 0, (f32)q->img.h } };
+    for (int k = 0; k < 4; ++k) {
+        vec3 v = to_view(v3_sub(q->c[k], R.cam_pos));
+        a[k].x = v.x;
+        a[k].y = v.y;
+        a[k].z = v.z;
+        a[k].u = uv[k][0];
+        a[k].v = uv[k][1];
+    }
+    int n = 4;
+    cvert *in = a, *out = b;
+    for (int k = 0; k < 5 && n >= 3; ++k) {
+        n = clip_poly(in, n, out, R.clip[k]);
+        cvert *t = in;
+        in = out;
+        out = t;
+    }
+    if (n < 3) return;
+    pvert pv[MAX_CLIP];
+    for (int i = 0; i < n; ++i) {
+        f32 iz = 1.0f / (in[i].z > NEAR_Z * 0.5f ? in[i].z : NEAR_Z * 0.5f);
+        pv[i].sx = R.cx + R.focal * in[i].x * iz;
+        pv[i].sy = R.cy - R.focal * in[i].y * iz;
+        pv[i].iz = iz;
+        pv[i].uz = in[i].u * iz;
+        pv[i].vz = in[i].v * iz;
+        if (!(pv[i].sx > -1.0e5f && pv[i].sx < 1.0e5f && pv[i].sy > -1.0e5f && pv[i].sy < 1.0e5f)) return;
+    }
+    g_q = q;
+    g_q_bright = (u32)(ub_clampf(q->brightness, 0, 4) * 256.0f);
+    g_q_ztest = !q->on_top;
+    /* either winding: the polygon walker does not care */
+    raster_poly(pv, n, span_img);
+    g_q = NULL;
+}
+
+void sw_overlay(ub_framebuffer *fb, const ub_render_image *img, const int *rects, int nrects)
+{
+    int W = UB_MIN(fb->width, img->w), H = UB_MIN(fb->height, img->h);
+    bool idx8 = fb->format == UB_PIXEL_INDEX8;
+    for (int r = 0; r < nrects; ++r) {
+        int x0 = UB_MAX(rects[r * 4], 0), y0 = UB_MAX(rects[r * 4 + 1], 0);
+        int x1 = UB_MIN(rects[r * 4 + 2], W), y1 = UB_MIN(rects[r * 4 + 3], H);
+        for (int y = y0; y < y1; ++y) {
+            const u32 *src = img->px + (size_t)y * img->pitch;
+            if (idx8) {
+                u8 *dst = fb->pixels8 + (size_t)y * fb->pitch;
+                for (int x = x0; x < x1; ++x)
+                    if (src[x] >> 24) dst[x] = over8(fb->palette, dst[x], src[x], 256, x, y);
+            } else {
+                u32 *dst = fb->pixels + (size_t)y * fb->pitch;
+                for (int x = x0; x < x1; ++x)
+                    if (src[x] >> 24) dst[x] = over32(dst[x], src[x], 256);
+            }
+        }
+    }
+}

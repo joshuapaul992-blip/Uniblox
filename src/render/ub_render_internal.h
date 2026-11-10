@@ -4,7 +4,16 @@
 
 #include "render/ub_render.h"
 
+typedef struct {
+    ub_render_image img;
+    vec3 c[4];
+    bool on_top;
+    f32 brightness;
+} ub_image_quad;
+
 /* software backend (ub_render_sw.c) */
+void sw_image_quad(const ub_image_quad *q);       /* after the parts, before sw_end */
+void sw_overlay(ub_framebuffer *fb, const ub_render_image *img, const int *rects, int nrects);
 bool sw_init(void);
 void sw_shutdown(void);
 void sw_begin(ub_framebuffer *fb, const ub_camera *cam, const ub_render_env *env);
@@ -17,7 +26,9 @@ void gl_shutdown(void);
 void gl_set_quality(ub_quality q);
 void gl_set_static(const ub_part_draw *parts, int count);
 void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_env *env,
-                   const ub_part_draw *parts, int count, ub_render_stats *stats);
+                   const ub_part_draw *parts, int count, const ub_image_quad *quads, int nquads,
+                   ub_render_stats *stats);
+void gl_overlay(const ub_render_image *img, const int *rects, int nrects);
 void gl_begin_2d(int width, int height);
 void gl_text(int x, int y, const char *utf8, u32 color);
 int gl_line_height(void);

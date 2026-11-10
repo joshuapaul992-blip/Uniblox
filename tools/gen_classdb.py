@@ -36,7 +36,7 @@ EXTRA_ENUMS = [
     "KeyCode", "UserInputType", "UserInputState", "MouseBehavior", "CoreGuiType", "NormalId", "FontWeight",
     "FontStyle", "Font", "ThumbnailType", "ThumbnailSize", "EasingStyle", "EasingDirection", "PlaybackState",
     "TextInputType", "SelectionBehavior", "CameraType", "ModifierKey", "ScreenOrientation", "FillDirection",
-    "HorizontalAlignment", "VerticalAlignment", "SortOrder", "FontSize",
+    "HorizontalAlignment", "VerticalAlignment", "SortOrder", "FontSize", "TweenStatus", "Platform",
 ]
 
 # properties never stored as data (Uniblox handles them itself or they mean nothing here)

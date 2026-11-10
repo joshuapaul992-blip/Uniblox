@@ -15,10 +15,26 @@
 
 #include "physics/ub_character.h"
 #include "physics/ub_physics.h"
+#include "render/ub_render.h"
 #include "world/ub_world.h"
 
 #define UB_GAME_MAX_STEPS 12          /* per frame: below 10 fps the game slows down */
 #define UB_GAME_RESPAWN_TIME 3.0f     /* seconds from dying to coming back */
+
+/* The frame's input, as scripts see it (UserInputService, Player:GetMouse,
+ * workspace.CurrentCamera). The app fills it before ub_game_update. */
+typedef struct {
+    f32 mouse_x, mouse_y;       /* screen (frame) pixels from the top-left, inset included */
+    f32 mouse_dx, mouse_dy;     /* turning the camera */
+    bool down[3], pressed[3], released[3];
+    int wheel;                  /* notches */
+    bool key_down[256], key_pressed[256], key_released[256];
+    bool gui_mouse, gui_keys;   /* the GUI took them (gameProcessedEvent) */
+    bool focused;
+    int screen_w, screen_h;
+    ub_camera cam;
+    bool have_cam;
+} ub_game_input;
 
 /* What a script changed on a part. */
 enum {
@@ -43,6 +59,10 @@ typedef struct ub_game {
 
     /* the player and their character (instance indices) */
     i32 players, player, char_model, char_root, humanoid;
+    i32 player_gui, backpack, player_scripts;  /* the player's PlayerGui, Backpack and PlayerScripts */
+    struct ub_gui *gui;         /* the GUI engine (gui/ub_gui.h), laid out from player_gui */
+    ub_game_input input;
+    f32 script_fov;             /* Camera.FieldOfView set by a script (degrees), 0 = the player's setting */
     f32 health, max_health;
     f32 walk_speed, jump_height;
     bool dead;
@@ -98,5 +118,8 @@ vec3 ub_game_root_position(const ub_game *g); /* HumanoidRootPart's centre */
 void ub_game_set_velocity(ub_game *g, vec3 v);
 /* Player.RespawnLocation: come back on top of this part (-1: the place's spawn). */
 void ub_game_set_respawn_location(ub_game *g, i32 part_inst);
+/* The player's GUI from StarterGui: all of it at the start; after a
+ * respawn, what has ResetOnSpawn again. Returns the instances added. */
+int ub_game_fill_player_gui(ub_game *g, bool initial, i32 *added, int max);
 
 #endif

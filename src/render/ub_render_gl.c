@@ -573,9 +573,191 @@ void gl_set_quality(ub_quality q)
     G.quality = q;
 }
 
+/* ------------------------------------------------------ GUI pictures */
+
+/* Pictures from the GUI, kept as textures until their version changes.
+ * Sizes are rounded up to powers of two (GL 1.1); the pixels are turned
+ * from 0xAARRGGBB words into RGBA bytes here, so no BGRA extension is
+ * needed. */
+#define IMG_TEXTURES 64
+static struct {
+    u32 id, version;
+    GLuint tex;
+    int w, h, tw, th;
+    u32 used;
+} g_imgtex[IMG_TEXTURES];
+static u32 g_img_tick;
+static u8 *g_swz;
+static size_t g_swz_cap;
+
+static int pow2(int v)
+{
+    int p = 1;
+    while (p < v) p *= 2;
+    return p;
+}
+
+static void free_images(void)
+{
+    for (int i = 0; i < IMG_TEXTURES; ++i)
+        if (g_imgtex[i].tex) ubgl.glDeleteTextures(1, &g_imgtex[i].tex);
+    memset(g_imgtex, 0, sizeof g_imgtex);
+    plat_free(g_swz);
+    g_swz = NULL;
+    g_swz_cap = 0;
+}
+
+/* Uploads a rectangle of the picture into the bound texture. */
+static void upload_rect(const ub_render_image *img, int x0, int y0, int x1, int y1)
+{
+    x0 = UB_MAX(x0, 0);
+    y0 = UB_MAX(y0, 0);
+    x1 = UB_MIN(x1, img->w);
+    y1 = UB_MIN(y1, img->h);
+    if (x1 <= x0 || y1 <= y0) return;
+    size_t need = (size_t)(x1 - x0) * (size_t)(y1 - y0) * 4;
+    if (need > g_swz_cap) {
+        plat_free(g_swz);
+        g_swz = (u8 *)plat_alloc(need);
+        g_swz_cap = g_swz ? need : 0;
+        if (!g_swz) return;
+    }
+    u8 *d = g_swz;
+    for (int y = y0; y < y1; ++y) {
+        const u32 *row = img->px + (size_t)y * img->pitch;
+        for (int x = x0; x < x1; ++x) {
+            u32 c = row[x];
+            d[0] = (u8)(c >> 16);
+            d[1] = (u8)(c >> 8);
+            d[2] = (u8)c;
+            d[3] = (u8)(c >> 24);
+            d += 4;
+        }
+    }
+    ubgl.glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    ubgl.glTexSubImage2D(GL_TEXTURE_2D, 0, x0, y0, x1 - x0, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE, g_swz);
+}
+
+/* The texture for a picture, up to date; rects (if any) limit what is
+ * sent when only part of it changed. */
+static int image_texture(const ub_render_image *img, const int *rects, int nrects)
+{
+    g_img_tick++;
+    int slot = -1, oldest = 0;
+    for (int i = 0; i < IMG_TEXTURES; ++i) {
+        if (g_imgtex[i].tex && g_imgtex[i].id == img->id) {
+            slot = i;
+            break;
+        }
+        if (g_imgtex[i].used < g_imgtex[oldest].used) oldest = i;
+    }
+    bool fresh = false;
+    if (slot < 0) {
+        slot = oldest;
+        if (g_imgtex[slot].tex) ubgl.glDeleteTextures(1, &g_imgtex[slot].tex);
+        memset(&g_imgtex[slot], 0, sizeof g_imgtex[slot]);
+        g_imgtex[slot].id = img->id;
+        fresh = true;
+    }
+    g_imgtex[slot].used = g_img_tick;
+    int tw = pow2(img->w), th = pow2(img->h);
+    if (!g_imgtex[slot].tex || g_imgtex[slot].tw != tw || g_imgtex[slot].th != th) {
+        if (g_imgtex[slot].tex) ubgl.glDeleteTextures(1, &g_imgtex[slot].tex);
+        ubgl.glGenTextures(1, &g_imgtex[slot].tex);
+        ubgl.glBindTexture(GL_TEXTURE_2D, g_imgtex[slot].tex);
+        ubgl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        ubgl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        ubgl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        ubgl.glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        ubgl.glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, tw, th, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        g_imgtex[slot].tw = tw;
+        g_imgtex[slot].th = th;
+        fresh = true;
+    } else {
+        ubgl.glBindTexture(GL_TEXTURE_2D, g_imgtex[slot].tex);
+    }
+    if (fresh || g_imgtex[slot].version != img->version || g_imgtex[slot].w != img->w || g_imgtex[slot].h != img->h) {
+        if (!fresh && rects && nrects > 0 && g_imgtex[slot].w == img->w && g_imgtex[slot].h == img->h) {
+            /* the screen's GUI: what it covered last time was cleared, so send those too */
+            static int last[64 * 4];
+            static int nlast;
+            for (int r = 0; r < nlast; ++r) upload_rect(img, last[r * 4], last[r * 4 + 1], last[r * 4 + 2], last[r * 4 + 3]);
+            for (int r = 0; r < nrects; ++r) upload_rect(img, rects[r * 4], rects[r * 4 + 1], rects[r * 4 + 2], rects[r * 4 + 3]);
+            nlast = UB_MIN(nrects, 64);
+            memcpy(last, rects, sizeof(int) * 4 * (size_t)nlast);
+        } else {
+            upload_rect(img, 0, 0, img->w, img->h);
+        }
+        g_imgtex[slot].version = img->version;
+        g_imgtex[slot].w = img->w;
+        g_imgtex[slot].h = img->h;
+    }
+    return slot;
+}
+
+static void draw_image_quads(const ub_image_quad *q, int n, const mat4 *proj, const mat4 *view)
+{
+    if (n <= 0) return;
+    ubgl.glMatrixMode(GL_PROJECTION);
+    ubgl.glLoadMatrixf(proj->m);
+    ubgl.glMatrixMode(GL_MODELVIEW);
+    ubgl.glLoadMatrixf(view->m);
+    ubgl.glDisable(GL_CULL_FACE);
+    ubgl.glDepthMask(GL_FALSE);
+    ubgl.glEnable(GL_BLEND);
+    ubgl.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA); /* the pictures are premultiplied */
+    ubgl.glEnable(GL_TEXTURE_2D);
+    ubgl.glTexEnvi(GL_TEXTURE_ENV, GL_TEXTURE_ENV_MODE, GL_MODULATE);
+    ubgl.glEnable(GL_POLYGON_OFFSET_FILL);
+    ubgl.glPolygonOffset(-1.0f, -2.0f);
+    for (int i = 0; i < n; ++i) {
+        int s = image_texture(&q[i].img, NULL, 0);
+        f32 u1 = (f32)q[i].img.w / (f32)g_imgtex[s].tw, v1 = (f32)q[i].img.h / (f32)g_imgtex[s].th;
+        if (q[i].on_top) ubgl.glDisable(GL_DEPTH_TEST);
+        else ubgl.glEnable(GL_DEPTH_TEST);
+        f32 b = ub_clampf(q[i].brightness, 0, 1);
+        ubgl.glColor4f(b, b, b, 1);
+        ubgl.glBegin(GL_QUADS);
+        ubgl.glTexCoord2f(0, 0);   ubgl.glVertex3f(q[i].c[0].x, q[i].c[0].y, q[i].c[0].z);
+        ubgl.glTexCoord2f(u1, 0);  ubgl.glVertex3f(q[i].c[1].x, q[i].c[1].y, q[i].c[1].z);
+        ubgl.glTexCoord2f(u1, v1); ubgl.glVertex3f(q[i].c[2].x, q[i].c[2].y, q[i].c[2].z);
+        ubgl.glTexCoord2f(0, v1);  ubgl.glVertex3f(q[i].c[3].x, q[i].c[3].y, q[i].c[3].z);
+        ubgl.glEnd();
+    }
+    ubgl.glDisable(GL_POLYGON_OFFSET_FILL);
+    ubgl.glEnable(GL_DEPTH_TEST);
+    ubgl.glDepthMask(GL_TRUE);
+    ubgl.glDisable(GL_BLEND);
+    ubgl.glEnable(GL_CULL_FACE);
+}
+
+void gl_overlay(const ub_render_image *img, const int *rects, int nrects)
+{
+    if (!G.ready || nrects <= 0) return;
+    int s = image_texture(img, rects, nrects);
+    ubgl.glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    ubgl.glColor4f(1, 1, 1, 1);
+    f32 sx = 2.0f / (f32)G.width, sy = 2.0f / (f32)G.height;
+    f32 tw = (f32)g_imgtex[s].tw, th = (f32)g_imgtex[s].th;
+    ubgl.glBegin(GL_QUADS);
+    for (int r = 0; r < nrects; ++r) {
+        f32 x0 = (f32)UB_MAX(rects[r * 4], 0), y0 = (f32)UB_MAX(rects[r * 4 + 1], 0);
+        f32 x1 = (f32)UB_MIN(rects[r * 4 + 2], img->w), y1 = (f32)UB_MIN(rects[r * 4 + 3], img->h);
+        if (x1 <= x0 || y1 <= y0) continue;
+        f32 X0 = x0 * sx - 1.0f, X1 = x1 * sx - 1.0f, Y0 = 1.0f - y0 * sy, Y1 = 1.0f - y1 * sy;
+        ubgl.glTexCoord2f(x0 / tw, y0 / th); ubgl.glVertex2f(X0, Y0);
+        ubgl.glTexCoord2f(x1 / tw, y0 / th); ubgl.glVertex2f(X1, Y0);
+        ubgl.glTexCoord2f(x1 / tw, y1 / th); ubgl.glVertex2f(X1, Y1);
+        ubgl.glTexCoord2f(x0 / tw, y1 / th); ubgl.glVertex2f(X0, Y1);
+    }
+    ubgl.glEnd();
+    ubgl.glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+}
+
 void gl_shutdown(void)
 {
     if (!G.ready) return;
+    free_images();
     free_font();
     free_msaa();
     ubgl.glDeleteTextures(UB_MAT_COUNT, G.tex);
@@ -944,7 +1126,8 @@ static mat4 shadow_pass(const ub_camera *cam, const ub_render_env *env)
 }
 
 void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_env *env,
-                   const ub_part_draw *parts, int count, ub_render_stats *stats)
+                   const ub_part_draw *parts, int count, const ub_image_quad *quads, int nquads,
+                   ub_render_stats *stats)
 {
     if (!G.ready || width <= 0 || height <= 0) return;
     G.width = width;
@@ -1093,6 +1276,9 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
         ubgl.glDisable(GL_COLOR_MATERIAL);
         ubgl.glDisable(GL_FOG);
     }
+    /* GUI in the world, against the scene's depth (before the resolve,
+     * which copies colour only) */
+    draw_image_quads(quads, nquads, &proj, &view);
 
     if (msaa) { /* resolve the anti-aliased image into the window */
         ubgl.glBindFramebuffer(GL_READ_FRAMEBUFFER, G.msaa_fbo);
