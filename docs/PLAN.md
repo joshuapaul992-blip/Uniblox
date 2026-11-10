@@ -85,6 +85,7 @@ tests/          host unit tests (make test)
 | 8C | Real Roblox games from .rbxl | Open a 2022 game's place file and play it | **Built**, but terrain and decals are not done. Unions and MeshParts keep their shape (the collision pieces saved in every file, drawn and collided with), `.mesh` files and sounds from a local content folder, SpecialMeshes, Atmosphere; R15/R6 rigs with Motor6D, joints from scripts, Tools, Backpack and hotbar, Teams and team spawns; hinges (motor, servo), ball sockets, prismatic, ropes, rods, springs and every body mover; CFrame properties; XML `.rbxlx`/`.rbxmx`; a 20,000-part place loads in about a second. Passes unit tests and the Wine smoke tests. Needs a run on a real install with real 2022 places. Not done: terrain (its format is not documented), decals and textures, animations |
 | 9A | Client UI + a fast renderer for NT 3.51/4.0 | A 2021-style client UI (chat, player list with leaderstats, health, notifications, game menu); a renderer faster than the software one where there is no OpenGL (WINVBE) | **Built.** The client UI in Uniblox's own look, fed by `SetCore`, `SetCoreGuiEnabled` and `Chat:Chat`; the fast software renderer (sorted, coarse tile depth, longer perspective steps, packed texture coordinates, every processor), about twice as fast as the plain one on the demo place under Wine. Passes unit tests and the Wine smoke tests. Needs a run on a real install (NT 3.51/4.0 with WINVBE, ideally with two processors) |
 | 9B | Camera | Better zooming, first person, shift lock | **Built.** Eased zoom from 0.5 to 128 studs (wheel, I/O) with the place's limits, first person below 2 studs, shift lock (Shift), walls pulling the camera in, 80-degree pitch; CameraMode, zoom limits, mouse-lock and occlusion settings from StarterPlayer and Player, MouseBehavior, Scriptable and Fixed cameras. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
+| 9C | A better-looking fast renderer | The NT 3.51/4.0 fast renderer looks closer to the OpenGL one | **Built.** Quality levels: medium adds coloured hemisphere and sun light, smooth (Gouraud) curved parts with highlights, level of detail, mipmaps, fog and the sun; high adds soft sun shadows (shadow map and a deferred pass). Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 9 | Loopback networking | Single-player runs entirely through replication | |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
@@ -626,7 +627,40 @@ tests/          host unit tests (make test)
   clipped, reporting motion), on whenever the camera wants it. The GUI and
   scripts are given the middle of the screen as the mouse position.
 
+## Milestone 9C notes
+
+All of it is in `render/ub_render_sw.c`, in the fast renderer only (the
+plain one, and the fast one at low, draw as before).
+
+- **Colour tables** are keyed by colour, material and light per channel;
+  ramps for smooth faces by colour and a coarse tint. The cache has 2048
+  slots; a slot in use this frame is never replaced (a clash takes a table
+  from the frame's pool), since drawing happens after the whole scene is
+  set up.
+- **Mipmaps** (`ub_texture_mip`) are the 64×64 texture averaged over 2^k
+  squares and kept at 64×64, so the packed-coordinate lookup is the same.
+  The level is picked per span segment from the texture's footprint along
+  the row and down the column.
+- **Shadows:**
+  - The map: 512×512 texels of 0.25 studs, its middle on the texel grid
+    at the camera's focus. The casters are gathered in `sw_part` before
+    frustum culling. They're drawn by their faces turned away from the sun,
+    so a lit face is never compared with itself.
+  - Each face's share of sunlight is quantized to 3 bits and kept in the
+    low bits of its depths; the span setup masks them in, so there's no
+    per-pixel cost.
+  - `finish_rows` runs per row of tiles. It reconstructs each pixel's
+    position from its depth, takes four bilinear-weighted map texels, and
+    shares the result with the right-hand neighbour on the same surface.
+    It also adds fog, read from a table indexed by the depth's float bits.
+  - In 256 colours, palette remap tables are used: 4 dither cells × 8
+    shadow levels × 8 fog levels. Fog is off there.
+
 ## Open items
+
+- Milestone 9C on a real install: with `renderer=fast` on NT 3.51 or 4.0,
+  press F5 at each quality (F6 switches) and send `uniblox.log`; try 256
+  colours (F8) at high.
 
 - Milestone 9B on a real install: zoom into first person and out, try
   shift lock (Shift) while walking and jumping, stand with your back to a

@@ -125,8 +125,9 @@ import -window root "${SHOT%.png}-help.png"
 xdotool key r; sleep 0.3; xdotool key Escape; sleep 0.3 # reset? no
 xdotool key s; sleep 0.5                                # Settings
 import -window root "${SHOT%.png}-settings.png"
-# Frame rate cap > (240): the 7th row with software, the 5th with OpenGL (no resolution, colours, sending rows)
-FPS_ROW_Y=$([ "$RENDERER" = opengl ] && echo 275 || echo 321)
+# Frame rate cap > (240): the 7th row with software, the 5th with OpenGL (no resolution, colours, sending rows),
+# the 8th with the fast renderer (graphics quality too); rows are 23 pixels apart
+FPS_ROW_Y=$(case "$RENDERER" in opengl) echo 275;; fast) echo 344;; *) echo 321;; esac)
 xdotool mousemove $((X + 742)) $((Y + FPS_ROW_Y)); sleep 0.3; xdotool click 1; sleep 0.5
 xdotool key Escape; sleep 0.3; xdotool key Escape; sleep 0.5                         # back to the game menu, resume
 xdotool key F11; sleep 1.5                              # fullscreen
