@@ -381,6 +381,86 @@ static void test_rubble(void)
     ub_world_free(&w);
 }
 
+/* ------------------------------------------------- touches and changes */
+
+static int count_touch(const ub_physics *ph, i32 pa, i32 pb)
+{
+    int n = 0;
+    for (i32 i = 0; i < ph->touch_count; ++i)
+        n += (ph->touches[i].a == pa && ph->touches[i].b == pb) || (ph->touches[i].a == pb && ph->touches[i].b == pa);
+    return n;
+}
+
+static void test_touch_and_sync(void)
+{
+    ub_world w;
+    ground(&w);
+    i32 floor_part = w.inst[1].part;
+    i32 box = add(&w, UB_SHAPE_BOX, v3(0, 3, 0), v3(2, 2, 2), false, UB_MAT_PLASTIC);
+    i32 zone = add(&w, UB_SHAPE_BOX, v3(10, 3, 0), v3(4, 1, 4), true, UB_MAT_PLASTIC); /* a trigger */
+    w.parts[w.inst[zone].part].flags &= (u8)~UB_PART_CAN_COLLIDE;
+    i32 faller = add(&w, UB_SHAPE_BOX, v3(10, 8, 0), v3(1, 1, 1), false, UB_MAT_PLASTIC);
+    i32 bp = w.inst[box].part, zp = w.inst[zone].part, fp = w.inst[faller].part;
+    ub_physics ph;
+    CHECK(ub_phys_init(&ph, &w, NULL, 0));
+    ub_phys_sync_part(&ph, zp, true, true); /* watched by a script: a sensor */
+    int landed = 0, zone_hits = 0;
+    for (int i = 0; i < 3 * UB_PHYS_HZ; ++i) {
+        ub_phys_step(&ph);
+        landed += count_touch(&ph, floor_part, bp);
+        zone_hits += count_touch(&ph, zp, fp);
+    }
+    CHECK(landed >= 1 && landed <= 3);  /* when it lands (and after a bounce or two), not every step while resting */
+    CHECK(zone_hits == 1);       /* the trigger noticed the falling part... */
+    CHECK(part_of(&w, faller)->pos.y < 1.0f); /* ...which fell right through it */
+    CHECK(ph.stats.awake == 0);
+    /* waking it does not count as a new touch */
+    ub_phys_apply_impulse(&ph, ub_phys_part_body(&ph, bp), v3(0, 1, 0), ph.bodies[ub_phys_part_body(&ph, bp)].pos);
+    landed = 0;
+    for (int i = 0; i < 10; ++i) {
+        ub_phys_step(&ph);
+        landed += count_touch(&ph, floor_part, bp);
+    }
+    CHECK(landed == 0);
+
+    /* a script moves an anchored wall into the box: it pushes it */
+    i32 wall = add(&w, UB_SHAPE_BOX, v3(-6, 2, 0), v3(1, 4, 6), true, UB_MAT_PLASTIC);
+    i32 wp = w.inst[wall].part;
+    ub_phys_sync_part(&ph, wp, true, false);
+    settle(&ph, 3);
+    for (int i = 0; i < UB_PHYS_HZ; ++i) {
+        w.parts[wp].pos.x = -6.0f + 8.0f * (f32)(i + 1) / UB_PHYS_HZ;
+        ub_phys_sync_part(&ph, wp, true, false);
+        ub_phys_step(&ph);
+    }
+    CHECK(ph.bodies[ub_phys_part_body(&ph, wp)].type == UB_BODY_KINEMATIC);
+    CHECK(fabsf(w.parts[wp].pos.x - 2.0f) < 1e-3f && part_of(&w, box)->pos.x > 2.4f);
+    /* the floor stops being solid: everything on it falls */
+    w.parts[floor_part].flags &= (u8)~UB_PART_CAN_COLLIDE;
+    ub_phys_sync_part(&ph, floor_part, true, false);
+    CHECK(ub_phys_part_body(&ph, floor_part) == 0); /* still static, just not solid */
+    ub_phys_wake(&ph, ub_phys_part_body(&ph, bp));
+    for (int i = 0; i < UB_PHYS_HZ / 2; ++i) ub_phys_step(&ph);
+    CHECK(part_of(&w, box)->pos.y < -5.0f);
+    w.parts[floor_part].flags |= UB_PART_CAN_COLLIDE;
+    ub_phys_sync_part(&ph, floor_part, true, false);
+    /* a new part made by a script falls and lands; a destroyed one stops colliding */
+    i32 fresh = add(&w, UB_SHAPE_BALL, v3(20, 5, 0), v3(2, 2, 2), false, UB_MAT_PLASTIC);
+    ub_phys_sync_part(&ph, w.inst[fresh].part, true, false);
+    settle(&ph, 4);
+    CHECK(fabsf(part_of(&w, fresh)->pos.y - 1.0f) < 0.05f);
+    w.parts[floor_part].flags |= UB_PART_REMOVED;
+    ub_phys_sync_part(&ph, floor_part, false, false);
+    ub_phys_wake(&ph, ub_phys_part_body(&ph, w.inst[fresh].part));
+    for (int i = 0; i < UB_PHYS_HZ / 2; ++i) ub_phys_step(&ph);
+    CHECK(part_of(&w, fresh)->pos.y < -5.0f);
+    /* rays ignore what is not solid */
+    ub_phys_hit h;
+    CHECK(!ub_phys_raycast(&ph, v3(10, 10, 0), v3(0, -1, 0), 20, -1, &h) || h.part != zp);
+    ub_phys_free(&ph);
+    ub_world_free(&w);
+}
+
 /* ----------------------------------------------------------- character */
 
 static void walk(ub_physics *ph, ub_character *c, vec3 move, bool jump, f32 seconds, f32 *max_y)
@@ -512,5 +592,6 @@ void test_physics(void)
     test_fallen_and_wake();
     test_kinematic();
     test_rubble();
+    test_touch_and_sync();
     test_character();
 }

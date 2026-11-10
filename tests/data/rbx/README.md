@@ -13,3 +13,4 @@ independent source.
 | `cframe-special-cases.rbxm` | `models/cframe-special-cases` | The 24 compact rotation IDs |
 | `three-unique-parts.rbxm` | `models/three-unique-parts` | Plain parts with distinct properties |
 | `weldconstraint.rbxm` | `models/weldconstraint` | Two loose parts joined by a WeldConstraint |
+| `modulescript.rbxm` | `models/default-inserted-modulescript` | A script with its code (Source) |
