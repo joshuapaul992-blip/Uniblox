@@ -568,6 +568,12 @@ static void test_client_ui(void)
     /* the player list: the player and the Doors stat the place made */
     CHECK(count_labels(W, core, "People") == 1 && count_labels(W, core, "Player1") == 1);
     CHECK(count_labels(W, core, "Doors") == 1 && count_labels(W, core, "0") == 1);
+    /* nothing changes while nothing happens (else the GUI is laid out and
+     * drawn again every frame) */
+    u32 epoch = W->epoch;
+    hud_frame(800, 600, NULL, 1.0f / 60.0f);
+    if (W->epoch != epoch) printf("    the client UI changed something on an idle frame\n");
+    CHECK(W->epoch == epoch);
     /* the demo's LocalScript sent a notification */
     CHECK(g_g.hud.notice_count == 1 && count_labels(W, core, "Uniblox demo") == 1);
     /* through the door: the stat goes up */

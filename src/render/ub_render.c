@@ -87,7 +87,13 @@ bool ub_render_init(const ub_frame *frame, char *desc, int desc_len)
         if (ok) gl_set_quality(F.quality);
     } else {
         ok = sw_init();
-        ub_fmt(desc, desc_len, "software renderer");
+        if (sw_fast()) {
+            int t = sw_threads(), cpus = plat_cpu_count();
+            ub_fmt(desc, desc_len, "fast software renderer, %d thread%s (%d processor%s)", t, t == 1 ? "" : "s", cpus,
+                   cpus == 1 ? "" : "s");
+        } else {
+            ub_fmt(desc, desc_len, "software renderer");
+        }
     }
     F.ready = ok;
     return ok;
@@ -109,6 +115,10 @@ void ub_render_shutdown(void)
     F.parts = NULL;
     F.ready = false;
 }
+
+void ub_render_set_fast(bool on, int threads) { sw_set_fast(on, threads); }
+
+bool ub_render_fast(void) { return F.backend == UB_BACKEND_SOFTWARE && sw_fast(); }
 
 ub_backend ub_render_backend(void)
 {
@@ -184,14 +194,17 @@ void ub_render_end_scene(void)
     if (!F.ready || F.scene_done) return;
     F.scene_done = true;
     if (F.backend == UB_BACKEND_OPENGL) {
+        u64 t0 = plat_time_us();
         gl_draw_scene(F.frame->width, F.frame->height, &F.cam, &F.env, F.parts, F.count, F.quads, F.nquads,
                       &F.stats);
+        F.stats.render_us = (u32)(plat_time_us() - t0); /* (handing it to the driver) */
         gl_begin_2d(F.frame->width, F.frame->height);
         if (F.clip_x1 > F.clip_x0) gl_clip(F.clip_x0, F.clip_y0, F.clip_x1 - F.clip_x0, F.clip_y1 - F.clip_y0);
     } else if (F.frame->fb) {
         sw_begin(F.frame->fb, &F.cam, &F.env);
         for (int i = 0; i < F.static_count; ++i) sw_part(&F.statics[i]);
         for (int i = 0; i < F.count; ++i) sw_part(&F.parts[i]);
+        sw_flush();
         for (int i = 0; i < F.nquads; ++i) sw_image_quad(&F.quads[i]);
         sw_end(&F.stats);
     }
@@ -391,8 +404,7 @@ void ub_render_text(int x, int y, const char *utf8, u32 color)
 void ub_render_end(ub_render_stats *stats)
 {
     ub_render_end_scene();
-    u32 backend_us = F.stats.render_us;
+    F.stats.scene_us = F.stats.render_us; /* (the backend's own time) */
     F.stats.render_us = (u32)(plat_time_us() - F.t0);
-    (void)backend_us;
     if (stats) *stats = F.stats;
 }

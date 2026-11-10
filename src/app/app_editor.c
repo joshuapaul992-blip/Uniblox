@@ -158,7 +158,8 @@ static void load_config(void)
         const char *v;
         if (key_is(line, "renderer", &v))
             g_prefs.backend = str_is(v, "opengl") ? UB_BACKEND_PREF_OPENGL
-                            : str_is(v, "software") ? UB_BACKEND_PREF_SOFTWARE : UB_BACKEND_PREF_AUTO;
+                            : str_is(v, "software") ? UB_BACKEND_PREF_SOFTWARE
+                            : str_is(v, "fast") ? UB_BACKEND_PREF_FAST : UB_BACKEND_PREF_AUTO;
         else if (key_is(line, "fullscreen", &v)) g_prefs.fullscreen = parse_int(v) != 0;
         else if (key_is(line, "window_w", &v)) g_prefs.window_w = parse_int(v);
         else if (key_is(line, "window_h", &v)) g_prefs.window_h = parse_int(v);
@@ -1219,6 +1220,7 @@ bool app_init(const ub_system_info *sys, const ub_frame *frame)
 {
     g_sys = *sys;
     ub_render_force_fixed_function(!g_gl_shaders);
+    ub_render_set_fast(frame->backend == UB_BACKEND_SOFTWARE && g_prefs.backend != UB_BACKEND_PREF_SOFTWARE, 0);
     if (!ub_render_init(frame, g_renderer_desc, sizeof g_renderer_desc)) {
         ub_error("renderer failed to start: %s", g_renderer_desc);
         return false;

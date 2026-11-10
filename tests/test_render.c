@@ -144,14 +144,21 @@ static int count_uncovered(const ub_framebuffer *fb)
     return n;
 }
 
+static void test_fast_render(void);
+
 void test_render(void)
 {
+    test_fast_render();
     CHECK(sw_init());
     ub_render_env env = flat_env();
 
-    for (int pass = 0; pass < 2; ++pass) {
+    /* passes: the plain renderer, then the fast one (sorted, coarse depth,
+     * rows of tiles shared out: 3 threads' worth, run in turn here) */
+    for (int run = 0; run < 4; ++run) {
+        int pass = run & 1;
+        sw_set_fast(run >= 2, run == 3 ? 3 : 0);
         ub_framebuffer fb = make_fb(pass ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32);
-        printf("  %s\n", pass ? "8-bit" : "32-bit");
+        printf("  %s%s\n", pass ? "8-bit" : "32-bit", run >= 2 ? ", fast" : "");
 
         /* Exact coverage: a 4-unit cube whose front face is 8 units away.
          * focal = 120 / tan(35 deg) = 171.38, half-width 2/8*focal = 42.85,
@@ -294,6 +301,53 @@ void test_render(void)
             CHECK(st.polys_drawn >= 1 && st.pixels_tested > 300);
         }
     }
+    sw_set_fast(false, 0);
+    sw_shutdown();
+}
+
+/* The fast renderer draws what the plain one does, and skips what is
+ * hidden: a wall in front of a crowd of boxes, in 32-bit, flat colours. */
+static void test_fast_render(void)
+{
+    CHECK(sw_init());
+    ub_render_env env = flat_env();
+    ub_camera cam = cam_at(v3(0, 3, -20), 0.2f, -0.1f, 70);
+    ub_part_draw parts[64];
+    int n = 0;
+    parts[n++] = part(UB_SHAPE_BOX, v3(0, -0.5f, 0), v3(200, 1, 200), 0x4C8C3C, UB_MAT_PLASTIC);
+    parts[n++] = part(UB_SHAPE_BOX, v3(-3, 3, -8), v3(10, 6, 1), 0xB04A30, UB_MAT_PLASTIC);
+    for (int i = 0; i < 40; ++i) {
+        parts[n] = part(i % 3 ? UB_SHAPE_BOX : UB_SHAPE_BALL, v3((f32)(i % 8) * 2.5f - 10, 1 + (f32)(i / 8), (f32)(i % 5) * 3),
+                        v3(1.5f, 1.5f, 1.5f), 0x203040u * (u32)(i + 1), UB_MAT_PLASTIC);
+        parts[n].rot = mat3_from_euler(0.1f * (f32)i, 0.3f, 0.0f);
+        n++;
+    }
+    static u32 plain[W * H];
+    ub_render_stats st_plain, st_fast;
+    for (int run = 0; run < 3; ++run) {
+        sw_set_fast(run > 0, run == 2 ? 4 : 1);
+        ub_framebuffer fb = make_fb(UB_PIXEL_XRGB32);
+        sw_begin(&fb, &cam, &env);
+        for (int i = n - 1; i >= 0; --i) sw_part(&parts[i]); /* farthest last: the plain renderer draws them all */
+        ub_render_stats st;
+        sw_end(&st);
+        if (run == 0) {
+            memcpy(plain, g_px32, sizeof plain);
+            st_plain = st;
+            continue;
+        }
+        st_fast = st;
+        int differ = 0;
+        for (int i = 0; i < W * H; ++i) differ += plain[i] != g_px32[i];
+        printf("  fast (%d thread%s): %u of %u polygons hidden; %u pixels tested, %u plain; %d pixels differ\n",
+               run == 2 ? 4 : 1, run == 2 ? "s" : "", st.polys_hidden, st.polys_drawn, st.pixels_tested,
+               st_plain.pixels_tested, differ);
+        CHECK(differ < W * H / 1000); /* only where two faces are at the same depth */
+        CHECK(st.polys_drawn == st_plain.polys_drawn);
+        CHECK(st.polys_hidden > 0 && st.pixels_tested < st_plain.pixels_tested);
+    }
+    (void)st_fast;
+    sw_set_fast(false, 0);
     sw_shutdown();
 }
 

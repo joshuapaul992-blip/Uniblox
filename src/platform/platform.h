@@ -20,6 +20,7 @@ typedef enum {
     UB_BACKEND_PREF_AUTO,  /* OpenGL with a real (non-software) driver, else software */
     UB_BACKEND_PREF_OPENGL,
     UB_BACKEND_PREF_SOFTWARE,
+    UB_BACKEND_PREF_FAST,  /* the software backend's fast renderer (the app chooses it; auto falls back to it) */
 } ub_backend_pref;
 
 typedef enum {
@@ -248,7 +249,17 @@ typedef struct {
     bool has_mouse_wheel;    /* the OS reports wheel events (NT 4.0+, or a driver) */
     int screen_w, screen_h;  /* primary monitor size in pixels */
     char gl_desc[96];        /* "vendor / renderer / version", empty without OpenGL */
+    int cpu_count;           /* processors the OS runs us on */
 } ub_system_info;
+
+/* ---------------------------------------------------------- processors */
+
+/* Processors the OS runs us on (at least 1). */
+int plat_cpu_count(void);
+/* Runs fn(ctx, job) for job = 0..count-1 over up to plat_cpu_count()
+ * threads, the calling one included (job j runs on thread j % threads);
+ * returns when every job is done. Only one call at a time. */
+void plat_parallel(void (*fn)(void *ctx, int job), void *ctx, int count);
 
 typedef struct {
     u16 year, month, day, hour, minute, second;

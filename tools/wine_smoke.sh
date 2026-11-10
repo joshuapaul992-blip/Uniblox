@@ -101,7 +101,7 @@ for _ in 1 2 3 4 5; do xdotool mousemove_relative -- 20 0; sleep 0.1; done
 xdotool mouseup 3
 sleep 0.5
 import -window root "$SHOT"
-if [ "$RENDERER" = software ]; then
+if [ "$RENDERER" != opengl ]; then
     xdotool key F8; sleep 1                             # 8-bit palette rendering
     import -window root "${SHOT%.png}-8bit.png"
     xdotool key F8; sleep 0.3                           # back to 32-bit
@@ -186,6 +186,12 @@ expect "$RUN1" "display: windowed" "F11 came back to a window"
 if [ "$RENDERER" = opengl ]; then
     expect "$RUN1" "renderer: OpenGL" "OpenGL renderer started"
     expect "$RUN1" "quality: medium" "F6 changed graphics quality"
+elif [ "$RENDERER" = fast ]; then
+    expect "$RUN1" "renderer: fast software renderer, [0-9]* thread" "fast software renderer started"
+    expect "$RUN1" "CPU: .*; [0-9]* processor" "processors counted"
+    expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
+    expect "$CFG" "colors=32" "colour choice saved"
+    expect "$RUN1" "software render height" "F6 changed the render resolution"
 else
     expect "$RUN1" "renderer: software" "software renderer started"
     expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"

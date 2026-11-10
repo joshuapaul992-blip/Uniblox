@@ -22,6 +22,7 @@ typedef struct {
     bool invert_y;
     int fov;                  /* degrees, vertical */
     bool scripts;
+    int render_threads;       /* fast software renderer: 0 = one per processor */
     int zoom, yaw_deg, pitch_deg;
     char place[260];
 } ub_settings;

@@ -39,6 +39,8 @@ GetModuleFileNameW
 GetLocalTime
 # milestone 8B: os.time, DateTime (NT 3.1 and later)
 GetSystemTime
+# milestone 9A: how many processors the fast renderer can use (NT 3.1 and later)
+GetSystemInfo
 # milestone 1: threads and synchronisation
 CreateThread
 SetThreadPriority

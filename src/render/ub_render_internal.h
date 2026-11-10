@@ -19,6 +19,11 @@ void sw_shutdown(void);
 void sw_begin(ub_framebuffer *fb, const ub_camera *cam, const ub_render_env *env);
 void sw_part(const ub_part_draw *p);
 void sw_end(ub_render_stats *stats);
+/* the fast renderer: draws the scene kept since sw_begin (before the GUI pictures) */
+void sw_flush(void);
+void sw_set_fast(bool on, int threads);
+bool sw_fast(void);
+int sw_threads(void);
 
 /* OpenGL backend (ub_render_gl.c) */
 bool gl_init(char *desc, int desc_len, bool fixed_function);

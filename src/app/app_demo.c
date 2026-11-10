@@ -62,6 +62,7 @@ static bool g_demo_world;
 static ub_import_stats g_import;
 static bool g_imported;
 static char g_place_arg[260];         /* place from the command line or config */
+static bool g_auto_bench;             /* "uniblox.exe -benchmark": run the benchmark, then quit */
 #define g_cfg_place g_set.place
 static char g_status[160];            /* last load/save message for the overlay */
 
@@ -92,7 +93,7 @@ static ub_render_stats g_stats;
 static bool g_bench;
 static f32 g_bench_t;
 static u32 g_bench_frames;
-static u64 g_bench_render_us, g_bench_present_us, g_bench_polys, g_bench_pixels;
+static u64 g_bench_gui_us, g_bench_render_us, g_bench_scene_us, g_bench_present_us, g_bench_polys, g_bench_pixels;
 static u32 g_bench_saved_cap;
 static char g_bench_result[160];
 
@@ -378,6 +379,10 @@ void app_preinit(ub_display_prefs *prefs)
     g_prefs = *prefs; /* platform defaults: 120 fps cap, software height 480 */
     g_prefs.fs_width = g_prefs.fs_height = 0;
     plat_command_line_arg(g_place_arg, sizeof g_place_arg); /* "uniblox.exe castle.rbxl" */
+    if (!ub_strcmp(g_place_arg, "-benchmark") || !ub_strcmp(g_place_arg, "/benchmark")) {
+        g_auto_bench = true;
+        g_place_arg[0] = 0;
+    }
     load_config();
     *prefs = g_prefs;
     g_win_w = prefs->window_w;
@@ -392,6 +397,9 @@ bool app_init(const ub_system_info *sys, const ub_frame *frame)
         ub_warn("only %u MB RAM; Uniblox needs %u MB (%u MB recommended)", ram_mb,
                 UB_RAM_MIN_MB, UB_RAM_REC_MB);
     ub_render_force_fixed_function(!g_gl_shaders);
+    /* without OpenGL, the fast software renderer unless the plain one is asked for */
+    ub_render_set_fast(frame->backend == UB_BACKEND_SOFTWARE && g_prefs.backend != UB_BACKEND_PREF_SOFTWARE,
+                       g_set.render_threads);
     if (!ub_render_init(frame, g_renderer_desc, sizeof g_renderer_desc)) {
         ub_error("renderer failed to start: %s", g_renderer_desc);
         return false;
@@ -525,7 +533,7 @@ static void start_benchmark(ub_frame *frame)
     g_bench = true;
     g_bench_t = 0;
     g_bench_frames = 0;
-    g_bench_render_us = g_bench_present_us = g_bench_polys = g_bench_pixels = 0;
+    g_bench_gui_us = g_bench_render_us = g_bench_scene_us = g_bench_present_us = g_bench_polys = g_bench_pixels = 0;
     g_bench_saved_cap = frame->fps_cap;
     plat_set_fps_cap(0); /* measure what the machine can do */
     ub_info("benchmark: started (%d s flythrough, frame cap off)", BENCH_SECONDS);
@@ -543,20 +551,26 @@ static void finish_benchmark(ub_frame *frame, bool cancelled)
     u32 fps10 = (u32)((f32)g_bench_frames * 10.0f / g_bench_t);
     u32 ms10 = (u32)(g_bench_render_us / g_bench_frames / 100u);
     u32 pms10 = (u32)(g_bench_present_us / g_bench_frames / 100u);
-    const char *backend = frame->backend == UB_BACKEND_OPENGL ? "OpenGL" : "software";
+    u32 sms10 = (u32)(g_bench_scene_us / g_bench_frames / 100u);
+    u32 gms10 = (u32)(g_bench_gui_us / g_bench_frames / 100u);
+    const char *backend = frame->backend == UB_BACKEND_OPENGL ? "OpenGL" : ub_render_fast() ? "fast software" : "software";
     int rw = frame->fb ? frame->fb->width : frame->width, rh = frame->fb ? frame->fb->height : frame->height;
     ub_fmt(g_bench_result, sizeof g_bench_result,
            "Benchmark: %u.%u fps at %dx%d (%s %s; CPU %u.%u ms, present %u.%u ms)",
            fps10 / 10, fps10 % 10, frame->width, frame->height, backend, mode_name(frame),
            ms10 / 10, ms10 % 10, pms10 / 10, pms10 % 10);
-    ub_info("benchmark: %u frames in %u ms = %u.%u fps; render %u.%u ms/frame, present %u.%u ms/frame; "
+    ub_info("benchmark: %u frames in %u ms = %u.%u fps; render %u.%u ms/frame (3D scene %u.%u; GUI %u.%u), present %u.%u ms/frame; "
             "%u polys, %u pixels per frame; window %dx%d, render %dx%d; %s %s; %s; %s; %s%s%s",
-            g_bench_frames, (u32)(g_bench_t * 1000.0f), fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10,
+            g_bench_frames, (u32)(g_bench_t * 1000.0f), fps10 / 10, fps10 % 10, ms10 / 10, ms10 % 10, sms10 / 10, sms10 % 10, gms10 / 10, gms10 % 10,
             pms10 / 10, pms10 % 10,
             (u32)(g_bench_polys / g_bench_frames), (u32)(g_bench_pixels / g_bench_frames),
             frame->width, frame->height, rw, rh, backend, mode_name(frame), g_renderer_desc,
             g_sys.cpu_desc, g_sys.os_name, frame->present_detail[0] ? "; present: " : "",
             frame->present_detail);
+    if (g_auto_bench) {
+        ub_info("benchmark: done (-benchmark); quitting");
+        plat_request_quit();
+    }
 }
 
 /* The client UI's keys and clicks (app_hud.c): the game menu (Esc), its
@@ -685,7 +699,8 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_prefs.fullscreen = !frame->fullscreen;
         plat_set_fullscreen(g_prefs.fullscreen);
     }
-    if (play_keys && in->key_pressed[UB_KEY_F5]) start_benchmark(frame);
+    if ((play_keys && in->key_pressed[UB_KEY_F5]) || (g_auto_bench && !g_bench && g_time > 1.5f && !g_bench_result[0]))
+        start_benchmark(frame);
     else if (g_bench && (in->key_pressed[UB_KEY_ESCAPE] || in->key_pressed[UB_KEY_F5])) {
         finish_benchmark(frame, true);
         play_keys = false; /* this Escape only cancels */
@@ -884,6 +899,12 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     if (g_bench) {
         g_bench_frames++;
         g_bench_render_us += g_stats.render_us;
+        g_bench_scene_us += g_stats.scene_us;
+        if (g_game.gui) {
+            ub_gui_stats gs;
+            ub_gui_get_stats(g_game.gui, &gs);
+            g_bench_gui_us += gs.layout_us + gs.drawn_us;
+        }
         g_bench_present_us += frame->present_us;
         g_bench_polys += g_stats.polys_drawn;
         g_bench_pixels += g_stats.pixels_tested;

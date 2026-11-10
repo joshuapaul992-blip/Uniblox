@@ -88,13 +88,20 @@ typedef struct {
     u32 faces, faces_backfacing, polys_drawn;
     u32 pixels_tested;   /* software backend */
     u32 luts_built;      /* software backend: colour tables (re)built */
+    u32 polys_hidden;    /* fast software renderer: rows of tiles a polygon was skipped in (behind what was drawn) */
     u32 triangles;       /* OpenGL backend: triangles submitted (main pass) */
     u32 render_us;       /* CPU time from begin to end */
+    u32 scene_us;        /* of which drawing the 3D scene (parts, GUI in the world) */
 } ub_render_stats;
 
 /* Call once the platform has chosen the backend (and, for OpenGL, made a
  * context current). Fills `desc` with a one-line description. */
 bool ub_render_init(const ub_frame *frame, char *desc, int desc_len);
+/* The software backend's fast renderer (sorted, coarse depth, all
+ * processors; see ub_render_sw.c): set before ub_render_init. threads:
+ * 0 = one per processor. */
+void ub_render_set_fast(bool on, int threads);
+bool ub_render_fast(void);
 void ub_render_shutdown(void);
 ub_backend ub_render_backend(void);
 

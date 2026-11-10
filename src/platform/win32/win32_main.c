@@ -168,6 +168,78 @@ static void query_system(ub_system_info *sys)
     /* Unknown indexes return 0 on older systems, so this is safe on 3.51. */
     sys->has_mouse_wheel = GetSystemMetrics(SM_MOUSEWHEELPRESENT) != 0;
     query_cpu(sys);
+    sys->cpu_count = plat_cpu_count();
+}
+
+/* ------------------------------------------------------------ processors
+ *
+ * NT 3.51 and 4.0 run on several processors (and do so in a virtual
+ * machine given several). The fast renderer shares a frame out over them:
+ * a few worker threads made on first use wait on an event each; the
+ * calling thread takes its share of the jobs, then waits for theirs. */
+
+#define MAX_WORKERS 15
+static struct {
+    HANDLE go, done;
+} g_workers[MAX_WORKERS];
+static int g_worker_count, g_cpu_count;
+static void (*g_job_fn)(void *ctx, int job);
+static void *g_job_ctx;
+static int g_job_count, g_job_threads;
+
+int plat_cpu_count(void)
+{
+    if (!g_cpu_count) {
+        SYSTEM_INFO si;
+        memset(&si, 0, sizeof si);
+        GetSystemInfo(&si);
+        g_cpu_count = si.dwNumberOfProcessors >= 1 ? (int)si.dwNumberOfProcessors : 1;
+        if (g_cpu_count > 64) g_cpu_count = 64;
+    }
+    return g_cpu_count;
+}
+
+static DWORD WINAPI worker_main(LPVOID arg)
+{
+    int k = (int)(INT_PTR)arg;
+    for (;;) {
+        WaitForSingleObject(g_workers[k].go, INFINITE);
+        for (int j = k + 1; j < g_job_count; j += g_job_threads) g_job_fn(g_job_ctx, j);
+        SetEvent(g_workers[k].done);
+    }
+    return 0; /* (never) */
+}
+
+void plat_parallel(void (*fn)(void *ctx, int job), void *ctx, int count)
+{
+    int want = count < plat_cpu_count() ? count : plat_cpu_count();
+    if (want - 1 > MAX_WORKERS) want = MAX_WORKERS + 1;
+    while (g_worker_count < want - 1) {
+        int k = g_worker_count;
+        g_workers[k].go = CreateEventW(NULL, FALSE, FALSE, NULL);
+        g_workers[k].done = CreateEventW(NULL, FALSE, FALSE, NULL);
+        DWORD id;
+        HANDLE t = g_workers[k].go && g_workers[k].done
+                       ? CreateThread(NULL, 64 * 1024, worker_main, (LPVOID)(INT_PTR)k, 0, &id)
+                       : NULL;
+        if (!t) {
+            if (g_workers[k].go) CloseHandle(g_workers[k].go);
+            if (g_workers[k].done) CloseHandle(g_workers[k].done);
+            ub_warn("could not start a drawing thread; using %d", g_worker_count + 1);
+            break;
+        }
+        CloseHandle(t); /* it runs until the process ends */
+        g_worker_count++;
+    }
+    int helpers = want - 1 < g_worker_count ? want - 1 : g_worker_count;
+    if (helpers < 0) helpers = 0;
+    g_job_fn = fn;
+    g_job_ctx = ctx;
+    g_job_count = count;
+    g_job_threads = helpers + 1;
+    for (int k = 0; k < helpers; ++k) SetEvent(g_workers[k].go);
+    for (int j = 0; j < count; j += helpers + 1) fn(ctx, j);
+    for (int k = 0; k < helpers; ++k) WaitForSingleObject(g_workers[k].done, INFINITE);
 }
 
 /* ---------------------------------------------------------------- input */
@@ -638,8 +710,8 @@ static bool create_window(int client_w, int client_h)
 static void choose_backend(const ub_display_prefs *prefs, ub_system_info *sys, int w, int h)
 {
     g_frame.backend = UB_BACKEND_SOFTWARE;
-    if (prefs->backend == UB_BACKEND_PREF_SOFTWARE) {
-        ub_info("display: software renderer chosen in settings");
+    if (prefs->backend == UB_BACKEND_PREF_SOFTWARE || prefs->backend == UB_BACKEND_PREF_FAST) {
+        ub_info("display: %s renderer chosen in settings", prefs->backend == UB_BACKEND_PREF_FAST ? "fast software" : "software");
         return;
     }
     if (sys->display_bpp <= 8) {
@@ -650,7 +722,7 @@ static void choose_backend(const ub_display_prefs *prefs, ub_system_info *sys, i
     if (win32_gl_init(g_hwnd, prefs->vsync, &generic)) {
         if (generic && prefs->backend == UB_BACKEND_PREF_AUTO) {
             ub_info("display: the only OpenGL here renders in software; Uniblox's own "
-                    "software renderer is faster (set renderer=opengl to use it anyway)");
+                    "fast software renderer is faster (set renderer=opengl to use it anyway)");
             win32_gl_shutdown();
         } else {
             g_frame.backend = UB_BACKEND_OPENGL;
@@ -732,7 +804,7 @@ static int win32_main(void)
     ub_info("%s, %u MB RAM, %dx%d %d bpp screen%s, mouse wheel %s", sys.os_name,
             (u32)(sys.total_phys_bytes >> 20), sys.screen_w, sys.screen_h, sys.display_bpp,
             dpi_aware ? " (DPI-aware)" : "", sys.has_mouse_wheel ? "reported" : "not reported");
-    ub_info("CPU: %s", sys.cpu_desc);
+    ub_info("CPU: %s; %d processor%s", sys.cpu_desc, sys.cpu_count, sys.cpu_count == 1 ? "" : "s");
     g_msh_wheel_msg = RegisterWindowMessageW(L"MSWHEEL_ROLLMSG");
 
     ub_display_prefs prefs;
