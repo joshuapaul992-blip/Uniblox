@@ -495,6 +495,17 @@ static void test_demo_place(void)
         }
         ub_render_shutdown();
     }
+    /* the rope swing: the ball hangs at the rope's length under the beam */
+    i32 swing = ub_world_find_child(&g_g.world, ws, "RopeSwing");
+    i32 rball = swing >= 0 ? ub_world_find_child(&g_g.world, swing, "Ball") : -1;
+    CHECK(rball >= 0);
+    if (rball >= 0) {
+        vec3 bp;
+        mat3 br;
+        ub_game_part_pose(&g_g, g_g.world.inst[rball].part, &bp, &br);
+        printf("  demo place: the rope's ball hangs at y = %.2f (rope from 12 down 7)\n", (double)bp.y);
+        CHECK(bp.y > 2.8f && bp.y < 4.4f);
+    }
     /* the lamp by the path: E at its prompt switches it on */
     i32 lamp = ub_world_find_child(&g_g.world, ws, "Lamp");
     i32 bulb = lamp >= 0 ? ub_world_find_child(&g_g.world, lamp, "Bulb") : -1;

@@ -356,3 +356,25 @@ bool ub_constraint_reading(const ub_game *g, i32 inst, f32 *value)
     *value = 0;
     return false;
 }
+
+int ub_constraints_lines(const ub_game *g, vec3 *a, vec3 *b, u32 *color, int max)
+{
+    const ub_world *w = &g->world;
+    int n = 0;
+    for (i32 k = 0; k < g->pjoint_count && k < g->phys.joint_count && n < max; ++k) {
+        const ub_pjoint *j = &g->phys.joints[k];
+        i32 c = g->joint_inst[k];
+        if (j->kind != UB_PJ_ROPE && j->kind != UB_PJ_ROD && j->kind != UB_PJ_SPRING) continue;
+        if (!ub_world_alive(w, c) || !bprop(w, c, "Visible", false)) continue;
+        vec3 pa, pb;
+        mat3 ra, rb;
+        ub_phys_body_pose(&g->phys, j->a, g->alpha, &pa, &ra);
+        ub_phys_body_pose(&g->phys, j->b, g->alpha, &pb, &rb);
+        a[n] = j->a == 0 ? j->la : v3_add(pa, mat3_apply(&ra, j->la));
+        b[n] = j->b == 0 ? j->lb : v3_add(pb, mat3_apply(&rb, j->lb));
+        const ub_value *col = ub_world_prop_named(w, c, "Color");
+        color[n] = col && col->type == UB_PV_BRICKCOLOR ? 0x6E6E6E : 0x6E6E6E;
+        n++;
+    }
+    return n;
+}

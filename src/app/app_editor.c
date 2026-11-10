@@ -298,7 +298,9 @@ static void list_cb(void *user, const char *name, bool is_dir, u32 size)
     const char *dir = (const char *)user;
     (void)size;
     if (is_dir || g_nfiles >= MAX_FILES) return;
-    if (!ends_with(name, ".ubx") && !ends_with(name, ".rbxl") && !ends_with(name, ".rbxm")) return;
+    if (!ends_with(name, ".ubx") && !ends_with(name, ".rbxl") && !ends_with(name, ".rbxm") && !ends_with(name, ".rbxlx") &&
+        !ends_with(name, ".rbxmx"))
+        return;
     ub_fmt(g_files[g_nfiles++], sizeof g_files[0], "%s%s%s", dir, dir[0] ? "/" : "", name);
 }
 

@@ -67,10 +67,10 @@ ub_render_env play_env(const ub_world *w)
         if (dc && dc->type == UB_PV_COLOR3 && day > 0.3f) {
             u32 t = e.sky_top;
             f32 k = 0.35f;
-            u32 r = (u32)((f32)((t >> 16) & 255) * (1 - k) + ub_clampf(dc->v.c3.r, 0, 1) * 255 * k);
+            u32 r2 = (u32)((f32)((t >> 16) & 255) * (1 - k) + ub_clampf(dc->v.c3.r, 0, 1) * 255 * k);
             u32 g2 = (u32)((f32)((t >> 8) & 255) * (1 - k) + ub_clampf(dc->v.c3.g, 0, 1) * 255 * k);
             u32 b2 = (u32)((f32)(t & 255) * (1 - k) + ub_clampf(dc->v.c3.b, 0, 1) * 255 * k);
-            e.sky_top = (r << 16) | (g2 << 8) | b2;
+            e.sky_top = (r2 << 16) | (g2 << 8) | b2;
         }
         if (dn && dn->type == UB_PV_FLOAT && dn->v.f > 0) {
             f32 dens = ub_clampf(dn->v.f, 0, 1) * 0.02f;
@@ -258,6 +258,28 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
         ub_part_draw d = play_part_draw(&g->world, &g->world.parts[pi]);
         ub_game_part_pose(g, pi, &d.pos, &d.rot);
         ub_render_part(&d);
+    }
+    /* visible ropes, rods and springs: thin cylinders between their ends */
+    vec3 la[64], lb[64];
+    u32 lc[64];
+    int nl = ub_constraints_lines(g, la, lb, lc, 64);
+    for (int i = 0; i < nl; ++i) {
+        vec3 d = v3_sub(lb[i], la[i]);
+        f32 len = v3_length(d);
+        if (len < 0.01f) continue;
+        vec3 y = v3_scale(d, 1.0f / len);
+        vec3 x = v3_normalize(v3_cross(ub_absf(y.y) < 0.9f ? v3(0, 1, 0) : v3(1, 0, 0), y));
+        ub_part_draw r;
+        memset(&r, 0, sizeof r);
+        r.pos = v3_add(la[i], v3_scale(d, 0.5f));
+        r.rot.x = x;
+        r.rot.y = y;
+        r.rot.z = v3_cross(x, y);
+        r.size = v3(0.15f, len, 0.15f);
+        r.color = lc[i];
+        r.shape = UB_SHAPE_CYLINDER;
+        r.material = UB_MAT_PLASTIC;
+        ub_render_part(&r);
     }
     if (character) play_draw_blob_shadow(g); /* (the character itself is its rig's parts, drawn above) */
 }

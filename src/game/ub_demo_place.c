@@ -471,6 +471,34 @@ void ub_demo_place(ub_world *w)
     p_str(prompt, "ObjectText", "Lamp");
     ub_value tag = ub_vstr("Lamp", 4);
     ub_world_set_prop_named(W, lamp, "Tags", &tag);
+    /* a ball on a rope under a beam (a RopeConstraint between two attachments): push it */
+    {
+        i32 swing = ub_world_add(W, ws, UB_CLASS_MODEL, NULL, "RopeSwing");
+        add_part(swing, "PostA", UB_SHAPE_BOX, -26, 6, 30, 1, 12, 1, 0x6E4A26, UB_MAT_WOOD);
+        add_part(swing, "PostB", UB_SHAPE_BOX, -18, 6, 30, 1, 12, 1, 0x6E4A26, UB_MAT_WOOD);
+        i32 beam = add_part(swing, "Beam", UB_SHAPE_BOX, -22, 12.5f, 30, 9, 1, 1, 0x6E4A26, UB_MAT_WOOD);
+        i32 ball = loosen(add_part(swing, "Ball", UB_SHAPE_BALL, -22, 5, 30, 2.5f, 2.5f, 2.5f, 0xD94040, UB_MAT_PLASTIC));
+        i32 a0 = gui(beam, "Attachment", "Top"), a1 = gui(ball, "Attachment", "Knot");
+        ub_value cf;
+        memset(&cf, 0, sizeof cf);
+        f32 m[12] = { 0, -0.5f, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1 };
+        cf.type = UB_PV_CFRAME;
+        cf.v.cf.m = m;
+        ub_world_set_prop_named(W, a0, "CFrame", &cf);
+        m[1] = 1.25f;
+        ub_world_set_prop_named(W, a1, "CFrame", &cf);
+        i32 rope = gui(beam, "RopeConstraint", "Rope");
+        ub_value r0, r1, len = ub_vfloat(7.0f), vis = ub_vbool(true);
+        memset(&r0, 0, sizeof r0);
+        r0.type = UB_PV_REF;
+        r0.v.ref = a0;
+        r1 = r0;
+        r1.v.ref = a1;
+        ub_world_set_prop_named(W, rope, "Attachment0", &r0);
+        ub_world_set_prop_named(W, rope, "Attachment1", &r1);
+        ub_world_set_prop_named(W, rope, "Length", &len);
+        ub_world_set_prop_named(W, rope, "Visible", &vis);
+    }
     add_tree(ws, -30, 8, 1.0f);
     add_tree(ws, 32, -6, 1.2f);
     add_tree(ws, -34, 68, 0.9f);

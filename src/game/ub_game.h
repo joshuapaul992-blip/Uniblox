@@ -175,6 +175,8 @@ void ub_constraints_step(ub_game *g);   /* before each physics step */
 bool ub_constraint_class(const char *cls); /* changing one rebuilds the joints */
 /* HingeConstraint.CurrentAngle (degrees) / PrismaticConstraint.CurrentPosition */
 bool ub_constraint_reading(const ub_game *g, i32 inst, f32 *value);
+/* Visible ropes, rods and springs: their ends now (Uniblox axes). */
+int ub_constraints_lines(const ub_game *g, vec3 *a, vec3 *b, u32 *color, int max);
 void ub_game_set_walk_speed(ub_game *g, f32 speed);
 void ub_game_set_jump_height(ub_game *g, f32 height);
 vec3 ub_game_root_position(const ub_game *g); /* HumanoidRootPart's centre */

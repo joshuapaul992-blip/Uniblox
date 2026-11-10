@@ -125,7 +125,7 @@ int settings_write(const ub_settings *s, char *buf, int cap)
                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\n"
                   "# scripts: 1 = run the place's scripts, 0 = do not\r\n"
                   "scripts=%d\r\n"
-                  "# place: place file to open at start, relative to this folder (.ubx, .rbxl or .rbxm),\r\n"
+                  "# place: place file to open at start, relative to this folder (.ubx, .rbxl, .rbxm, .rbxlx, .rbxmx),\r\n"
                   "# e.g. places/castle.ubx. Empty = the built-in demo. A file named on the command line wins\r\n"
                   "place=%s\r\n",
                   renderer[p->backend % 3], s->quality, s->gl_shaders, p->fps_cap, p->vsync, p->fullscreen,
