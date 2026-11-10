@@ -20,7 +20,24 @@ static struct {
     u64 t0;
     bool scene_done;
     bool fixed_function;
+    ub_part_draw *statics;     /* software backend draws these every frame */
+    int static_count;
 } F;
+
+void ub_render_set_static(const ub_part_draw *parts, int count)
+{
+    plat_free(F.statics);
+    F.statics = NULL;
+    F.static_count = 0;
+    if (count > 0) {
+        F.statics = (ub_part_draw *)plat_alloc(sizeof(ub_part_draw) * (size_t)count);
+        if (F.statics) {
+            memcpy(F.statics, parts, sizeof(ub_part_draw) * (size_t)count);
+            F.static_count = count;
+        }
+    }
+    if (F.ready && F.backend == UB_BACKEND_OPENGL) gl_set_static(F.statics, F.static_count);
+}
 
 void ub_render_force_fixed_function(bool on)
 {
@@ -51,6 +68,9 @@ void ub_render_shutdown(void)
 {
     if (F.backend == UB_BACKEND_OPENGL) gl_shutdown();
     else sw_shutdown();
+    plat_free(F.statics);
+    F.statics = NULL;
+    F.static_count = 0;
     plat_free(F.parts);
     F.parts = NULL;
     F.ready = false;
@@ -110,6 +130,7 @@ void ub_render_end_scene(void)
         gl_begin_2d(F.frame->width, F.frame->height);
     } else if (F.frame->fb) {
         sw_begin(F.frame->fb, &F.cam, &F.env);
+        for (int i = 0; i < F.static_count; ++i) sw_part(&F.statics[i]);
         for (int i = 0; i < F.count; ++i) sw_part(&F.parts[i]);
         sw_end(&F.stats);
     }

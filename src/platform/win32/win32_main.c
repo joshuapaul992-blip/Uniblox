@@ -284,6 +284,13 @@ static void update_mouse_pos(LPARAM lp)
 
 /* ------------------------------------------------------------ window */
 
+void plat_set_title(const char *title)
+{
+    u16 wide[256];
+    ub_utf8_to_utf16(title, wide, 256);
+    if (g_hwnd) SetWindowTextW(g_hwnd, (LPCWSTR)wide);
+}
+
 void plat_set_fps_cap(u32 fps)
 {
     g_frame.fps_cap = fps > 1000 ? 1000 : fps;

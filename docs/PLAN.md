@@ -72,7 +72,7 @@ tests/          host unit tests (make test)
 | 1 | Platform layer | Input, timing, audio (waveOut), file I/O, a log file | **Done.** Confirmed working on a real install |
 | 2 | Software renderer | Textured, lit room of parts at 15+ fps, 320x240, on a Pentium-class VM, in 8-bit and 16-bit display modes | **Built.** Passes unit tests and the Wine smoke test. Needs: F5 benchmark on a Pentium-class VM, and a run on a real 256-colour desktop |
 | 2.5 | High-quality OpenGL renderer | Native 1080p/1440p, resizable and fullscreen, shadows, specular, anti-aliasing; 120 fps cap by default | **Built.** Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real GPU |
-| 3 | World model + place files | Save/load round-trips byte for byte | |
+| 3 | World model + place files | Save/load round-trips byte for byte | **Built.** `.ubx` round-trips byte for byte; real Roblox `.rbxl`/`.rbxm` files import. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | |
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | |
 | 6 | In-game editor | Build an obstacle course without writing code | |
@@ -214,7 +214,66 @@ tests/          host unit tests (make test)
   - The 2D pass left the depth test off, so the shadow pass wrote no depth.
     All 3D state is now reset at the start of each frame.
 
+## Milestone 3 notes
+
+- **World model** (`src/world/ub_world.c`): a tree of instances (Workspace,
+  Lighting, Folder, Model, Part, SpawnLocation; anything else is kept by
+  class name only), parts in a flat array, and lighting settings. Each
+  part has a position, rotation matrix, size, colour, shape, material,
+  transparency and flags (anchored, can-collide, placeholder, glow).
+- **`.ubx` format:** the header `UBXPLACE` plus a version, then
+  length-prefixed chunks: `INFO` (name), `STRS` (string table), `INST`
+  (20 bytes per instance), `PART` (68 bytes per part), `LITE`, `END `.
+  Everything is little-endian and written in tree order, so saving the
+  same world always gives the same bytes. Readers skip chunks they don't
+  know, so later versions can add some. The loader treats files as
+  untrusted: every count and index is bounds-checked, a parent must come
+  before its children (so there are no cycles), and all values are
+  clamped. It's fuzzed in the unit tests.
+- **Roblox importer** (`src/world/ub_rbxl.c`), written from the public
+  format description in rbx-dom's `docs/binary.md`:
+  - Reads the `INST`, `PROP`, `PRNT`, `SSTR`, `META` and `END` chunks. Each
+    chunk can be uncompressed, LZ4 or Zstandard.
+  - `src/core/ub_compress.c` is a complete LZ4 block decoder and a
+    Zstandard frame decoder (RFC 8878: Huffman literals, FSE sequences,
+    repeat offsets, skippable frames). It rejects dictionaries and skips
+    the checksum. Both are checked against the real `lz4`/`zstd` tools at
+    several levels, and fuzzed.
+  - Roblox is right-handed and Uniblox is left-handed: positions get z
+    negated, and rotations become S·R·S with S = diag(1, 1, −1).
+    Cylinders turn from Roblox's X axis to our Y axis. Wedges and corner
+    wedges turn 180° because our slopes face the other way. All 24 compact
+    rotation IDs are tested against the XML copy of the same model.
+  - Mesh parts and unions become placeholder boxes, because their geometry
+    is online and Uniblox doesn't download anything. Negate parts are never
+    drawn. Terrain is counted and reported, not imported.
+  - Speed: a generated place with 18,306 parts imports in 9–14 ms under
+    Wine. The OpenGL renderer keeps static parts in vertex buffers (22.8 MB
+    for that place), and the software renderer still ran at 87–100 fps.
+- **Standing on parts:** the character finds the ground with a ray cast
+  against every can-collide part (`src/world/ub_query.c`, a convex ray
+  test against each part's low-detail mesh). It can step up 2.2 studs.
+  Falling 500 studs below the spawn point puts you back on it. Walls
+  aren't solid until milestone 4.
+- **Bugs found while testing:**
+  - Vector3, Color3 and CFrame positions are stored as three separately
+    interleaved arrays, not one. Reading them as one gave nonsense
+    positions; the XML comparison caught it.
+  - A relative path on the command line wasn't found when the game was
+    started from another folder. It now also looks next to the `.exe`.
+  - The settings file is rewritten on exit, which dropped a `place=` line
+    the user had added. It's now written back.
+
 ## Open items
+
+- Milestone 3 on a real install: open a place you made in Studio (save it
+  as binary `.rbxl`), and send the `imported Roblox place` line from
+  `uniblox.log`. Things to look at: rotated parts, wedges, and cylinders.
+- Corner wedges are an approximation; their slope direction hasn't been
+  checked against an image of the real shape.
+- Not imported yet: mesh and union geometry (needs local mesh files),
+  terrain, textures and decals, and see-through rendering (parts are
+  either drawn opaque or hidden).
 
 - Milestone 2 speed on a Pentium-class machine: run F5 in 86Box or PCem
   and send the `benchmark:` line from `uniblox.log`. On a modern CPU under

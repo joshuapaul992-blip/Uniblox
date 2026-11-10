@@ -28,9 +28,13 @@ CORE_SRCS := \
 	src/core/ub_utf.c \
 	src/core/ub_path.c \
 	src/core/ub_log.c \
+	src/core/ub_compress.c \
 	src/audio/ub_mixer.c \
 	src/audio/ub_wav.c \
 	src/render/ub_palette.c \
+	src/world/ub_world.c \
+	src/world/ub_rbxl.c \
+	src/world/ub_query.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \
 	src/render/ub_render.c \
@@ -89,7 +93,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 # AddressSanitizer and UBSan, against a stub platform layer.
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
-TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/stub_platform.c $(CORE_SRCS)
+TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c tests/stub_platform.c $(CORE_SRCS)
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
 

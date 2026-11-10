@@ -80,6 +80,21 @@ static void build_wedge(ub_mesh *m)
     face3(m, b1, b2, t1);     /* +X side */
 }
 
+/* Apex above the (-X, +Z) bottom corner: two upright triangles (back and
+ * left) and two slopes. This matches an imported Roblox CornerWedgePart
+ * whose apex is at its back-right corner, as best understood. */
+static void build_corner_wedge(ub_mesh *m)
+{
+    int b0 = add_vert(m, -0.5f, -0.5f, -0.5f), b1 = add_vert(m, 0.5f, -0.5f, -0.5f);
+    int b2 = add_vert(m, 0.5f, -0.5f, 0.5f), b3 = add_vert(m, -0.5f, -0.5f, 0.5f);
+    int apex = add_vert(m, -0.5f, 0.5f, 0.5f);
+    face4(m, b0, b1, b2, b3); /* bottom */
+    face3(m, b3, b2, apex);   /* back wall (+Z) */
+    face3(m, b3, b0, apex);   /* left wall (-X) */
+    face3(m, b0, b1, apex);   /* front slope */
+    face3(m, b1, b2, apex);   /* right slope */
+}
+
 static void build_cylinder(ub_mesh *m, int sides)
 {
     int bot[UB_FACE_MAX_VERTS], top[UB_FACE_MAX_VERTS];
@@ -132,6 +147,7 @@ void ub_meshes_init(void)
         build_wedge(&g_meshes[d][UB_SHAPE_WEDGE]);
         build_cylinder(&g_meshes[d][UB_SHAPE_CYLINDER], k_cyl_sides[d]);
         build_ball(&g_meshes[d][UB_SHAPE_BALL], k_ball_stacks[d], k_ball_slices[d]);
+        build_corner_wedge(&g_meshes[d][UB_SHAPE_CORNER_WEDGE]);
     }
 }
 

@@ -21,8 +21,12 @@
 #include "core/ub_utf.h"
 #include "core/ub_vec.h"
 #include "render/ub_render.h"
+#include "world/ub_query.h"
+#include "world/ub_rbxl.h"
+#include "world/ub_world.h"
+#include "crt/ub_crt.h"
 
-#define WORLD_LIMIT 140.0f
+#define WORLD_LIMIT 100000.0f
 #define MOVE_SPEED 16.0f
 #define TURN_SPEED 1.8f        /* radians/s for arrow keys */
 #define LOOK_SENSITIVITY 0.006f
@@ -35,12 +39,22 @@
 #define CONFIG_PATH "uniblox.cfg"
 #define TYPED_MAX 40
 #define BENCH_SECONDS 10
-#define MAX_PARTS 128
+#define STEP_UP 2.2f            /* highest ledge the player walks up without jumping */
+#define PLACE_MAX_BYTES (512u << 20)
 
 static ub_system_info g_sys;
-static ub_part_draw g_parts[MAX_PARTS];
-static int g_part_count;
-static int g_spinner = -1;            /* index of the animated part */
+static ub_world g_world;
+static i32 g_spinner = -1;            /* instance index of the animated part, -1 if none */
+static ub_part_draw *g_statics;       /* visible non-moving parts, handed to the renderer */
+static int g_static_count;
+static vec3 g_spawn;                  /* where the player (re)appears */
+static vec3 g_bench_center;
+static bool g_demo_world;
+static ub_import_stats g_import;
+static bool g_imported;
+static char g_place_arg[260];         /* place from the command line or config */
+static char g_cfg_place[260];         /* place= from the config, written back on exit */
+static char g_status[160];            /* last load/save message for the overlay */
 
 static f32 g_px, g_pz = 4.0f, g_py, g_vy;   /* player feet position */
 static f32 g_facing;                  /* player yaw */
@@ -75,79 +89,278 @@ static char g_bench_result[160];
 
 /* --------------------------------------------------------------- scene */
 
-static ub_part_draw *add_part(ub_shape shape, f32 x, f32 y, f32 z, f32 sx, f32 sy, f32 sz,
-                              u32 color, ub_material mat)
+static ub_part_draw part_draw(const ub_part *p)
 {
-    if (g_part_count >= MAX_PARTS) return &g_parts[MAX_PARTS - 1];
-    ub_part_draw *p = &g_parts[g_part_count++];
-    p->pos = v3(x, y, z);
-    p->size = v3(sx, sy, sz);
-    p->rot = mat3_identity();
-    p->color = color;
-    p->shape = (u8)shape;
-    p->material = (u8)mat;
-    return p;
+    ub_part_draw d;
+    d.pos = p->pos;
+    d.rot = p->rot;
+    d.size = p->size;
+    d.color = p->color;
+    d.shape = p->shape;
+    d.material = p->material;
+    d.flags = (p->flags & UB_PART_GLOW) ? UB_DRAW_GLOW : 0;
+    return d;
 }
 
-static void add_tree(f32 x, f32 z, f32 scale)
+static i32 add_part(i32 parent, const char *name, ub_shape shape, f32 x, f32 y, f32 z, f32 sx, f32 sy,
+                    f32 sz, u32 color, ub_material mat)
 {
-    add_part(UB_SHAPE_CYLINDER, x, 3.0f * scale, z, 1.2f * scale, 6.0f * scale, 1.2f * scale,
+    ub_part p;
+    memset(&p, 0, sizeof p);
+    p.pos = v3(x, y, z);
+    p.rot = mat3_identity();
+    p.size = v3(sx, sy, sz);
+    p.color = color;
+    p.shape = (u8)shape;
+    p.material = (u8)mat;
+    p.flags = UB_PART_ANCHORED | UB_PART_CAN_COLLIDE;
+    return ub_world_add_part(&g_world, parent, UB_CLASS_PART, NULL, name, &p);
+}
+
+static void add_tree(i32 ws, f32 x, f32 z, f32 scale)
+{
+    i32 tree = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "Tree");
+    add_part(tree, "Trunk", UB_SHAPE_CYLINDER, x, 3.0f * scale, z, 1.2f * scale, 6.0f * scale, 1.2f * scale,
              0x6B4423, UB_MAT_WOOD);
-    add_part(UB_SHAPE_BALL, x, 7.5f * scale, z, 6.0f * scale, 5.0f * scale, 6.0f * scale,
+    add_part(tree, "Leaves", UB_SHAPE_BALL, x, 7.5f * scale, z, 6.0f * scale, 5.0f * scale, 6.0f * scale,
              0x3A9A3A, UB_MAT_GRASS);
 }
 
-/* A walled room (open roof) with a doorway facing the spawn point, and
- * some things outside. Room interior: x -18..18, z 22..58. */
-static void build_scene(void)
+/* The built-in demo place: a walled room (open roof) with a doorway facing
+ * the spawn point, and some things outside. Room interior: x -18..18,
+ * z 22..58. */
+static void build_demo_world(void)
 {
-    g_part_count = 0;
-    add_part(UB_SHAPE_BOX, 0, -0.5f, 20, 300, 1, 300, 0x4C8C3C, UB_MAT_GRASS);       /* ground */
+    ub_world_free(&g_world);
+    ub_world_init(&g_world);
+    ub_fmt(g_world.name, sizeof g_world.name, "Uniblox demo");
+    i32 ws = ub_world_workspace(&g_world);
+    ub_world_add(&g_world, -1, UB_CLASS_LIGHTING, NULL, "Lighting");
+    g_world.lighting.clock_time = 14.0f;
+    g_world.lighting.fog_end = 850.0f;
 
-    /* room */
-    add_part(UB_SHAPE_BOX, 0, 0.05f, 40, 36, 0.1f, 36, 0xA0703C, UB_MAT_WOOD);       /* floor */
-    add_part(UB_SHAPE_BOX, 0, 6, 58.5f, 38, 12, 1, 0xB04A30, UB_MAT_BRICK);          /* north */
-    add_part(UB_SHAPE_BOX, -18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);        /* west */
-    add_part(UB_SHAPE_BOX, 18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);         /* east */
-    add_part(UB_SHAPE_BOX, -11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);     /* south, left */
-    add_part(UB_SHAPE_BOX, 11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);      /* south, right */
-    add_part(UB_SHAPE_BOX, 0, 10, 21.5f, 8, 4, 1, 0xB04A30, UB_MAT_BRICK);           /* lintel */
-    for (int i = 0; i < 4; ++i)                                                       /* pillars */
-        add_part(UB_SHAPE_CYLINDER, (i & 1) ? 14.0f : -14.0f, 6, (i & 2) ? 54.0f : 26.0f,
-                 2.5f, 12, 2.5f, 0x9A9A9A, UB_MAT_STONE);
-    for (int i = 0; i < 6; ++i)                                                       /* stairs */
-        add_part(UB_SHAPE_BOX, 15, (f32)(i + 1) * 0.5f, 31.0f + (f32)i * 3.0f, 5, (f32)(i + 1), 3,
-                 0x8B5A2B, UB_MAT_WOOD);
-    add_part(UB_SHAPE_WEDGE, -12, 1.5f, 46, 6, 3, 8, 0x8090A0, UB_MAT_METAL);         /* ramp */
-    add_part(UB_SHAPE_BOX, -12, 1.5f, 53, 6, 3, 6, 0x8090A0, UB_MAT_METAL);           /* landing */
-    add_part(UB_SHAPE_CYLINDER, 0, 1.5f, 40, 4, 3, 4, 0x7A8590, UB_MAT_METAL);        /* pedestal */
-    g_spinner = g_part_count;
-    add_part(UB_SHAPE_BOX, 0, 6, 40, 3, 3, 3, 0x2E8BEF, UB_MAT_PLASTIC);              /* spinner */
-    add_part(UB_SHAPE_BALL, -6, 1.5f, 30, 3, 3, 3, 0xF2C230, UB_MAT_PLASTIC);
-    add_part(UB_SHAPE_BALL, 6, 1.0f, 33, 2, 2, 2, 0x30C060, UB_MAT_PLASTIC);
-    add_part(UB_SHAPE_BALL, -4, 1.0f, 50, 2, 2, 2, 0xE04080, UB_MAT_PLASTIC);
-    add_part(UB_SHAPE_BOX, 6, 3.0f, 50, 6, 0.4f, 4, 0x9C6B3A, UB_MAT_WOOD);           /* table */
+    add_part(ws, "Baseplate", UB_SHAPE_BOX, 0, -0.5f, 20, 300, 1, 300, 0x4C8C3C, UB_MAT_GRASS);
+    i32 house = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "House");
+    add_part(house, "Floor", UB_SHAPE_BOX, 0, 0.05f, 40, 36, 0.1f, 36, 0xA0703C, UB_MAT_WOOD);
+    add_part(house, "NorthWall", UB_SHAPE_BOX, 0, 6, 58.5f, 38, 12, 1, 0xB04A30, UB_MAT_BRICK);
+    add_part(house, "WestWall", UB_SHAPE_BOX, -18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);
+    add_part(house, "EastWall", UB_SHAPE_BOX, 18.5f, 6, 40, 1, 12, 36, 0xB04A30, UB_MAT_BRICK);
+    add_part(house, "SouthWallLeft", UB_SHAPE_BOX, -11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);
+    add_part(house, "SouthWallRight", UB_SHAPE_BOX, 11.5f, 6, 21.5f, 15, 12, 1, 0xB04A30, UB_MAT_BRICK);
+    add_part(house, "Lintel", UB_SHAPE_BOX, 0, 10, 21.5f, 8, 4, 1, 0xB04A30, UB_MAT_BRICK);
     for (int i = 0; i < 4; ++i)
-        add_part(UB_SHAPE_BOX, (i & 1) ? 8.6f : 3.4f, 1.4f, (i & 2) ? 51.6f : 48.4f,
+        add_part(house, "Pillar", UB_SHAPE_CYLINDER, (i & 1) ? 14.0f : -14.0f, 6, (i & 2) ? 54.0f : 26.0f,
+                 2.5f, 12, 2.5f, 0x9A9A9A, UB_MAT_STONE);
+    for (int i = 0; i < 6; ++i)
+        add_part(house, "Step", UB_SHAPE_BOX, 15, (f32)(i + 1) * 0.5f, 31.0f + (f32)i * 3.0f, 5, (f32)(i + 1), 3,
+                 0x8B5A2B, UB_MAT_WOOD);
+    add_part(house, "Ramp", UB_SHAPE_WEDGE, -12, 1.5f, 46, 6, 3, 8, 0x8090A0, UB_MAT_METAL);
+    add_part(house, "Landing", UB_SHAPE_BOX, -12, 1.5f, 53, 6, 3, 6, 0x8090A0, UB_MAT_METAL);
+    add_part(house, "Pedestal", UB_SHAPE_CYLINDER, 0, 1.5f, 40, 4, 3, 4, 0x7A8590, UB_MAT_METAL);
+    add_part(house, "Spinner", UB_SHAPE_BOX, 0, 6, 40, 3, 3, 3, 0x2E8BEF, UB_MAT_PLASTIC);
+    add_part(house, "Ball", UB_SHAPE_BALL, -6, 1.5f, 30, 3, 3, 3, 0xF2C230, UB_MAT_PLASTIC);
+    add_part(house, "Ball", UB_SHAPE_BALL, 6, 1.0f, 33, 2, 2, 2, 0x30C060, UB_MAT_PLASTIC);
+    add_part(house, "Ball", UB_SHAPE_BALL, -4, 1.0f, 50, 2, 2, 2, 0xE04080, UB_MAT_PLASTIC);
+    i32 table = ub_world_add(&g_world, house, UB_CLASS_MODEL, NULL, "Table");
+    add_part(table, "Top", UB_SHAPE_BOX, 6, 3.0f, 50, 6, 0.4f, 4, 0x9C6B3A, UB_MAT_WOOD);
+    for (int i = 0; i < 4; ++i)
+        add_part(table, "Leg", UB_SHAPE_BOX, (i & 1) ? 8.6f : 3.4f, 1.4f, (i & 2) ? 51.6f : 48.4f,
                  0.4f, 2.8f, 0.4f, 0x6E4A26, UB_MAT_WOOD);
 
-    /* outside */
-    for (int i = 0; i < 4; ++i)                                                       /* path */
-        add_part(UB_SHAPE_BOX, 0, 0.05f, 2.5f + (f32)i * 5.0f, 4, 0.1f, 4, 0x8A8A8A, UB_MAT_STONE);
-    add_tree(-30, 8, 1.0f);
-    add_tree(32, -6, 1.2f);
-    add_tree(-34, 68, 0.9f);
-    add_tree(38, 62, 1.1f);
-    add_tree(-8, -30, 1.0f);
+    ub_part spawn;
+    memset(&spawn, 0, sizeof spawn);
+    spawn.pos = v3(0, 0.05f, 2.5f);
+    spawn.rot = mat3_identity();
+    spawn.size = v3(4, 0.1f, 4);
+    spawn.color = 0x8A8A8A;
+    spawn.shape = UB_SHAPE_BOX;
+    spawn.material = UB_MAT_STONE;
+    spawn.flags = UB_PART_ANCHORED | UB_PART_CAN_COLLIDE;
+    ub_world_add_part(&g_world, ws, UB_CLASS_SPAWN, NULL, "SpawnLocation", &spawn);
+    for (int i = 1; i < 4; ++i)
+        add_part(ws, "Path", UB_SHAPE_BOX, 0, 0.05f, 2.5f + (f32)i * 5.0f, 4, 0.1f, 4, 0x8A8A8A, UB_MAT_STONE);
+    add_tree(ws, -30, 8, 1.0f);
+    add_tree(ws, 32, -6, 1.2f);
+    add_tree(ws, -34, 68, 0.9f);
+    add_tree(ws, 38, 62, 1.1f);
+    add_tree(ws, -8, -30, 1.0f);
     static const u32 tower[4] = { 0xD94040, 0xF2B233, 0x3FAE4A, 0x3F6FD9 };
-    for (int i = 0; i < 4; ++i) {                                                     /* block tower */
-        ub_part_draw *p = add_part(UB_SHAPE_BOX, 28, 1.5f + (f32)i * 3.0f, 20, 3, 3, 3, tower[i],
-                                   UB_MAT_PLASTIC);
-        p->rot = mat3_from_euler((f32)i * 0.3f, 0, 0);
+    i32 stack = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "Tower");
+    for (int i = 0; i < 4; ++i) {
+        i32 b = add_part(stack, "Block", UB_SHAPE_BOX, 28, 1.5f + (f32)i * 3.0f, 20, 3, 3, 3, tower[i], UB_MAT_PLASTIC);
+        g_world.parts[g_world.inst[b].part].rot = mat3_from_euler((f32)i * 0.3f, 0, 0);
     }
-    add_part(UB_SHAPE_BOX, -40, 0.5f, -20, 20, 1, 20, 0xA3A2A5, UB_MAT_GRID);         /* grid pad */
-    add_part(UB_SHAPE_WEDGE, -40, 1.5f, -7, 8, 2, 6, 0xA3A2A5, UB_MAT_GRID);
-    ub_info("scene: %d parts", g_part_count);
+    add_part(ws, "GridPad", UB_SHAPE_BOX, -40, 0.5f, -20, 20, 1, 20, 0xA3A2A5, UB_MAT_GRID);
+    add_part(ws, "GridRamp", UB_SHAPE_WEDGE, -40, 1.5f, -7, 8, 2, 6, 0xA3A2A5, UB_MAT_GRID);
+    g_demo_world = true;
+    g_imported = false;
+}
+
+/* Height of the walkable surface under (x, z), searching down from `from_y`. */
+static bool ground_below(f32 x, f32 from_y, f32 z, f32 *out)
+{
+    ub_ray_hit h;
+    if (!ub_world_raycast(&g_world, g_world.workspace, v3(x, from_y, z), v3(0, -1, 0), 5000.0f, &h)) return false;
+    *out = h.point.y;
+    return true;
+}
+
+/* After loading: hand static parts to the renderer, find the spawn point. */
+static void world_changed(void)
+{
+    i32 ws = ub_world_workspace(&g_world);
+    g_spinner = g_demo_world ? ub_world_find_child(&g_world, ub_world_find_child(&g_world, ws, "House"), "Spinner") : -1;
+    plat_free(g_statics);
+    g_statics = (ub_part_draw *)plat_alloc(sizeof(ub_part_draw) * (size_t)(g_world.part_count + 1));
+    g_static_count = 0;
+    i32 spawn = -1;
+    vec3 lo = v3(1e30f, 1e30f, 1e30f), hi = v3(-1e30f, -1e30f, -1e30f);
+    for (i32 i = 0; i < g_world.count && g_statics; ++i) {
+        const ub_instance *in = &g_world.inst[i];
+        if (in->part < 0 || !ub_world_is_descendant(&g_world, i, ws)) continue;
+        if (in->cls == UB_CLASS_SPAWN && spawn < 0) spawn = i;
+        const ub_part *p = &g_world.parts[in->part];
+        if (p->transparency >= 250 || i == g_spinner) continue; /* invisible, or animated */
+        g_statics[g_static_count++] = part_draw(p);
+        lo = v3(UB_MIN(lo.x, p->pos.x), UB_MIN(lo.y, p->pos.y), UB_MIN(lo.z, p->pos.z));
+        hi = v3(UB_MAX(hi.x, p->pos.x), UB_MAX(hi.y, p->pos.y), UB_MAX(hi.z, p->pos.z));
+    }
+    ub_render_set_static(g_statics, g_static_count);
+
+    if (spawn >= 0) {
+        const ub_part *sp = &g_world.parts[g_world.inst[spawn].part];
+        g_spawn = v3_add(sp->pos, v3_scale(sp->rot.y, sp->size.y * 0.5f));
+    } else {
+        vec3 c = g_static_count ? v3_scale(v3_add(lo, hi), 0.5f) : v3(0, 0, 0);
+        f32 gy;
+        g_spawn = ground_below(c.x, hi.y + 100.0f, c.z, &gy) ? v3(c.x, gy, c.z) : v3(c.x, 0, c.z);
+    }
+    g_bench_center = g_demo_world ? v3(0, 3, 40) : v3_add(g_spawn, v3(0, 3, 0));
+    g_px = g_spawn.x;
+    g_py = g_spawn.y;
+    g_pz = g_spawn.z;
+    g_vy = 0;
+    char title[128];
+    ub_fmt(title, sizeof title, "Uniblox - %s", g_world.name);
+    plat_set_title(title);
+    ub_info("world: \"%s\", %d instances, %d parts drawn, spawn at %d,%d,%d%s", g_world.name, g_world.count,
+            g_static_count, ub_roundf(g_spawn.x), ub_roundf(g_spawn.y), ub_roundf(g_spawn.z),
+            spawn >= 0 ? "" : " (no SpawnLocation)");
+}
+
+/* The last path component without its extension, for naming imports. */
+static void base_name(const char *path, char *out, int cap)
+{
+    const char *b = path;
+    for (const char *p = path; *p; ++p)
+        if (*p == '/' || *p == '\\' || *p == ':') b = p + 1;
+    int n = 0;
+    while (b[n] && b[n] != '.' && n < cap - 1) {
+        out[n] = b[n];
+        ++n;
+    }
+    out[n] = 0;
+}
+
+/* Load a .ubx or Roblox .rbxl/.rbxm place. user_path: chosen by the user
+ * (command line), so any path is allowed; otherwise a checked game path. */
+static bool load_place(const char *path, bool user_path)
+{
+    void *data;
+    u32 size;
+    bool read = user_path ? plat_file_read_user(path, PLACE_MAX_BYTES, &data, &size)
+                          : plat_file_read_all(path, PLACE_MAX_BYTES, &data, &size);
+    if (!read) {
+        ub_warn("could not read place \"%s\"", path);
+        ub_fmt(g_status, sizeof g_status, "Could not open %s", path);
+        return false;
+    }
+    u64 t0 = plat_time_us();
+    ub_world w;
+    ub_world_init(&w);
+    ub_load_result r;
+    bool roblox = ub_rbxl_detect((const u8 *)data, size);
+    if (roblox) r = ub_rbxl_load(&w, (const u8 *)data, size, &g_import);
+    else r = ub_ubx_load(&w, (const u8 *)data, size);
+    plat_free(data);
+    if (r != UB_LOAD_OK) {
+        ub_warn("could not load place \"%s\": %s", path, ub_load_result_name(r));
+        ub_fmt(g_status, sizeof g_status, "Could not load %s: %s", path, ub_load_result_name(r));
+        ub_world_free(&w);
+        return false;
+    }
+    if (roblox) base_name(path, w.name, sizeof w.name);
+    ub_world_free(&g_world);
+    g_world = w;
+    g_demo_world = false;
+    g_imported = roblox;
+    u32 ms = (u32)((plat_time_us() - t0) / 1000u);
+    if (roblox) {
+        ub_info("imported Roblox place \"%s\" in %u ms: %u instances, %u classes, %u parts, %u mesh/union "
+                "placeholders, %u invisible, %u terrain (not imported), compression %s",
+                path, ms, g_import.instances, g_import.classes, g_import.parts, g_import.placeholders,
+                g_import.invisible, g_import.terrain, g_import.compression);
+        ub_fmt(g_status, sizeof g_status, "Imported %s: %u parts, %u mesh boxes%s", w.name, g_import.parts,
+               g_import.placeholders, g_import.terrain ? ", terrain skipped" : "");
+    } else {
+        ub_info("loaded place \"%s\" in %u ms", path, ms);
+        ub_fmt(g_status, sizeof g_status, "Loaded %s", w.name);
+    }
+    world_changed();
+    return true;
+}
+
+/* F7: save the current world as places/<name>.ubx. */
+static void save_place(void)
+{
+    char name[48];
+    int n = 0;
+    for (const char *p = g_world.name; *p && n < 40; ++p) {
+        char c = *p;
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        name[n++] = ok ? c : '_';
+    }
+    if (!n) name[n++] = 'p';
+    name[n] = 0;
+    char path[80];
+    ub_fmt(path, sizeof path, "places/%s.ubx", name);
+    u8 *data;
+    u32 size;
+    if (!plat_make_dir("places") || !ub_ubx_save(&g_world, &data, &size)) {
+        ub_fmt(g_status, sizeof g_status, "Could not save %s", path);
+        return;
+    }
+    bool ok = plat_file_write_all(path, data, size);
+    plat_free(data);
+    ub_info("%s %s (%u bytes)", ok ? "saved" : "could not save", path, size);
+    ub_fmt(g_status, sizeof g_status, "%s %s", ok ? "Saved" : "Could not save", path);
+}
+
+/* Roblox-style lighting -> renderer environment: sun position from the
+ * clock time and latitude (equinox), fog from FogEnd. */
+static ub_render_env env_from_world(void)
+{
+    ub_render_env e = ub_render_default_env();
+    const ub_lighting *l = &g_world.lighting;
+    f32 h = (l->clock_time - 12.0f) * (UB_PI / 12.0f);        /* hour angle */
+    f32 lat = l->latitude * (UB_PI / 180.0f);
+    /* east = +X, north = +Z here (Roblox's north is -Z; Z is flipped) */
+    vec3 sun = v3(-ub_sinf(h), ub_cosf(lat) * ub_cosf(h), -ub_sinf(lat) * ub_cosf(h));
+    f32 day = ub_clampf((sun.y + 0.05f) / 0.25f, 0.0f, 1.0f);  /* fades out at dusk */
+    if (sun.y < 0.12f) sun.y = 0.12f;                           /* keep some modelling at night */
+    e.sun_dir = v3_normalize(sun);
+    f32 b = ub_clampf(l->brightness / 2.0f, 0.4f, 1.5f) * (0.15f + 0.85f * day);
+    e.sun_strength *= b;
+    u32 sc = e.sun_color;
+    u32 r = (u32)UB_MIN(255.0f, (f32)((sc >> 16) & 255) * b), g = (u32)UB_MIN(255.0f, (f32)((sc >> 8) & 255) * b),
+        bl = (u32)UB_MIN(255.0f, (f32)(sc & 255) * b);
+    e.sun_color = (r << 16) | (g << 8) | bl;
+    if (day < 1.0f) { /* dusk/night sky */
+        e.sky_top = 0x0B1630;
+        e.sky_horizon = day > 0.3f ? 0xE0905A : 0x1C2A48;
+    }
+    e.fog_density = l->fog_end > 1.0f && l->fog_end < 20000.0f ? 3.0f / l->fog_end : 0.0012f;
+    return e;
 }
 
 /* ------------------------------------------------------------ sounds */
@@ -286,6 +499,10 @@ static void load_config(void)
         else if (key_is(line, "sw_height", &v)) g_prefs.sw_height = UB_CLAMP(parse_int(v), 0, 4320);
         else if (key_is(line, "quality", &v)) g_quality = UB_CLAMP(parse_int(v), 0, UB_QUALITY_COUNT - 1);
         else if (key_is(line, "gl_shaders", &v)) g_gl_shaders = parse_int(v) != 0;
+        else if (key_is(line, "place", &v)) {
+            ub_fmt(g_cfg_place, sizeof g_cfg_place, "%s", v);
+            if (!g_place_arg[0] && v[0]) ub_fmt(g_place_arg, sizeof g_place_arg, "@%s", v);
+        }
         *end = saved;
         line = end;
         while (*line == '\n' || *line == '\r') ++line;
@@ -297,7 +514,7 @@ static void load_config(void)
 static void save_config(void)
 {
     static const char *const renderer[] = { "auto", "opengl", "software" };
-    char text[1024];
+    char text[1536];
     int n = ub_fmt(text, sizeof text,
                    "# Uniblox settings (written on exit)\r\n"
                    "# renderer: auto (OpenGL if available), opengl or software\r\n"
@@ -313,10 +530,13 @@ static void save_config(void)
                    "sw_height=%d\r\n"
                    "# colors (software renderer): 0 = automatic, 8 = 256-colour palette, 32 = full colour\r\n"
                    "colors=%d\r\n"
-                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\nmuted=%d\r\n",
+                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\nmuted=%d\r\n"
+                   "# place: place file to open at start, relative to this folder (.ubx, .rbxl or .rbxm),\r\n"
+                   "# e.g. places/castle.ubx. Empty = the built-in demo. A file named on the command line wins\r\n"
+                   "place=%s\r\n",
                    renderer[g_prefs.backend], g_quality, g_gl_shaders, g_prefs.fps_cap, g_prefs.vsync,
                    g_prefs.fullscreen, g_win_w, g_win_h, g_prefs.sw_height, g_colors_cfg,
-                   (i32)g_zoom, DEG(ub_wrap_angle(g_yaw)), DEG(g_pitch), g_muted);
+                   (i32)g_zoom, DEG(ub_wrap_angle(g_yaw)), DEG(g_pitch), g_muted, g_cfg_place);
     if (plat_file_write_all(CONFIG_PATH, text, (u32)n)) ub_info("saved %s", CONFIG_PATH);
     else ub_warn("could not save %s", CONFIG_PATH);
 }
@@ -341,6 +561,7 @@ static void draw_limb(vec3 base, const mat3 *body, vec3 pivot, vec3 size, f32 sw
     p.color = color;
     p.shape = UB_SHAPE_BOX;
     p.material = (u8)mat;
+    p.flags = 0;
     ub_render_part(&p);
 }
 
@@ -360,6 +581,7 @@ static void draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amoun
     torso.color = shirt;
     torso.shape = UB_SHAPE_BOX;
     torso.material = UB_MAT_PLASTIC;
+    torso.flags = 0;
     ub_render_part(&torso);
     draw_limb(base, &body, v3(-1.5f, 4.0f, 0), v3(0.9f, 2.0f, 0.9f), -swing, skin, UB_MAT_PLASTIC);
     draw_limb(base, &body, v3(1.5f, 4.0f, 0), v3(0.9f, 2.0f, 0.9f), swing, skin, UB_MAT_PLASTIC);
@@ -376,6 +598,7 @@ static void draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amoun
 void app_preinit(ub_display_prefs *prefs)
 {
     g_prefs = *prefs; /* platform defaults: 120 fps cap, software height 480 */
+    plat_command_line_arg(g_place_arg, sizeof g_place_arg); /* "uniblox.exe castle.rbxl" */
     load_config();
     *prefs = g_prefs;
     g_win_w = prefs->window_w;
@@ -402,7 +625,15 @@ bool app_init(const ub_system_info *sys, const ub_frame *frame)
         g_win_w = frame->width;
         g_win_h = frame->height;
     }
-    build_scene();
+    /* the place: command line, else place= in the config (a game path,
+     * marked with '@'), else the built-in demo */
+    bool loaded = false;
+    if (g_place_arg[0] == '@') loaded = load_place(g_place_arg + 1, false);
+    else if (g_place_arg[0]) loaded = load_place(g_place_arg, true);
+    if (!loaded) {
+        build_demo_world();
+        world_changed();
+    }
     load_sound(&g_snd_jump, "sounds/jump.wav", synth_jump);
     load_sound(&g_snd_land, "sounds/land.wav", synth_land);
     load_sound(&g_snd_click, "sounds/click.wav", synth_click);
@@ -417,6 +648,10 @@ void app_shutdown(void)
     ub_sound_free(&g_snd_jump);
     ub_sound_free(&g_snd_land);
     ub_sound_free(&g_snd_click);
+    ub_render_set_static(NULL, 0);
+    plat_free(g_statics);
+    g_statics = NULL;
+    ub_world_free(&g_world);
     ub_render_shutdown();
     ub_info("demo: %u jumps, %u clicks", g_jumps, g_clicks);
 }
@@ -552,6 +787,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
             ub_info("software render height: %d%s", g_prefs.sw_height, g_prefs.sw_height ? "" : " (window)");
         }
     }
+    if (play_keys && in->key_pressed[UB_KEY_F7]) save_place();
     if (play_keys && fb && in->key_pressed[UB_KEY_F8]) {
         ub_pixel_format next = fb->format == UB_PIXEL_INDEX8 ? UB_PIXEL_XRGB32 : UB_PIXEL_INDEX8;
         g_colors_cfg = next == UB_PIXEL_INDEX8 ? 8 : 32;
@@ -602,26 +838,41 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     if (moving) g_walk_phase = ub_wrap_angle(g_walk_phase + dt * 10.0f);
     g_px = ub_clampf(g_px + mx * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
     g_pz = ub_clampf(g_pz + mz * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
+    if (!(g_px == g_px) || !(g_pz == g_pz)) { g_px = g_spawn.x; g_pz = g_spawn.z; } /* NaN guard */
 
-    bool on_ground = g_py <= 0.0f;
-    /* pressed-or-held: at low frame rates a quick tap can start and end
-     * between two frames, so key_down alone would miss it */
+    /* stand on whatever is below: search from a step's height above the
+     * feet, so walking up stairs and ramps works; walls are not solid yet
+     * (that comes with physics in milestone 4) */
+    f32 ground = -1e9f;
+    bool has_ground = ground_below(g_px, g_py + STEP_UP, g_pz, &ground);
+    bool on_ground = has_ground && g_py <= ground + 0.05f;
     if (play_keys && (in->key_down[UB_KEY_SPACE] || in->key_pressed[UB_KEY_SPACE]) && on_ground) {
         g_vy = JUMP_SPEED;
         g_jumps++;
         ub_debug("jump %u", g_jumps);
         ub_mixer_play(&g_snd_jump, ub_play_default());
+        on_ground = false;
     }
-    g_vy -= GRAVITY * dt;
-    g_py += g_vy * dt;
-    if (g_py < 0.0f) {
-        if (!on_ground) {
+    if (on_ground && g_vy <= 0) {
+        g_py = ground; /* follow the surface, including steps up */
+        g_vy = 0;
+    } else {
+        g_vy -= GRAVITY * dt;
+        g_py += g_vy * dt;
+        if (has_ground && g_py <= ground) {
             ub_play_params p = ub_play_default();
             p.volume = ub_clampf(-g_vy / JUMP_SPEED, 0.2f, 1.0f);
             ub_mixer_play(&g_snd_land, p);
+            g_py = ground;
+            g_vy = 0;
         }
-        g_py = 0.0f;
-        g_vy = 0.0f;
+    }
+    if (g_py < g_spawn.y - 500.0f) { /* fell off the world */
+        ub_info("fell out of the world; respawning");
+        g_px = g_spawn.x;
+        g_py = g_spawn.y;
+        g_pz = g_spawn.z;
+        g_vy = 0;
     }
 
     /* --- other input --- */
@@ -644,8 +895,8 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     }
 
     /* --- animate --- */
-    if (g_spinner >= 0)
-        g_parts[g_spinner].rot = mat3_from_euler(g_time * 0.9f, g_time * 0.5f, g_time * 0.3f);
+    if (g_spinner >= 0 && g_world.inst[g_spinner].part >= 0)
+        g_world.parts[g_world.inst[g_spinner].part].rot = mat3_from_euler(g_time * 0.9f, g_time * 0.5f, g_time * 0.3f);
 
     /* --- camera --- */
     ub_camera cam;
@@ -654,10 +905,10 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_bench_t += (f32)real_dt_us * 1e-6f;
         f32 t = g_bench_t / (f32)BENCH_SECONDS;
         f32 a = t * UB_TWO_PI;
-        vec3 target = v3(0, 3, 40);
+        vec3 target = g_bench_center;
         cam.pitch = -0.3f - 0.2f * ub_sinf(a * 2.0f);
         f32 dist = 30.0f - 12.0f * ub_sinf(a);
-        cam.pos = v3(target.x + ub_sinf(a) * dist, 8.0f + 4.0f * ub_sinf(a * 2.0f),
+        cam.pos = v3(target.x + ub_sinf(a) * dist, target.y + 5.0f + 4.0f * ub_sinf(a * 2.0f),
                      target.z + ub_cosf(a) * dist);
         cam.yaw = ub_wrap_angle(a + UB_PI);
         cam.focus = target;
@@ -675,9 +926,13 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     cam.far_dist = 600.0f;
 
     /* --- render --- */
-    ub_render_env env = ub_render_default_env();
+    ub_render_env env = env_from_world();
     ub_render_begin(frame, &cam, &env);
-    for (int i = 0; i < g_part_count; ++i) ub_render_part(&g_parts[i]);
+    /* static parts were handed over once (world_changed); only moving ones here */
+    if (g_spinner >= 0 && g_world.inst[g_spinner].part >= 0) {
+        ub_part_draw d = part_draw(&g_world.parts[g_world.inst[g_spinner].part]);
+        ub_render_part(&d);
+    }
     if (!g_bench) draw_character(g_px, g_py, g_pz, g_facing, g_walk_phase, g_walk_amount);
     ub_render_end_scene();
 
@@ -712,12 +967,14 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         if (g_bench) {
             LINE("BENCHMARK running: %u s left (Esc cancels)", (u32)((f32)BENCH_SECONDS - g_bench_t) + 1u);
         } else {
+            LINE("Place: %s (%d parts)%s", g_world.name, g_static_count, g_imported ? " - imported from Roblox" : "");
+            if (g_status[0]) LINE("%s", g_status);
             LINE("Audio: %s%s", g_sys.audio_desc, g_muted ? " (muted)" : "");
             if (g_bench_result[0]) LINE("%s", g_bench_result);
             if (g_typing) LINE("Say: %s_   (Enter send, Esc cancel)", g_typed);
             else if (g_last_message[0]) LINE("Last message: %s", g_last_message);
             LINE("WASD move, Space jump, right mouse look, wheel zoom, F11 fullscreen");
-            LINE("F5 benchmark, F6 %s, F8 colours, F9 fps cap, F3 hide text, Esc quit",
+            LINE("F5 benchmark, F6 %s, F7 save place, F8 colours, F9 fps cap, F3 hide text, Esc quit",
                  frame->backend == UB_BACKEND_OPENGL ? "quality" : "resolution");
         }
 #undef LINE

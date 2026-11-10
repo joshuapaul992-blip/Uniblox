@@ -8,7 +8,7 @@
 # renderer is "software" (default) or "opengl"; OpenGL needs a GLX-capable
 # X server (Xvfb with Mesa works).
 #
-# Runs build/win32/uniblox.exe twice with Wine pretending to be the given
+# Runs build/win32/uniblox.exe three times with Wine pretending to be the given
 # Windows version, drives it with real X keyboard/mouse events (xdotool),
 # then checks uniblox.log and uniblox.cfg for the expected results.
 #
@@ -33,7 +33,9 @@ done
 
 export WINEPREFIX=${WINEPREFIX:-$PWD/build/wineprefix}
 export WINEDEBUG=-all
-rm -f "$LOG" "$DIR/uniblox.old.log" "$CFG"
+RUN1=$DIR/smoke-run1.log
+RUN2=$DIR/smoke-run2.log
+rm -f "$LOG" "$DIR/uniblox.old.log" "$CFG" "$DIR/places/castle-generated.ubx" "$RUN1" "$RUN2"
 printf 'renderer=%s\r\n' "$RENDERER" > "$CFG"
 mkdir -p "$(dirname "$SHOT")"
 
@@ -44,8 +46,8 @@ VER=$1 EXE=$2 SHOT=$3 RENDERER=$4
 wine reg add 'HKCU\Software\Wine' /v Version /d "$VER" /f >/dev/null 2>&1
 
 start_game() {
-    wine "$EXE" & GAME_PID=$!
-    WIN=$(timeout 60 xdotool search --sync --name '^Uniblox$' | head -1)
+    wine "$EXE" "$@" & GAME_PID=$!
+    WIN=$(timeout 60 xdotool search --sync --name '^Uniblox' | head -1)
     xdotool windowfocus --sync "$WIN" 2>/dev/null || true
     # the window exists before the renderer is ready (OpenGL setup can take
     # seconds under load); input sent earlier would pile up into one frame
@@ -98,7 +100,16 @@ xdotool key F11; sleep 1                                # back to a window
 xdotool key F5; sleep 11.5                              # benchmark (10 s)
 stop_game
 
-# Run 2: settings must load back.
+# Run 2: settings must load back; also import a Roblox place from the
+# command line and save it as .ubx with F7.
+start_game 'tests\\data\\rbx\\castle-generated.rbxl'
+xdotool key F7; sleep 1
+stop_game
+cp build/win32/uniblox.old.log build/win32/smoke-run1.log
+cp build/win32/uniblox.log build/win32/smoke-run2.log
+
+# Run 3: open the saved .ubx through place= in the settings file.
+sed -i 's|^place=.*|place=places/castle-generated.ubx\r|' build/win32/uniblox.cfg
 start_game
 stop_game
 wineserver -k 2>/dev/null || true
@@ -109,34 +120,40 @@ expect() { # expect <file> <pattern> <description>
     if grep -q -- "$2" "$1"; then echo "  ok    $3"; else echo "  FAIL  $3 (no \"$2\" in $1)"; fail=1; fi
 }
 echo "Smoke test ($VER, $RENDERER renderer):"
-expect "$LOG" "Windows" "OS detected"
-expect "$LOG" "audio: " "audio initialised (device or graceful fallback)"
-expect "$LOG" "demo ready" "app started"
-expect "$LOG" "loaded uniblox.cfg" "settings loaded on second run"
-expect "$LOG" "shutdown complete" "clean shutdown"
-expect "$DIR/uniblox.old.log" "jump 1" "space bar jumped"
-expect "$DIR/uniblox.old.log" "typed: hi" "typed text received"
-expect "$DIR/uniblox.old.log" "click 1 at" "left click received"
-expect "$DIR/uniblox.old.log" "mouse look on" "right button started mouse-look"
-expect "$DIR/uniblox.old.log" "saved uniblox.cfg" "settings saved"
-expect "$DIR/uniblox.old.log" "benchmark: [0-9]* frames" "F5 benchmark completed"
-expect "$DIR/uniblox.old.log" "frame rate cap 144" "F9 changed the fps cap"
+expect "$RUN1" "Windows" "OS detected"
+expect "$RUN1" "audio: " "audio initialised (device or graceful fallback)"
+expect "$RUN1" "demo ready" "app started"
+expect "$RUN2" "loaded uniblox.cfg" "settings loaded on second run"
+expect "$RUN2" "shutdown complete" "clean shutdown"
+expect "$RUN2" "imported Roblox place" "Roblox place imported from the command line"
+expect "$RUN2" "18 parts, 1 mesh/union placeholders" "all castle parts imported"
+expect "$RUN2" "saved places/castle-generated.ubx" "F7 saved the place as .ubx"
+expect "$LOG" "loaded place \"places/castle-generated.ubx\"" "place= in the settings opened the saved .ubx"
+expect "$LOG" "shutdown complete" "third run shut down cleanly"
+expect "$CFG" "place=places/castle-generated.ubx" "place= kept when settings are rewritten"
+expect "$RUN1" "jump 1" "space bar jumped"
+expect "$RUN1" "typed: hi" "typed text received"
+expect "$RUN1" "click 1 at" "left click received"
+expect "$RUN1" "mouse look on" "right button started mouse-look"
+expect "$RUN1" "saved uniblox.cfg" "settings saved"
+expect "$RUN1" "benchmark: [0-9]* frames" "F5 benchmark completed"
+expect "$RUN1" "frame rate cap 144" "F9 changed the fps cap"
 expect "$CFG" "fps_cap=144" "fps cap saved"
-expect "$DIR/uniblox.old.log" "display: fullscreen" "F11 went fullscreen"
-expect "$DIR/uniblox.old.log" "display: windowed" "F11 came back to a window"
+expect "$RUN1" "display: fullscreen" "F11 went fullscreen"
+expect "$RUN1" "display: windowed" "F11 came back to a window"
 if [ "$RENDERER" = opengl ]; then
-    expect "$DIR/uniblox.old.log" "renderer: OpenGL" "OpenGL renderer started"
-    expect "$DIR/uniblox.old.log" "quality: medium" "F6 changed graphics quality"
+    expect "$RUN1" "renderer: OpenGL" "OpenGL renderer started"
+    expect "$RUN1" "quality: medium" "F6 changed graphics quality"
 else
-    expect "$DIR/uniblox.old.log" "renderer: software" "software renderer started"
-    expect "$DIR/uniblox.old.log" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
+    expect "$RUN1" "renderer: software" "software renderer started"
+    expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
     expect "$CFG" "colors=32" "colour choice saved"
-    expect "$DIR/uniblox.old.log" "software render height" "F6 changed the render resolution"
+    expect "$RUN1" "software render height" "F6 changed the render resolution"
 fi
 expect "$CFG" "zoom=14" "mouse wheel zoomed in 3 notches (22 -> 14)"
 if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
 else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
-grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$DIR/uniblox.old.log" | sed 's/^/  /' || true
+grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$RUN1" | sed 's/^/  /' || true
 echo "Screenshots: $SHOT, ${SHOT%.png}-fullscreen.png"
-echo "Log:        $LOG (previous run: $DIR/uniblox.old.log)"
+echo "Logs:       $RUN1, $RUN2, $LOG"
 exit $fail

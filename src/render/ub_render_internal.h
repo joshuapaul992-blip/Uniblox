@@ -15,6 +15,7 @@ void sw_end(ub_render_stats *stats);
 bool gl_init(char *desc, int desc_len, bool fixed_function);
 void gl_shutdown(void);
 void gl_set_quality(ub_quality q);
+void gl_set_static(const ub_part_draw *parts, int count);
 void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_env *env,
                    const ub_part_draw *parts, int count, ub_render_stats *stats);
 void gl_begin_2d(int width, int height);

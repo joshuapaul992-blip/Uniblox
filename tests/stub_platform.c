@@ -38,3 +38,7 @@ void plat_set_fullscreen(bool on) { (void)on; }
 void plat_set_fps_cap(u32 fps) { (void)fps; }
 void *plat_gl_proc(const char *name) { (void)name; return NULL; }
 bool plat_font_atlas(int px, ub_font_atlas *out) { (void)px; (void)out; return false; }
+bool plat_make_dir(const char *p) { (void)p; return false; }
+bool plat_file_read_user(const char *p, u32 m, void **d, u32 *s) { (void)p; (void)m; *d = NULL; *s = 0; return false; }
+bool plat_command_line_arg(char *out, int cap) { (void)out; (void)cap; return false; }
+void plat_set_title(const char *t) { (void)t; }

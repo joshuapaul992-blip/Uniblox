@@ -7,6 +7,7 @@
 #ifndef UB_GL_H
 #define UB_GL_H
 
+#include <stddef.h>
 #include "core/ub_types.h"
 
 #if defined(_WIN32)
@@ -116,6 +117,8 @@ typedef char GLchar;
 #define GL_FRAMEBUFFER 0x8D40
 #define GL_RENDERBUFFER 0x8D41
 #define GL_MAX_SAMPLES 0x8D57
+#define GL_ARRAY_BUFFER 0x8892
+#define GL_STATIC_DRAW 0x88E4
 
 /* X(return type, name, parameter list, alternative name or NULL) */
 #define UBGL_CORE(X) \
@@ -207,6 +210,13 @@ typedef char GLchar;
     X(void, glDeleteRenderbuffers, (GLsizei, const GLuint *), "glDeleteRenderbuffersEXT") \
     X(void, glBindRenderbuffer, (GLenum, GLuint), "glBindRenderbufferEXT")
 
+/* vertex buffer objects: OpenGL 1.5 or ARB_vertex_buffer_object */
+#define UBGL_VBO(X) \
+    X(void, glGenBuffers, (GLsizei, GLuint *), "glGenBuffersARB") \
+    X(void, glDeleteBuffers, (GLsizei, const GLuint *), "glDeleteBuffersARB") \
+    X(void, glBindBuffer, (GLenum, GLuint), "glBindBufferARB") \
+    X(void, glBufferData, (GLenum, ptrdiff_t, const void *, GLenum), "glBufferDataARB")
+
 #define UBGL_MSAA(X) \
     X(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei), "glRenderbufferStorageMultisampleEXT") \
     X(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum), "glBlitFramebufferEXT")
@@ -217,8 +227,9 @@ typedef struct {
     UBGL_SHADER(UBGL_FIELD)
     UBGL_FBO(UBGL_FIELD)
     UBGL_MSAA(UBGL_FIELD)
+    UBGL_VBO(UBGL_FIELD)
 #undef UBGL_FIELD
-    bool has_core, has_shaders, has_fbo, has_msaa;
+    bool has_core, has_shaders, has_fbo, has_msaa, has_vbo;
 } ub_gl_api;
 
 extern ub_gl_api ubgl;
