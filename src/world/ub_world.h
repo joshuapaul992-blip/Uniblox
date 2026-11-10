@@ -51,6 +51,7 @@ enum {
     UB_INST_DESTROYED = 1 << 8,   /* Destroy()ed: gone for good */
     UB_INST_RUNTIME   = 1 << 9,   /* made by the game (the player's character): never saved */
     UB_INST_DETACHED  = 1 << 10,  /* not parented (Parent = nil): not saved */
+    UB_INST_FREE      = 1 << 11,  /* an empty slot (reclaimed), reused by the next add */
 };
 #define UB_INST_SAVED_FLAGS 0x00FF
 #define UB_NO_STRING 0xFFFFFFFFu
@@ -96,6 +97,9 @@ typedef struct {
     i32 part_inst_cap;
     char *strings;        /* NUL-terminated strings, back to back */
     u32 str_len, str_cap;
+    u32 *str_cache;       /* recent strings by hash, so repeated names share one copy */
+    i32 *free_inst, *free_part;  /* reclaimed slots, reused first */
+    i32 free_inst_count, free_inst_cap, free_part_count, free_part_cap;
     ub_lighting lighting;
     ub_weld *welds;
     i32 weld_count, weld_cap;
@@ -124,8 +128,8 @@ bool ub_world_add_weld(ub_world *w, i32 a, i32 b);
 const char *ub_world_str(const ub_world *w, u32 offset);
 const char *ub_class_name(ub_class c);
 /* ---------------------------------------------------- changing the tree
- * (what scripts do). Indices stay valid: nothing is ever deleted, only
- * flagged. */
+ * (what scripts do). Destroying only flags an instance, so its index stays
+ * valid; the slot is reused only once its owner calls ub_world_reclaim. */
 
 /* Moves `inst` under `parent` (-1 = nowhere, i.e. Parent = nil), as its last
  * child. False if that would make a loop or the instance is destroyed. */
@@ -135,6 +139,12 @@ void ub_world_destroy(ub_world *w, i32 inst);
 /* Copies an instance and everything below it (parts, scripts, welds
  * inside it); the copy has no parent. Returns its index or -1. */
 i32 ub_world_clone(ub_world *w, i32 inst);
+/* Frees the slot of a destroyed instance for reuse (and its part's). Only
+ * when nothing refers to the index any more. Its children are left
+ * without a parent. */
+void ub_world_reclaim(ub_world *w, i32 inst);
+/* Instances in use (not free slots). */
+static inline i32 ub_world_live_count(const ub_world *w) { return w->count - w->free_inst_count; }
 bool ub_world_set_name(ub_world *w, i32 inst, const char *name);
 /* Scripts' code. */
 bool ub_world_set_source(ub_world *w, i32 inst, const char *source);

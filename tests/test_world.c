@@ -533,6 +533,40 @@ static void test_mutation(void)
     free(d1);
     free(d2);
     ub_world_free(&b);
+
+    /* reclaiming: a destroyed instance's slots (and its part's) are reused,
+     * its children lose their parent, welds to it go */
+    i32 cwall0 = ub_world_find_child(&w, copy, "Wall0"), cwall1 = ub_world_find_child(&w, copy, "Wall1");
+    i32 old_count = w.count, old_parts = w.part_count, welds = w.weld_count;
+    i32 cpart = w.inst[cwall0].part;
+    ub_world_reclaim(&w, cwall0); /* not destroyed: refused */
+    CHECK(ub_world_alive(&w, cwall0) && w.free_inst_count == 0);
+    ub_world_destroy(&w, copy);
+    ub_world_reclaim(&w, cwall0);
+    ub_world_reclaim(&w, cwall0); /* twice: no effect */
+    CHECK(w.free_inst_count == 1 && w.free_part_count == 1 && w.weld_count == welds - 1);
+    ub_world_reclaim(&w, copy);
+    CHECK(w.inst[cwall1].parent == -1 && !ub_world_alive(&w, cwall1));
+    CHECK(ub_world_live_count(&w) == old_count - 2);
+    ub_part np;
+    memset(&np, 0, sizeof np);
+    np.rot = mat3_identity();
+    np.size = v3(1, 1, 1);
+    i32 fresh = ub_world_add_part(&w, w.workspace, UB_CLASS_PART, NULL, "Fresh", &np);
+    CHECK(fresh == copy && w.inst[fresh].part == cpart && w.count == old_count && w.part_count == old_parts);
+    CHECK(ub_world_alive(&w, fresh) && ub_world_part_inst(&w, cpart) == fresh && w.inst[fresh].first_child == -1);
+    CHECK(ub_world_find_child(&w, w.workspace, "Fresh") == fresh && w.parts[cpart].flags == 0);
+    i32 fresh2 = ub_world_add(&w, w.workspace, UB_CLASS_FOLDER, NULL, "Fresh2");
+    CHECK(fresh2 == cwall0 && w.inst[fresh2].part == -1 && w.free_inst_count == 0);
+    /* equal names share the string pool */
+    u32 before = w.str_len;
+    for (int i = 0; i < 100; ++i) CHECK(ub_world_set_name(&w, fresh2, "Same name"));
+    CHECK(w.str_len <= before + 10);
+    CHECK(ub_ubx_save(&w, &d1, &n1));
+    ub_world_init(&b);
+    CHECK(ub_ubx_load(&b, d1, n1) == UB_LOAD_OK && ub_world_find_child(&b, b.workspace, "Same name") >= 0);
+    free(d1);
+    ub_world_free(&b);
     ub_world_free(&w);
 
     /* a Roblox ModuleScript keeps its code */

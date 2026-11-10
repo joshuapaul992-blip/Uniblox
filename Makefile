@@ -25,7 +25,8 @@ EXE     := $(OUT)/uniblox.exe
 LUA_SRCS := $(addprefix src/script/lua/,lapi.c lcode.c ldebug.c ldo.c ldump.c lfunc.c lgc.c llex.c \
 	lmem.c lobject.c lopcodes.c lparser.c lstate.c lstring.c ltable.c ltm.c lundump.c lvm.c lzio.c \
 	lauxlib.c lbaselib.c lstrlib.c ltablib.c lmathlib.c)
-SCRIPT_SRCS := src/script/ub_libc.c $(LUA_SRCS)
+SCRIPT_SRCS := src/script/ub_libc.c src/script/ub_script.c src/script/ub_sapi_types.c src/script/ub_sapi_inst.c \
+	$(LUA_SRCS)
 
 # Lua is third-party code: build it against our libc headers, without the
 # warnings our own code is held to.
@@ -51,6 +52,7 @@ CORE_SRCS := \
 	src/physics/ub_collide.c \
 	src/physics/ub_physics.c \
 	src/physics/ub_character.c \
+	src/game/ub_game.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \
 	src/render/ub_render.c \
@@ -111,7 +113,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
-	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/stub_platform.c $(CORE_SRCS)
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/stub_platform.c $(CORE_SRCS)
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
 TEST_OBJS  := $(patsubst %.c,build/host/obj/%.o,$(TEST_SRCS))

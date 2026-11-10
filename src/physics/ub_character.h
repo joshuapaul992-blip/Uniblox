@@ -27,7 +27,9 @@ typedef struct {
     bool grounded;
     i32 ground_body;          /* what it stands on (-1 = nothing) */
     vec3 ground_point, ground_vel;
-    f32 jump_speed;
+    i32 ground_part;          /* world part it stands on, -1 = none */
+    f32 walk_speed;           /* studs/s (Humanoid.WalkSpeed) */
+    f32 jump_speed;           /* from the jump height and gravity */
     /* events since the last ub_char_take_events */
     bool jumped;
     f32 landed_speed;         /* > 0: hit the ground this fast */
@@ -36,6 +38,7 @@ typedef struct {
 /* Adds the character's body to the physics, feet at `feet`. */
 bool ub_char_init(ub_character *c, ub_physics *ph, vec3 feet);
 void ub_char_teleport(ub_character *c, ub_physics *ph, vec3 feet);
+void ub_char_set_jump_height(ub_character *c, const ub_physics *ph, f32 height);
 
 /* move: wanted direction on the ground (x, z; length up to 1). */
 void ub_char_before_step(ub_character *c, ub_physics *ph, vec3 move, bool jump);

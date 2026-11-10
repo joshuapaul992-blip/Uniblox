@@ -491,6 +491,7 @@ done:
 
 void ub_phys_free(ub_physics *ph)
 {
+    plat_free(ph->free_body);
     plat_free(ph->bodies);
     plat_free(ph->shapes);
     plat_free(ph->part_shape);
@@ -673,7 +674,8 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
             ph->part_shape[part] = -1;
             si = -1;
         } else {
-            ub_body *b = &ph->bodies[s->body];
+            i32 bi = s->body;
+            ub_body *b = &ph->bodies[bi];
             if (!alive) {
                 set_flags(ph, si, 0);
                 s->part = -1;
@@ -681,8 +683,16 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
                 bool any = false;
                 for (i32 k = 0; k < b->shape_count; ++k) any |= ph->shapes[b->first_shape + k].part >= 0;
                 if (!any) {
-                    b->fallen = 1; /* nothing left in it */
+                    /* nothing left in it: what it slept with wakes (which
+                     * also unlinks it from that group), and a one-shape
+                     * body is reused after the next step */
+                    ub_phys_wake(ph, bi);
+                    b->fallen = 1;
                     b->awake = 0;
+                    b->sleep_next = b->sleep_head = -1;
+                    if (b->shape_count == 1 && b->type != UB_BODY_CHARACTER &&
+                        grow((void **)&ph->free_body, &ph->free_body_cap, ph->free_body_count + 1, sizeof(i32)))
+                        ph->free_body[ph->free_body_count++] = bi;
                 }
                 return;
             }
@@ -726,24 +736,38 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
         }
     }
     if (!alive || (anchored && !collide && !touch)) return; /* nothing to simulate: only drawn */
-    /* a body of its own */
-    i32 bi = new_body(ph, anchored ? UB_BODY_KINEMATIC : UB_BODY_DYNAMIC);
-    if (bi < 0 || !grow((void **)&ph->shapes, &ph->shape_cap, ph->shape_count + 1, sizeof(ub_pshape))) return;
+    /* a body of its own: an emptied one if there is one (keeps its shape slot) */
+    i32 bi, shape_slot;
+    if (ph->free_body_ready > 0) {
+        bi = ph->free_body[0];
+        ph->free_body[0] = ph->free_body[--ph->free_body_ready];
+        ph->free_body[ph->free_body_ready] = ph->free_body[--ph->free_body_count];
+        shape_slot = ph->bodies[bi].first_shape;
+        ub_body *rb = &ph->bodies[bi];
+        memset(rb, 0, sizeof *rb);
+        rb->type = (u8)(anchored ? UB_BODY_KINEMATIC : UB_BODY_DYNAMIC);
+        rb->awake = 1;
+        rb->sleep_next = rb->sleep_head = -1;
+    } else {
+        bi = new_body(ph, anchored ? UB_BODY_KINEMATIC : UB_BODY_DYNAMIC);
+        if (bi < 0 || !grow((void **)&ph->shapes, &ph->shape_cap, ph->shape_count + 1, sizeof(ub_pshape))) return;
+        shape_slot = ph->shape_count++;
+    }
     ub_body *b = &ph->bodies[bi];
     b->q = b->prev_q = b->target_q = quat_from_mat3(&prot);
     b->rot = quat_to_mat3(b->q);
     b->pos = b->prev_pos = b->target_pos = p->pos;
-    b->first_shape = ph->shape_count;
+    b->first_shape = shape_slot;
     b->shape_count = 1;
     b->woke_step = ph->stats.steps;
-    ub_pshape *s = &ph->shapes[ph->shape_count];
+    ub_pshape *s = &ph->shapes[shape_slot];
     memset(s, 0, sizeof *s);
     s->body = bi;
     s->part = part;
     shape_from_part(s, p);
     s->lpos = v3(0, 0, 0);
     s->lrot = mat3_identity();
-    ph->part_shape[part] = ph->shape_count++;
+    ph->part_shape[part] = shape_slot;
     shape_update(ph, s);
     if (b->type == UB_BODY_DYNAMIC) body_set_mass(ph, b);
     else update_inertia(b);
@@ -1315,6 +1339,7 @@ void ub_phys_step(ub_physics *ph)
 {
     const f32 dt = UB_PHYS_DT, h = dt / (f32)SUBSTEPS;
     ph->touch_count = 0;
+    ph->free_body_ready = ph->free_body_count; /* emptied before this step: no contacts refer to them after it */
     for (i32 i = 1; i < ph->body_count; ++i) {
         ub_body *b = &ph->bodies[i];
         if (b->fallen) continue;

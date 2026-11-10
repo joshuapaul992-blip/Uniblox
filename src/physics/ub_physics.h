@@ -100,6 +100,8 @@ typedef struct {
 
     ub_body *bodies;
     i32 body_count, body_cap;
+    i32 *free_body;       /* emptied one-shape bodies, reused for new parts */
+    i32 free_body_count, free_body_ready, free_body_cap; /* [0, ready) usable; the rest after the next step */
     ub_pshape *shapes;
     i32 shape_count, shape_cap;
     i32 *part_shape;      /* world part -> shape, -1 if not simulated */

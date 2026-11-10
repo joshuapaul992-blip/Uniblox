@@ -328,15 +328,19 @@ static void test_mixer(void)
     ub_mixer_shutdown();
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    /* uniblox_tests [name...] runs only the named tests */
     struct { const char *name; void (*fn)(void); } tests[] = {
         { "fmt", test_fmt }, { "utf", test_utf }, { "path", test_path },
         { "math", test_math }, { "wav", test_wav }, { "mixer", test_mixer },
-        { "crt", test_crt }, { "compress", test_compress }, { "world", test_world }, { "physics", test_physics }, { "libc", test_libc }, { "script", test_script }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render },
+        { "crt", test_crt }, { "compress", test_compress }, { "world", test_world }, { "physics", test_physics }, { "libc", test_libc }, { "script", test_script }, { "game", test_game }, { "vec", test_vec }, { "palette", test_palette }, { "render", test_render },
         { "render fuzz", test_render_fuzz }, { "meshes", test_meshes },
     };
     for (size_t i = 0; i < sizeof tests / sizeof tests[0]; ++i) {
+        bool wanted = argc < 2;
+        for (int a = 1; a < argc; ++a) wanted |= strcmp(argv[a], tests[i].name) == 0;
+        if (!wanted) continue;
         printf("%s\n", tests[i].name);
         tests[i].fn();
     }

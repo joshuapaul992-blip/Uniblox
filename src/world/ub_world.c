@@ -42,6 +42,9 @@ void ub_world_free(ub_world *w)
     plat_free(w->strings);
     plat_free(w->welds);
     plat_free(w->part_inst);
+    plat_free(w->str_cache);
+    plat_free(w->free_inst);
+    plat_free(w->free_part);
     ub_world_init(w);
 }
 
@@ -62,9 +65,25 @@ static bool grow(void **p, i32 *cap, i32 need, size_t elem)
     return true;
 }
 
+#define STR_CACHE 4096 /* entries; strings are never changed, so equal ones can share */
+
 static u32 add_string(ub_world *w, const char *s)
 {
     u32 n = (u32)ub_strlen(s) + 1;
+    u32 h = 2166136261u;
+    for (u32 i = 0; i + 1 < n; ++i) h = (h ^ (u8)s[i]) * 16777619u;
+    h &= STR_CACHE - 1;
+    if (!w->str_cache) {
+        w->str_cache = (u32 *)plat_alloc(sizeof(u32) * STR_CACHE);
+        if (w->str_cache)
+            for (int i = 0; i < STR_CACHE; ++i) w->str_cache[i] = 0xFFFFFFFFu;
+    }
+    if (w->str_cache && w->str_cache[h] != 0xFFFFFFFFu) {
+        const char *c = w->strings + w->str_cache[h];
+        u32 i = 0;
+        while (i < n && c[i] == s[i]) ++i;
+        if (i == n) return w->str_cache[h];
+    }
     if (w->str_len + n > w->str_cap) {
         u32 nc = w->str_cap ? w->str_cap * 2 : 1024;
         while (nc < w->str_len + n) nc *= 2;
@@ -80,6 +99,7 @@ static u32 add_string(ub_world *w, const char *s)
     u32 off = w->str_len;
     memcpy(w->strings + off, s, n);
     w->str_len += n;
+    if (w->str_cache) w->str_cache[h] = off;
     return off;
 }
 
@@ -107,7 +127,7 @@ i32 ub_world_add(ub_world *w, i32 parent, ub_class cls, const char *class_name, 
     u32 n = add_string(w, name ? name : "");
     u32 cn = add_string(w, class_name ? class_name : ub_class_name(cls));
     if (n == 0xFFFFFFFFu || cn == 0xFFFFFFFFu) return -1;
-    i32 idx = w->count++;
+    i32 idx = w->free_inst_count > 0 ? w->free_inst[--w->free_inst_count] : w->count++;
     ub_instance *in = &w->inst[idx];
     memset(in, 0, sizeof *in);
     in->first_child = in->last_child = in->next_sibling = -1;
@@ -128,9 +148,10 @@ i32 ub_world_add_part(ub_world *w, i32 parent, ub_class cls, const char *class_n
     if (!grow((void **)&w->part_inst, &w->part_inst_cap, w->part_count + 1, sizeof(i32))) return -1;
     i32 idx = ub_world_add(w, parent, cls, class_name, name);
     if (idx < 0) return -1;
-    w->parts[w->part_count] = *part;
-    w->part_inst[w->part_count] = idx;
-    w->inst[idx].part = w->part_count++;
+    i32 pi = w->free_part_count > 0 ? w->free_part[--w->free_part_count] : w->part_count++;
+    w->parts[pi] = *part;
+    w->part_inst[pi] = idx;
+    w->inst[idx].part = pi;
     return idx;
 }
 
@@ -198,6 +219,43 @@ void ub_world_destroy(ub_world *w, i32 inst)
         }
     }
     if (stack != stack_small) plat_free(stack);
+}
+
+static bool push_free(i32 **list, i32 *count, i32 *cap, i32 v)
+{
+    if (!grow((void **)list, cap, *count + 1, sizeof(i32))) return false;
+    (*list)[(*count)++] = v;
+    return true;
+}
+
+void ub_world_reclaim(ub_world *w, i32 inst)
+{
+    if (inst < 0 || inst >= w->count) return;
+    ub_instance *in = &w->inst[inst];
+    if (!(in->flags & UB_INST_DESTROYED) || (in->flags & UB_INST_FREE)) return;
+    if (!grow((void **)&w->free_inst, &w->free_inst_cap, w->free_inst_count + 1, sizeof(i32))) return;
+    if (in->part >= 0 && !push_free(&w->free_part, &w->free_part_count, &w->free_part_cap, in->part)) return;
+    unlink_child(w, inst);
+    for (i32 c = in->first_child; c >= 0;) {
+        i32 next = w->inst[c].next_sibling;
+        w->inst[c].parent = -1;
+        w->inst[c].next_sibling = -1;
+        c = next;
+    }
+    if (in->part >= 0) {
+        w->part_inst[in->part] = -1;
+        w->parts[in->part].flags = UB_PART_REMOVED;
+        w->parts[in->part].transparency = 255;
+    }
+    for (i32 k = 0; k < w->weld_count;) { /* welds to it go (they would join whatever reuses the slot) */
+        if (w->welds[k].a == inst || w->welds[k].b == inst) w->welds[k] = w->welds[--w->weld_count];
+        else ++k;
+    }
+    in->first_child = in->last_child = in->next_sibling = in->parent = -1;
+    in->part = -1;
+    in->source = UB_NO_STRING;
+    in->flags = UB_INST_DESTROYED | UB_INST_FREE;
+    w->free_inst[w->free_inst_count++] = inst;
 }
 
 i32 ub_world_clone(ub_world *w, i32 inst)

@@ -17,11 +17,18 @@ bool ub_char_init(ub_character *c, ub_physics *ph, vec3 feet)
     c->ground_body = -1;
     c->ground_vel = v3(0, 0, 0);
     c->ground_point = feet;
-    f32 g = -ph->gravity.y;
-    c->jump_speed = ub_sqrtf(2.0f * (g > 1.0f ? g : 1.0f) * UB_CHAR_JUMP_HEIGHT);
+    c->ground_part = -1;
+    c->walk_speed = UB_CHAR_WALK_SPEED;
+    ub_char_set_jump_height(c, ph, UB_CHAR_JUMP_HEIGHT);
     c->jumped = false;
     c->landed_speed = 0;
     return c->body >= 0;
+}
+
+void ub_char_set_jump_height(ub_character *c, const ub_physics *ph, f32 height)
+{
+    f32 g = -ph->gravity.y;
+    c->jump_speed = ub_sqrtf(2.0f * (g > 1.0f ? g : 1.0f) * (height > 0 ? height : 0));
 }
 
 void ub_char_teleport(ub_character *c, ub_physics *ph, vec3 feet)
@@ -29,6 +36,7 @@ void ub_char_teleport(ub_character *c, ub_physics *ph, vec3 feet)
     ub_phys_teleport(ph, c->body, feet);
     c->grounded = false;
     c->ground_body = -1;
+    c->ground_part = -1;
     c->ground_vel = v3(0, 0, 0);
 }
 
@@ -38,7 +46,7 @@ void ub_char_before_step(ub_character *c, ub_physics *ph, vec3 move, bool jump)
     const f32 dt = UB_PHYS_DT;
     /* walking: steer the horizontal velocity towards the wanted one, with
      * limited force, so heavy things cannot simply be shoved aside */
-    vec3 want = v3(move.x * UB_CHAR_WALK_SPEED, 0, move.z * UB_CHAR_WALK_SPEED);
+    vec3 want = v3(move.x * c->walk_speed, 0, move.z * c->walk_speed);
     if (c->grounded) want = v3_add(want, v3(c->ground_vel.x, 0, c->ground_vel.z));
     vec3 dv = v3(want.x - b->v.x, 0, want.z - b->v.z);
     f32 most = (c->grounded ? GROUND_ACCEL : AIR_ACCEL) * dt, len = v3_length(dv);
@@ -79,6 +87,7 @@ void ub_char_after_step(ub_character *c, ub_physics *ph)
         if (!c->grounded) c->landed_speed = UB_MAX(c->landed_speed, -b->v.y);
         c->grounded = true;
         c->ground_body = best.body;
+        c->ground_part = best.part;
         c->ground_point = best.point;
         c->ground_vel = ub_phys_point_velocity(ph, best.body, best.point);
         b->v.y = c->ground_vel.y;
@@ -90,6 +99,7 @@ void ub_char_after_step(ub_character *c, ub_physics *ph)
     } else {
         c->grounded = false;
         c->ground_body = -1;
+        c->ground_part = -1;
     }
 }
 
