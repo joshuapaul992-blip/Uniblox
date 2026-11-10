@@ -73,7 +73,7 @@ eval "$(xdotool getwindowgeometry --shell "$WIN")"
 sleep 0.5
 import -window root "${SHOT%.png}-gui.png"              # the GUI: the panel, the sign, the door's label
 # the panel's "Back to the start" button: top right under the player list, below the title and the count
-xdotool mousemove $((X + WIDTH - 12 - 105)) $((Y + 36 + 64 + 99)); sleep 0.3
+xdotool mousemove $((X + WIDTH - 12 - 105)) $((Y + 187)); sleep 0.3   # (inside it in both renderers: software stretches 480 lines to 540)
 xdotool click 1; sleep 0.5
 xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT * 3 / 4)); sleep 0.2
 xdotool keydown w; sleep 1.3                            # walk into the scripted door...
@@ -101,6 +101,16 @@ for _ in 1 2 3 4 5; do xdotool mousemove_relative -- 20 0; sleep 0.1; done
 xdotool mouseup 3
 sleep 0.5
 import -window root "$SHOT"
+xdotool key shift; sleep 0.4                            # shift lock on: the mouse turns the camera, no button
+for _ in 1 2 3; do xdotool mousemove_relative -- 15 0; sleep 0.1; done
+sleep 0.3
+import -window root "${SHOT%.png}-shiftlock.png"
+xdotool key shift; sleep 0.3                            # and off
+for _ in 1 2 3 4 5 6; do xdotool click 4; sleep 0.05; done   # zoom all the way in: first person
+sleep 0.6
+import -window root "${SHOT%.png}-firstperson.png"
+for _ in 1 2 3 4 5; do xdotool click 5; sleep 0.05; done     # out again: 2.5, then 4 notches to 6.1 studs
+sleep 0.4
 if [ "$RENDERER" != opengl ]; then
     xdotool key F8; sleep 1                             # 8-bit palette rendering
     import -window root "${SHOT%.png}-8bit.png"
@@ -198,7 +208,11 @@ else
     expect "$CFG" "colors=32" "colour choice saved"
     expect "$RUN1" "software render height" "F6 changed the render resolution"
 fi
-expect "$CFG" "zoom=14" "mouse wheel zoomed in 3 notches (22 -> 14)"
+expect "$CFG" "zoom=6" "mouse wheel zoomed in 3 notches, into first person and out (13 -> 6.7 -> 0.5 -> 2.5 -> 6.1)"
+expect "$RUN1" "shift lock on" "Shift turned shift lock on"
+expect "$RUN1" "shift lock off" "and off"
+expect "$RUN1" "camera: first person" "the wheel went into first person"
+expect "$RUN1" "camera: third person" "and out of it"
 if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
 else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
 grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$RUN1" | sed 's/^/  /' || true

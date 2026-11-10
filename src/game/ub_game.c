@@ -75,6 +75,38 @@ static i32 find_root_by_class(const ub_world *w, const char *cls)
     return -1;
 }
 
+/* The camera's rules: StarterPlayer's, else Roblox's defaults. They are
+ * the Player's from then on (scripts change them there). */
+static void camera_rules(ub_game *g)
+{
+    ub_cam_state *c = &g->cam;
+    memset(c, 0, sizeof *c);
+    c->min_zoom = 0.5f;
+    c->max_zoom = 128.0f;
+    c->mouse_lock_ok = true;
+    c->icon_enabled = true;
+    c->camera_type = UB_CAMTYPE_CUSTOM;
+    c->subject = -1;
+    c->distance = 12.5f;
+    const ub_world *w = &g->world;
+    i32 sp = find_root_by_class(w, "StarterPlayer");
+    if (sp < 0) return;
+    const ub_value *v;
+    if ((v = ub_world_prop_named(w, sp, "CameraMode")) && v->type == UB_PV_ENUM) c->camera_mode = v->v.e == 1;
+    if ((v = ub_world_prop_named(w, sp, "CameraMinZoomDistance")) && v->type == UB_PV_FLOAT) c->min_zoom = v->v.f;
+    if ((v = ub_world_prop_named(w, sp, "CameraMaxZoomDistance")) && v->type == UB_PV_FLOAT) c->max_zoom = v->v.f;
+    if ((v = ub_world_prop_named(w, sp, "EnableMouseLockOption")) && v->type == UB_PV_BOOL) c->mouse_lock_ok = v->v.b;
+    if ((v = ub_world_prop_named(w, sp, "DevCameraOcclusionMode")) && v->type == UB_PV_ENUM) c->occlusion = v->v.e == 1;
+    ub_game_camera_limits(g);
+}
+
+void ub_game_camera_limits(ub_game *g)
+{
+    ub_cam_state *c = &g->cam;
+    c->min_zoom = ub_clampf(c->min_zoom, 0.5f, 10000.0f);
+    c->max_zoom = ub_clampf(c->max_zoom, c->min_zoom, 10000.0f);
+}
+
 static void make_player(ub_game *g)
 {
     ub_world *w = &g->world;
@@ -413,6 +445,7 @@ bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts)
     g->kill_height = UB_MIN(wd->fallen_height, g->spawn.y - 50.0f);
     g->feet = g->spawn;
     g->last_ground_part = -1;
+    camera_rules(g);
     make_player(g);
     assign_team(g);
     ub_game_pick_spawn(g);

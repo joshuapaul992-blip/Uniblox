@@ -330,6 +330,7 @@ static void apply_controls(void)
 {
     g_view.look_scale = (f32)g_set.mouse_pct / 100.0f;
     g_view.invert_y = g_set.invert_y;
+    g_view.shift_lock_allowed = g_set.shift_lock;
     g_view.fov_deg = (f32)g_set.fov;
 }
 
@@ -349,7 +350,7 @@ static void load_config(void)
 
 static void save_config(void)
 {
-    g_set.zoom = (i32)g_zoom;
+    g_set.zoom = ub_roundf(g_zoom);
     g_set.yaw_deg = DEG(ub_wrap_angle(g_yaw));
     g_set.pitch_deg = DEG(g_pitch);
     g_set.prefs.window_w = g_win_w;
@@ -734,7 +735,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     /* --- camera controls and movement --- */
     vec3 move;
     bool jump;
-    play_view_input(&g_view, &pin, dt, play_keys, !g_bench && !g_menu_open && !hud_menu_open(), &move, &jump);
+    play_view_input(&g_view, &g_game, &pin, dt, play_keys, !g_bench && !g_menu_open && !hud_menu_open(), &move, &jump);
 
     /* --- the game: scripts, physics in fixed steps, the character --- */
     ub_game_update(&g_game, dt, move, jump);

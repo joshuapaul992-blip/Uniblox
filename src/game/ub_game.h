@@ -98,6 +98,27 @@ typedef struct {
     bool reset_requested;      /* the menu's Reset Character (or a script) */
 } ub_hud_state;
 
+/* The camera (milestone 9B): the rules the place and its scripts set, and
+ * what the app's camera did this frame (scripts and the client UI read it). */
+enum { UB_CAMTYPE_FIXED, UB_CAMTYPE_ATTACH, UB_CAMTYPE_WATCH, UB_CAMTYPE_TRACK, UB_CAMTYPE_FOLLOW,
+       UB_CAMTYPE_CUSTOM, UB_CAMTYPE_SCRIPTABLE, UB_CAMTYPE_ORBITAL };      /* Enum.CameraType */
+enum { UB_MOUSE_DEFAULT, UB_MOUSE_LOCK_CENTER, UB_MOUSE_LOCK_CURRENT };     /* Enum.MouseBehavior */
+typedef struct {
+    int camera_mode;            /* Player.CameraMode: 0 Classic, 1 LockFirstPerson */
+    f32 min_zoom, max_zoom;     /* Player.CameraMinZoomDistance / CameraMaxZoomDistance, studs */
+    bool mouse_lock_ok;         /* Player.DevEnableMouseLock (StarterPlayer.EnableMouseLockOption) */
+    int occlusion;              /* Player.DevCameraOcclusionMode: 0 Zoom (the camera comes closer), 1 Invisicam */
+    int mouse_behavior;         /* UserInputService.MouseBehavior set by a script */
+    bool icon_enabled;          /* UserInputService.MouseIconEnabled */
+    int camera_type;            /* Camera.CameraType (UB_CAMTYPE_*) */
+    i32 subject;                /* Camera.CameraSubject, -1 = the humanoid */
+    vec3 script_pos, script_fwd;/* Camera.CFrame as a script set it (our axes; fwd = where it looks) */
+    bool script_cf;             /* a script set Camera.CFrame */
+    /* the app's camera this frame */
+    bool first_person, shift_lock, mouse_locked;
+    f32 distance;               /* from the camera to its subject */
+} ub_cam_state;
+
 typedef struct ub_game {
     ub_world world;
     ub_physics phys;
@@ -119,6 +140,7 @@ typedef struct ub_game {
     struct ub_gui *gui;         /* the GUI engine (gui/ub_gui.h), laid out from player_gui */
     ub_game_input input;
     f32 script_fov;             /* Camera.FieldOfView set by a script (degrees), 0 = the player's setting */
+    ub_cam_state cam;
     f32 health, max_health;
     f32 walk_speed, jump_height;
     bool dead;
@@ -212,6 +234,8 @@ void ub_hud_notify(ub_game *g, const char *title, const char *text, f32 duration
 void ub_hud_bubble(ub_game *g, i32 adornee, const char *text);
 /* Resets the character (its health to 0; it comes back), unless scripts turned that off. */
 void ub_game_reset_character(ub_game *g);
+/* Keeps the camera's zoom limits sane (0.5 <= min <= max) after a change. */
+void ub_game_camera_limits(ub_game *g);
 /* The player said something: the chat, a bubble over their head, Chatted. */
 void ub_game_player_chat(ub_game *g, const char *text);
 /* A name's colour in the chat (stable per name). */

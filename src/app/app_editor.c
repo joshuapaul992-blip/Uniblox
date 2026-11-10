@@ -1291,7 +1291,7 @@ static void play_frame(ub_frame *frame, const ub_input *in, f32 dt)
     if (g_game.gui && ub_gui_wheel_taken(g_game.gui)) pin.wheel = 0;
     vec3 move;
     bool jump;
-    play_view_input(&g_view, &pin, dt, !gui_keys, true, &move, &jump);
+    play_view_input(&g_view, &g_game, &pin, dt, !gui_keys, true, &move, &jump);
     ub_game_update(&g_game, dt, move, jump);
     g_game.jumped = false;
     g_game.landed_speed = 0;

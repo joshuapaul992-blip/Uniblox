@@ -8,13 +8,29 @@
 #include "game/ub_game.h"
 #include "render/ub_render.h"
 
-#define PLAY_PITCH_MIN (-1.35f)
-#define PLAY_PITCH_MAX 0.35f
-#define PLAY_ZOOM_MIN 6.0f
-#define PLAY_ZOOM_MAX 60.0f
+/* The camera (milestone 9B), as Roblox's in 2021: it looks 80 degrees up
+ * or down at most; the wheel (or I and O) zooms between the place's limits
+ * (0.5 to 128 studs by default), smoothly, and below 2 studs goes into
+ * first person; walls between it and the player pull it in; Shift turns
+ * shift lock on and off (the mouse turns the camera, the character faces
+ * where it looks, the view moves over the right shoulder). */
+#define PLAY_PITCH_MIN (-1.39f)
+#define PLAY_PITCH_MAX 1.39f
+#define PLAY_ZOOM_MIN 0.5f
+#define PLAY_ZOOM_MAX 128.0f
+#define PLAY_FIRST_PERSON 1.0f            /* closer than this (studs) is first person */
 
 typedef struct {
-    f32 yaw, pitch, zoom;              /* camera around the player */
+    f32 yaw, pitch, zoom;              /* camera around the player; zoom: where the wheel put it */
+    f32 zoom_now;                      /* the zoom, eased towards `zoom` */
+    f32 cam_len;                       /* from the head to the camera, after walls pulled it in */
+    f32 shoulder;                      /* 0..1: shift lock's step over the right shoulder */
+    f32 fade;                          /* 0..1: how see-through the character is drawn (close up) */
+    bool shift_lock;                   /* on (Shift toggles it) */
+    bool shift_lock_allowed;           /* the player's setting (Shift lock switch) */
+    bool first_person, locked;         /* this frame: first person; the mouse locked to the middle */
+    bool have_cam;
+    ub_camera cam;                     /* the camera worked out by play_view_update */
     f32 facing;                        /* the character's yaw */
     f32 walk_phase, walk_amount;       /* limb swing */
     f32 death_t;                       /* how far it has fallen over */
@@ -30,10 +46,13 @@ void play_view_init(ub_play_view *v);
 void play_view_free(ub_play_view *v);
 /* A game just started: hand its parts to the renderer. */
 void play_view_reset(ub_play_view *v, ub_game *g);
-/* Camera controls (right mouse, arrow keys, wheel) and WASD/Space.
- * keys: gameplay keys count (not while typing); look: mouse-look allowed. */
-void play_view_input(ub_play_view *v, const ub_input *in, f32 dt, bool keys, bool look, vec3 *move, bool *jump);
-/* After ub_game_update: animation, and the static set when it changed. */
+/* Camera controls (right mouse, arrow keys, wheel, I/O, Shift) and
+ * WASD/Space. keys: gameplay keys count (not while typing); look: the mouse
+ * may turn the camera (no menu open). */
+void play_view_input(ub_play_view *v, ub_game *g, const ub_input *in, f32 dt, bool keys, bool look, vec3 *move,
+                     bool *jump);
+/* After ub_game_update: animation, the static set when it changed, and
+ * the camera (eased zoom, walls, shift lock); tells g->cam what it did. */
 void play_view_update(ub_play_view *v, ub_game *g, f32 dt);
 ub_camera play_view_camera(const ub_play_view *v, const ub_game *g);
 /* Between ub_render_begin and ub_render_end_scene. */
