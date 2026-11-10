@@ -105,6 +105,8 @@ void play_view_init(ub_play_view *v)
     memset(v, 0, sizeof *v);
     v->pitch = -0.35f;
     v->zoom = 22.0f;
+    v->look_scale = 1.0f;
+    v->fov_deg = 70.0f;
 }
 
 void play_view_free(ub_play_view *v)
@@ -142,8 +144,9 @@ void play_view_input(ub_play_view *v, const ub_input *in, f32 dt, bool keys, boo
     bool want_look = in->mouse_down[UB_MOUSE_RIGHT] && in->has_focus && look;
     if (want_look != in->mouse_captured) ub_debug("mouse look %s", want_look ? "on" : "off");
     plat_set_mouse_capture(want_look);
-    v->yaw += (f32)in->mouse_dx * LOOK_SENSITIVITY;
-    v->pitch = ub_clampf(v->pitch - (f32)in->mouse_dy * LOOK_SENSITIVITY, PLAY_PITCH_MIN, PLAY_PITCH_MAX);
+    f32 sens = LOOK_SENSITIVITY * (v->look_scale > 0 ? v->look_scale : 1.0f);
+    v->yaw += (f32)in->mouse_dx * sens;
+    v->pitch = ub_clampf(v->pitch - (f32)in->mouse_dy * sens * (v->invert_y ? -1.0f : 1.0f), PLAY_PITCH_MIN, PLAY_PITCH_MAX);
     if (keys && in->key_down[UB_KEY_LEFT]) v->yaw -= TURN_SPEED * dt;
     if (keys && in->key_down[UB_KEY_RIGHT]) v->yaw += TURN_SPEED * dt;
     v->yaw = ub_wrap_angle(v->yaw);
@@ -200,7 +203,7 @@ ub_camera play_view_camera(const ub_play_view *v, const ub_game *g)
     vec3 fwd = v3(fx * cp, ub_sinf(v->pitch), fz * cp);
     cam.pos = v3_sub(target, v3_scale(fwd, v->zoom));
     cam.focus = target;
-    cam.fov_y = 70.0f * UB_PI / 180.0f;
+    cam.fov_y = (v->fov_deg > 10 ? v->fov_deg : 70.0f) * UB_PI / 180.0f;
     cam.far_dist = 600.0f;
     return cam;
 }
@@ -216,5 +219,32 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
         ub_game_part_pose(g, pi, &d.pos, &d.rot);
         ub_render_part(&d);
     }
-    if (character) play_draw_character(g->feet.x, g->feet.y, g->feet.z, v->facing, v->walk_phase, v->walk_amount, v->death_t);
+    if (character) {
+        play_draw_character(g->feet.x, g->feet.y, g->feet.z, v->facing, v->walk_phase, v->walk_amount, v->death_t);
+        play_draw_blob_shadow(g);
+    }
+}
+
+/* A soft round shadow on the ground under the character, for when the
+ * renderer casts no shadows (software, or OpenGL on low): a flat dark
+ * disc drawn see-through, smaller and fainter the higher it jumps. */
+void play_draw_blob_shadow(ub_game *g)
+{
+    if (!g->phys_ok || g->dead) return;
+    if (ub_render_backend() == UB_BACKEND_OPENGL && ub_render_quality() != UB_QUALITY_LOW) return;
+    ub_phys_hit h;
+    vec3 from = v3_add(g->feet, v3(0, 0.5f, 0));
+    if (!ub_phys_raycast(&g->phys, from, v3(0, -1, 0), 40.0f, g->chr.body, &h) || h.normal.y < 0.6f) return;
+    f32 height = h.t - 0.5f;
+    if (height < 0) height = 0;
+    f32 k = 1.0f - height / 40.0f; /* 1 on the ground, 0 at 40 studs */
+    ub_part_draw d;
+    d.pos = v3_add(h.point, v3(0, 0.04f, 0));
+    d.rot = mat3_identity();
+    d.size = v3(3.2f * (0.4f + 0.6f * k), 0.05f, 3.2f * (0.4f + 0.6f * k));
+    d.color = 0x141414;
+    d.shape = UB_SHAPE_CYLINDER;
+    d.material = UB_MAT_PLASTIC;
+    d.flags = ub_draw_see_through((u8)(255 - (int)(150.0f * k))); /* about half covered on the ground */
+    ub_render_part(&d);
 }

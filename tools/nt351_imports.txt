@@ -114,6 +114,12 @@ CreatePalette
 SelectPalette
 RealizePalette
 GetSystemPaletteEntries
+# milestone 7: text clipped to changed rectangles (Win16-era GDI, in NT 3.1)
+SaveDC
+RestoreDC
+IntersectClipRect
+# milestone 7: which font GDI really chose (NT 3.1)
+GetTextFaceW
 # milestone 2.5: UI font
 CreateFontW
 GetTextMetricsW

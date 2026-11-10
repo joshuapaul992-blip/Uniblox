@@ -165,6 +165,7 @@ static void load_config(void)
         else if (key_is(line, "sw_height", &v)) g_prefs.sw_height = UB_CLAMP(parse_int(v), 0, 4320);
         else if (key_is(line, "quality", &v)) g_quality = UB_CLAMP(parse_int(v), 0, UB_QUALITY_COUNT - 1);
         else if (key_is(line, "gl_shaders", &v)) g_gl_shaders = parse_int(v) != 0;
+        else if (key_is(line, "timer", &v)) g_prefs.timer_qpc = str_is(v, "qpc");
         else if (key_is(line, "grid_x100", &v)) E.grid = (f32)UB_CLAMP(parse_int(v), 0, 10000) / 100.0f;
         *end = saved;
         line = end;

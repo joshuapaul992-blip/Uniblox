@@ -59,11 +59,13 @@ CORE_SRCS := \
 	src/render/ub_render.c \
 	src/render/ub_render_sw.c \
 	src/render/ub_render_gl.c \
+	src/render/ub_present.c \
 	$(SCRIPT_SRCS)
 
 # Tools: the UI toolkit and the editor (ubedit.exe).
 TOOL_SRCS := \
 	src/ui/ub_ui.c \
+	src/app/app_settings.c \
 	src/editor/ub_editor.c
 
 PLATFORM_SRCS := \
@@ -79,6 +81,8 @@ SRCS := \
 	$(CORE_SRCS) \
 	src/app/app_demo.c \
 	src/app/app_play.c \
+	src/app/app_settings.c \
+	src/ui/ub_ui.c \
 	$(PLATFORM_SRCS)
 
 # ubedit.exe: the editor
@@ -91,9 +95,14 @@ EDITOR_SRCS := \
 	src/app/app_play.c \
 	$(PLATFORM_SRCS)
 
-OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(SRCS))
-EDITOR_OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(EDITOR_SRCS))
-DEPS := $(sort $(OBJS:.o=.d) $(EDITOR_OBJS:.o=.d))
+# icons and version information (res/*.rc; icons drawn by tools/make_icon.py)
+WINDRES ?= $(CROSS)windres
+GAME_RES := $(OUT)/obj/res/uniblox_res.o
+EDITOR_RES := $(OUT)/obj/res/ubedit_res.o
+
+OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(SRCS)) $(GAME_RES)
+EDITOR_OBJS := $(patsubst src/%.c,$(OUT)/obj/%.o,$(EDITOR_SRCS)) $(EDITOR_RES)
+DEPS := $(sort $(filter-out %_res.d,$(OBJS:.o=.d) $(EDITOR_OBJS:.o=.d)))
 
 # Windows only guarantees 4-byte stack alignment at entry points and
 # callbacks; tell the compiler so. GCC also must not turn the loops in
@@ -135,7 +144,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
-	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/test_present.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
 	src/app/app_editor.c src/app/app_play.c
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all
@@ -152,6 +161,18 @@ $(EXE): $(OBJS)
 $(EDITOR_EXE): $(EDITOR_OBJS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LDFLAGS) -o $@ $(EDITOR_OBJS) $(LIBS)
+
+$(OUT)/res/uniblox.ico: tools/make_icon.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) tools/make_icon.py game $@
+
+$(OUT)/res/ubedit.ico: tools/make_icon.py
+	@mkdir -p $(dir $@)
+	$(PYTHON) tools/make_icon.py editor $@
+
+$(OUT)/obj/res/%_res.o: res/%.rc $(OUT)/res/%.ico
+	@mkdir -p $(dir $@)
+	$(WINDRES) --include-dir $(OUT)/res -O coff -i $< -o $@
 
 $(OUT)/obj/%.o: src/%.c
 	@mkdir -p $(dir $@)

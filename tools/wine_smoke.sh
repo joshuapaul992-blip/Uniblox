@@ -56,7 +56,8 @@ start_game() {
 }
 
 stop_game() {
-    xdotool key Escape
+    xdotool key Escape; sleep 0.5                       # the menu
+    xdotool key q                                       # Quit
     for _ in $(seq 50); do kill -0 "$GAME_PID" 2>/dev/null || break; sleep 0.2; done
     if kill -0 "$GAME_PID" 2>/dev/null; then
         echo "game did not exit after Escape" >&2
@@ -96,6 +97,14 @@ if [ "$RENDERER" = software ]; then
 fi
 xdotool key F6; sleep 0.5                               # quality (GL) / resolution (software)
 xdotool key F9; sleep 0.3                               # fps cap 120 -> 144
+xdotool key Escape; sleep 0.6                           # the menu
+import -window root "${SHOT%.png}-menu.png"
+xdotool mousemove $((X + 480)) $((Y + 249)); sleep 0.3; xdotool click 1; sleep 0.5   # Settings
+import -window root "${SHOT%.png}-settings.png"
+# Frame rate cap > (240): the 7th row with software, the 5th with OpenGL (no resolution, colours, sending rows)
+FPS_ROW_Y=$([ "$RENDERER" = opengl ] && echo 275 || echo 321)
+xdotool mousemove $((X + 742)) $((Y + FPS_ROW_Y)); sleep 0.3; xdotool click 1; sleep 0.5
+xdotool key Escape; sleep 0.3; xdotool key Escape; sleep 0.5                         # back, resume
 xdotool key F11; sleep 1.5                              # fullscreen
 import -window root "${SHOT%.png}-fullscreen.png"
 xdotool key F11; sleep 1                                # back to a window
@@ -148,7 +157,11 @@ expect "$RUN1" "mouse look on" "right button started mouse-look"
 expect "$RUN1" "saved uniblox.cfg" "settings saved"
 expect "$RUN1" "benchmark: [0-9]* frames" "F5 benchmark completed"
 expect "$RUN1" "frame rate cap 144" "F9 changed the fps cap"
-expect "$CFG" "fps_cap=144" "fps cap saved"
+expect "$RUN1" "menu opened" "Esc opened the menu"
+expect "$CFG" "fps_cap=240" "the menu changed the fps cap and saved it"
+expect "$RUN1" "frame rate cap 240" "the new cap took effect at once"
+expect "$RUN1" "menu closed" "Esc closed the menu"
+expect "$RUN1" "quitting from the menu" "Quit in the menu"
 expect "$RUN1" "display: fullscreen" "F11 went fullscreen"
 expect "$RUN1" "display: windowed" "F11 came back to a window"
 if [ "$RENDERER" = opengl ]; then

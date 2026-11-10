@@ -2,6 +2,7 @@
  * renderer. */
 #include <stdlib.h>
 
+#include "core/ub_string.h"
 #include "render/ub_render.h"
 #include "ui/ub_ui.h"
 #include "test.h"
@@ -282,5 +283,119 @@ void test_ui(void)
     move_to(ui_r(0, 0, 1, 1));
     ub_render_set_text_in_frame(false);
     ub_render_set_text_px(0);
+    ub_render_shutdown();
+}
+
+/* ------------------------------------------------- the game's settings */
+
+#include "app/app_settings.h"
+
+static ub_settings g_s;
+static ub_menu g_m;
+static int g_flags;
+
+static void menu_frame(void)
+{
+    ub_camera cam;
+    memset(&cam, 0, sizeof cam);
+    cam.fov_y = 1.2f;
+    cam.far_dist = 100;
+    ub_render_env env = ub_render_default_env();
+    ub_render_begin(&g_frame, &cam, &env);
+    ui_begin(&g_in, UW, UH, 1.0f / 60.0f);
+    g_flags |= settings_menu(&g_m, &g_s, &g_in);
+    ui_end();
+    ub_render_end(NULL);
+    memset(g_in.key_pressed, 0, sizeof g_in.key_pressed);
+    memset(g_in.mouse_pressed, 0, sizeof g_in.mouse_pressed);
+    memset(g_in.mouse_released, 0, sizeof g_in.mouse_released);
+}
+
+static bool menu_click(const char *label)
+{
+    ui_rect r;
+    if (!ui_find(label, &r)) {
+        printf("  (no \"%s\" in the menu)\n", label);
+        return false;
+    }
+    g_in.mouse_x = r.x + r.w / 2;
+    g_in.mouse_y = r.y + r.h / 2;
+    menu_frame();
+    g_in.mouse_down[0] = g_in.mouse_pressed[0] = true;
+    menu_frame();
+    g_in.mouse_down[0] = false;
+    g_in.mouse_released[0] = true;
+    menu_frame();
+    menu_frame();
+    return true;
+}
+
+void test_settings(void)
+{
+    /* the file: defaults, then what was written reads back the same */
+    settings_defaults(&g_s);
+    CHECK(g_s.prefs.fps_cap == 120 && g_s.changed_only && g_s.scripts && g_s.volume == 80);
+    g_s.prefs.backend = UB_BACKEND_PREF_SOFTWARE;
+    g_s.prefs.fs_width = 1280;
+    g_s.prefs.fs_height = 720;
+    g_s.prefs.timer_qpc = true;
+    g_s.mouse_pct = 150;
+    g_s.invert_y = true;
+    g_s.fov = 85;
+    g_s.hide_overlay = true;
+    ub_fmt(g_s.place, sizeof g_s.place, "places/castle.ubx");
+    char text[3072];
+    int n = settings_write(&g_s, text, sizeof text);
+    CHECK(n > 0 && n < (int)sizeof text - 1);
+    ub_settings b;
+    settings_defaults(&b);
+    settings_parse(&b, text);
+    CHECK(memcmp(&b.prefs, &g_s.prefs, sizeof b.prefs) == 0);
+    CHECK(b.mouse_pct == 150 && b.invert_y && b.fov == 85 && b.hide_overlay && !strcmp(b.place, "places/castle.ubx"));
+    /* old files (before milestone 7) still read */
+    settings_defaults(&b);
+    settings_parse(&b, "renderer=opengl\r\nfps_cap=60\r\nmuted=1\r\nplace=\r\n");
+    CHECK(b.prefs.backend == UB_BACKEND_PREF_OPENGL && b.prefs.fps_cap == 60 && b.muted && b.changed_only);
+
+    /* the menu, through its UI */
+    memset(&g_in, 0, sizeof g_in);
+    g_in.has_focus = true;
+    char desc[64];
+    CHECK(ub_render_init(&g_frame, desc, sizeof desc));
+    settings_defaults(&g_s);
+    memset(&g_m, 0, sizeof g_m);
+    menu_frame();
+    menu_frame();
+    g_flags = 0;
+    CHECK(menu_click("Settings") && g_m.page == 1);
+    g_flags = 0;
+    CHECK(menu_click("Frame rate cap >") && g_s.prefs.fps_cap == 144 && (g_flags & SET_FPS));
+    CHECK(menu_click("Frame rate cap <") && menu_click("Frame rate cap <") && g_s.prefs.fps_cap == 60);
+    g_flags = 0;
+    CHECK(menu_click("Fullscreen size >") && g_s.prefs.fs_width == 640 && (g_flags & SET_FSMODE));
+    CHECK(menu_click("Fullscreen size <") && g_s.prefs.fs_width == 0);
+    CHECK(menu_click("Fullscreen size <") && g_s.prefs.fs_width == 1920); /* wraps to the biggest */
+    g_flags = 0;
+    CHECK(menu_click("Send only what changed >") && !g_s.changed_only && (g_flags & SET_PRESENT));
+    CHECK(menu_click("Render resolution >") && g_s.prefs.sw_height == 720);
+    g_flags = 0;
+    CHECK(menu_click("Renderer (restart) >") && g_s.prefs.backend == UB_BACKEND_PREF_OPENGL &&
+          (g_flags & SET_RESTART_NEEDED));
+    CHECK(menu_click("Sound and controls") && g_m.page == 2);
+    CHECK(menu_click("Volume <") && g_s.volume == 70);
+    CHECK(menu_click("Field of view >") && g_s.fov == 75);
+    CHECK(menu_click("Invert mouse up/down >") && g_s.invert_y);
+    CHECK(menu_click("Game") && menu_click("Scripts (next place) >") && !g_s.scripts);
+    /* Esc: back to the paused page, then resume */
+    g_in.key_pressed[UB_KEY_ESCAPE] = true;
+    menu_frame();
+    CHECK(g_m.page == 0);
+    g_flags = 0;
+    g_in.key_pressed[UB_KEY_ESCAPE] = true;
+    menu_frame();
+    CHECK(g_flags & MENU_RESUME);
+    g_flags = 0;
+    menu_frame();
+    CHECK(menu_click("Quit (Q)") && (g_flags & MENU_QUIT));
     ub_render_shutdown();
 }

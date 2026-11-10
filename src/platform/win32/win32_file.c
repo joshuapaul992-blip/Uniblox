@@ -25,7 +25,33 @@ void plat_free(void *p)
 
 /* --------------------------------------------------------------- time */
 
+/* With a steady time-stamp counter (Nehalem and later; "invariant TSC"),
+ * reading it costs a few cycles, where QueryPerformanceCounter on NT 3.51
+ * and 4.0 reads the old timer chip through slow I/O ports at 1.19 MHz. */
+static u64 g_tsc_khz, g_tsc_base, g_tsc_us_base, g_tsc_last;
+
+static u64 qpc_time_us(void);
+
+void win32_use_tsc(u64 khz)
+{
+    g_tsc_us_base = qpc_time_us();
+    g_tsc_base = win32_read_tsc();
+    g_tsc_last = g_tsc_us_base;
+    g_tsc_khz = khz;
+}
+
 u64 plat_time_us(void)
+{
+    if (g_tsc_khz) {
+        u64 t = g_tsc_us_base + (win32_read_tsc() - g_tsc_base) * 1000u / g_tsc_khz;
+        if (t < g_tsc_last) t = g_tsc_last; /* never backwards */
+        g_tsc_last = t;
+        return t;
+    }
+    return qpc_time_us();
+}
+
+static u64 qpc_time_us(void)
 {
     static LARGE_INTEGER freq, start;
     static int mode; /* 0 = not initialised, 1 = QPC, 2 = GetTickCount */

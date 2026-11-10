@@ -78,7 +78,7 @@ tests/          host unit tests (make test)
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | **Built.** Towers of 20 parts come to rest and sleep; the character walks, jumps, steps up, collides and pushes. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | **Built.** The door opens when walked into (unit test and Wine smoke test), and 28 hostile scripts are stopped or fail while the game carries on. Needs a run on a real install |
 | 6 | In-game editor | Build an obstacle course without writing code | **Built** as a separate program, `ubedit.exe`. A course built with editor actions only is played to the finish by the character (unit test); the real editor is driven through its UI in tests and under Wine. Needs a run on a real install |
-| 7 | Renderer polish + settings menu | In-game settings UI; more effects | Hardware OpenGL path moved forward into milestone 2.5 |
+| 7 | Renderer polish + settings menu | In-game settings UI; more effects | **Built.** Settings menu (Esc) in the game, a shadow under the character, and NT 3.51/4.0 polish for modern PCs: only changed parts of the screen are sent, fullscreen display modes on NT 4.0+, steady-TSC timing, font fallback, icons. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8 | Loopback networking | Single-player runs entirely through replication | |
 | 9 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 10 | Platform services | Server browser, accounts, publish/download places | |
@@ -450,7 +450,47 @@ tests/          host unit tests (make test)
   - `ui_wants_mouse` looked two frames back, which swallowed the first
     click in the 3D view after using a panel.
 
+## Milestone 7 notes
+
+- **Why NT 3.51 on a modern PC was slow:** with WINVBE on NT 3.51 the
+  card's memory is written uncached. A user's i7-8700 at 2560×1421 took
+  150 ms to present a frame that took 3 ms to draw. The answer is sending
+  fewer bytes.
+- **Sending only what changed** (`src/render/ub_present.c`): the frame is
+  compared with the last one in 16×16 tiles. Changed tiles are stretched
+  (nearest pixel, with the column map worked out once per size) into a
+  window-sized DIB section that keeps what the screen shows. The text
+  overlay is redrawn clipped to those rectangles; text that changed, moved
+  or went marks its old and new places dirty. Only the rectangles are
+  blitted, merged along tile rows and down. Window column x shows frame
+  column x·fw/ww, and a tile covers the window columns from ceil(start·ww/fw)
+  up to ceil(end·ww/fw), so partial updates equal a full stretch exactly
+  (tested on random frames). When more than 70% changed, one big blit is
+  cheaper than many. WM_PAINT sends everything.
+- **Display modes** (NT 4.0+): `ChangeDisplaySettingsW` and
+  `EnumDisplaySettingsW` are looked up at run time. The mode keeps the
+  desktop's colour depth and uses its highest refresh rate up to 120 Hz.
+  Losing focus gives the desktop its mode back and minimises the window;
+  coming back takes the mode again.
+- **Timing:** CPUID leaf 0x80000007 bit 8 says the time-stamp counter is
+  invariant. Then `plat_time_us` counts TSC ticks, calibrated against
+  QueryPerformanceCounter over 100 ms at start and never going backwards.
+- **CPUs:** NT 3.51 and 4.0 don't set CR4.OSFXSR, so SSE instructions would
+  fault there. Nothing in Uniblox uses them, and `make check` keeps
+  rejecting anything newer than the Pentium.
+- **Settings** (`src/app/app_settings.c`): one struct, parsed from and
+  written to `uniblox.cfg` (older files still read), and the menu. The menu
+  is OS-independent and tested through the UI like the editor.
+- **Esc while typing:** '/', some text and Esc can arrive in one frame on
+  a slow machine. That Esc cancels the text and does not open the menu,
+  because text entry reports whether it was open at any point that frame.
+
 ## Open items
+
+- Milestone 7 on a real install: on NT 3.51 with WINVBE, stand still and
+  read the `Present:` line (it should show only a few percent changed). Try
+  the editor there too. On NT 4.0, try Settings > Display > Fullscreen size
+  at 1280×720. Send `uniblox.log`.
 
 - Milestone 6 on a real install: build a short course in `ubedit.exe`
   (blocks, a kill brick, a checkpoint, a finish line), save it, and play it

@@ -48,12 +48,8 @@ static u64 g_next_frame_us;
 
 /* ---------------------------------------------------------- system info */
 
-static u64 read_tsc(void)
-{
-    u32 lo, hi;
-    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
-    return ((u64)hi << 32) | lo;
-}
+#define read_tsc win32_read_tsc
+static u64 g_tsc_khz; /* measured */
 
 /* CPUID (Pentium and later; __get_cpuid checks the instruction exists) and
  * a rough clock speed from the time-stamp counter over 50 ms. In a VM or
@@ -72,7 +68,7 @@ static void query_cpu(ub_system_info *sys)
     memcpy(vendor + 8, &c, 4);
     vendor[12] = 0;
     unsigned family = 0, model = 0;
-    bool mmx = false, sse = false, tsc = false;
+    bool mmx = false, sse = false, sse2 = false, tsc = false, avx2 = false;
     if (__get_cpuid(1, &a, &b, &c, &d)) {
         family = (a >> 8) & 15;
         model = (a >> 4) & 15;
@@ -81,15 +77,47 @@ static void query_cpu(ub_system_info *sys)
         tsc = (d >> 4) & 1;
         mmx = (d >> 23) & 1;
         sse = (d >> 25) & 1;
+        sse2 = (d >> 26) & 1;
     }
+    /* the name the CPU gives itself, and whether its counter is steady */
+    char brand[49];
+    brand[0] = 0;
+    unsigned max_ext = 0;
+    if (__get_cpuid(0x80000000u, &a, &b, &c, &d)) max_ext = a;
+    if (max_ext >= 0x80000004u) {
+        unsigned *w = (unsigned *)brand;
+        for (unsigned k = 0; k < 3; ++k)
+            if (__get_cpuid(0x80000002u + k, &a, &b, &c, &d)) {
+                w[k * 4 + 0] = a;
+                w[k * 4 + 1] = b;
+                w[k * 4 + 2] = c;
+                w[k * 4 + 3] = d;
+            }
+        brand[48] = 0;
+    }
+    if (max_ext >= 0x80000007u && __get_cpuid(0x80000007u, &a, &b, &c, &d)) sys->invariant_tsc = tsc && ((d >> 8) & 1);
+    if (__get_cpuid_max(0, NULL) >= 7) {
+        __cpuid_count(7, 0, a, b, c, d);
+        avx2 = (b >> 5) & 1;
+    }
+    const char *name = brand;
+    while (*name == ' ') ++name; /* (Intel pads it on the left) */
     if (tsc) {
         u64 t0 = plat_time_us(), c0 = read_tsc();
-        while (plat_time_us() - t0 < 50000) { }
+        while (plat_time_us() - t0 < 100000) { }
         u64 t1 = plat_time_us(), c1 = read_tsc();
-        if (t1 > t0) sys->cpu_mhz = (u32)((c1 - c0) / (t1 - t0));
+        if (t1 > t0) {
+            g_tsc_khz = (c1 - c0) * 1000u / (t1 - t0);
+            sys->cpu_mhz = (u32)(g_tsc_khz / 1000u);
+        }
     }
-    ub_fmt(sys->cpu_desc, sizeof sys->cpu_desc, "%s family %u model %u%s%s, ~%u MHz",
-           vendor, family, model, mmx ? ", MMX" : "", sse ? ", SSE" : "", sys->cpu_mhz);
+    /* (SSE needs the OS to save its registers: NT 4.0 and older never do,
+     * so only MMX and plain x86 are used anywhere) */
+    char model_txt[48];
+    ub_fmt(model_txt, sizeof model_txt, "family %u model %u", family, model);
+    ub_fmt(sys->cpu_desc, sizeof sys->cpu_desc, "%s%s%s%s%s%s%s%s%s, ~%u MHz%s", name[0] ? name : vendor,
+           name[0] ? " (" : " ", model_txt, name[0] ? ")" : "", mmx ? ", MMX" : "", sse ? ", SSE" : "",
+           sse2 ? ", SSE2" : "", avx2 ? ", AVX2" : "", "", sys->cpu_mhz, sys->invariant_tsc ? ", steady TSC" : "");
 }
 
 typedef struct {
@@ -320,17 +348,134 @@ static RECT monitor_rect(HWND hwnd)
     return r;
 }
 
+/* ------------------------------------------------ fullscreen display modes
+ * ChangeDisplaySettingsW / EnumDisplaySettingsW arrived with NT 4.0: they
+ * are looked up at run time, so NT 3.51 simply has no modes to offer. */
+typedef LONG(WINAPI *pfn_ChangeDisplaySettingsW)(DEVMODEW *, DWORD);
+typedef BOOL(WINAPI *pfn_EnumDisplaySettingsW)(LPCWSTR, DWORD, DEVMODEW *);
+static pfn_ChangeDisplaySettingsW p_cds;
+static pfn_EnumDisplaySettingsW p_eds;
+static bool g_mode_api_tried;
+static int g_fs_w, g_fs_h;           /* wanted fullscreen mode, 0 = the desktop's */
+static bool g_mode_changed;          /* the screen is in our mode now */
+static bool g_mode_suspended;        /* switched away: desktop mode back until we return */
+
+static void load_mode_api(void)
+{
+    if (g_mode_api_tried) return;
+    g_mode_api_tried = true;
+    HMODULE user = GetModuleHandleA("USER32.DLL");
+    if (!user) return;
+    p_cds = (pfn_ChangeDisplaySettingsW)(void *)GetProcAddress(user, "ChangeDisplaySettingsW");
+    p_eds = (pfn_EnumDisplaySettingsW)(void *)GetProcAddress(user, "EnumDisplaySettingsW");
+    if (!p_cds || !p_eds) p_cds = NULL;
+}
+
+static int desktop_bpp(void)
+{
+    HDC dc = GetDC(NULL);
+    int bpp = GetDeviceCaps(dc, BITSPIXEL) * GetDeviceCaps(dc, PLANES);
+    ReleaseDC(NULL, dc);
+    return bpp;
+}
+
+int plat_display_modes(ub_display_mode *out, int max)
+{
+    load_mode_api();
+    if (!p_cds) return 0;
+    int bpp = desktop_bpp(), n = 0;
+    DEVMODEW dm;
+    for (DWORD i = 0; i < 400 && n < max; ++i) {
+        memset(&dm, 0, sizeof dm);
+        dm.dmSize = sizeof dm;
+        if (!p_eds(NULL, i, &dm)) break;
+        if ((int)dm.dmBitsPerPel != bpp || dm.dmPelsWidth < 640 || dm.dmPelsHeight < 480) continue;
+        bool seen = false;
+        for (int k = 0; k < n && !seen; ++k) seen = out[k].w == (int)dm.dmPelsWidth && out[k].h == (int)dm.dmPelsHeight;
+        if (seen) continue;
+        int at = n++; /* keep them smallest first */
+        while (at > 0 && (i64)out[at - 1].w * out[at - 1].h > (i64)dm.dmPelsWidth * dm.dmPelsHeight) {
+            out[at] = out[at - 1];
+            --at;
+        }
+        out[at].w = (int)dm.dmPelsWidth;
+        out[at].h = (int)dm.dmPelsHeight;
+    }
+    return n;
+}
+
+/* Switches the screen to the wanted mode (ours) or back to the desktop's. */
+static bool screen_mode(bool ours)
+{
+    if (!ours) {
+        if (g_mode_changed) {
+            p_cds(NULL, 0);
+            g_mode_changed = false;
+            ub_info("display: the desktop's own mode is back");
+        }
+        return true;
+    }
+    load_mode_api();
+    if (!p_cds || g_fs_w <= 0 || g_fs_h <= 0) return false;
+    int bpp = desktop_bpp();
+    DEVMODEW dm, best;
+    bool found = false;
+    for (DWORD i = 0; i < 400; ++i) {
+        memset(&dm, 0, sizeof dm);
+        dm.dmSize = sizeof dm;
+        if (!p_eds(NULL, i, &dm)) break;
+        if ((int)dm.dmPelsWidth != g_fs_w || (int)dm.dmPelsHeight != g_fs_h || (int)dm.dmBitsPerPel != bpp) continue;
+        /* the highest refresh rate up to 120 Hz */
+        if (!found || (dm.dmDisplayFrequency > best.dmDisplayFrequency && dm.dmDisplayFrequency <= 120)) best = dm;
+        found = true;
+    }
+    if (!found) {
+        ub_warn("display: no %dx%d mode at %d bits; staying at the desktop's", g_fs_w, g_fs_h, bpp);
+        return false;
+    }
+    best.dmFields = DM_PELSWIDTH | DM_PELSHEIGHT | DM_BITSPERPEL | (best.dmDisplayFrequency ? DM_DISPLAYFREQUENCY : 0);
+    LONG r = p_cds(&best, CDS_FULLSCREEN);
+    if (r != DISP_CHANGE_SUCCESSFUL) {
+        ub_warn("display: the screen would not switch to %dx%d (code %d); staying at the desktop's", g_fs_w, g_fs_h, (int)r);
+        return false;
+    }
+    g_mode_changed = true;
+    ub_info("display: switched the screen to %dx%d, %d bits, %u Hz", g_fs_w, g_fs_h, bpp, (u32)best.dmDisplayFrequency);
+    return true;
+}
+
+static void cover_screen(void)
+{
+    RECT m = monitor_rect(g_hwnd);
+    SetWindowPos(g_hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top, SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+}
+
+void plat_set_fullscreen_mode(int w, int h)
+{
+    if (w == g_fs_w && h == g_fs_h) return;
+    g_fs_w = w;
+    g_fs_h = h;
+    if (!g_hwnd || !g_frame.fullscreen) return;
+    screen_mode(false);
+    screen_mode(true);
+    cover_screen();
+    win32_sw_invalidate();
+}
+
 static void apply_fullscreen(bool on)
 {
     if (!g_hwnd || on == g_frame.fullscreen) return;
     plat_set_mouse_capture(false);
     if (on) {
         GetWindowRect(g_hwnd, &g_windowed_rect);
+        screen_mode(true);
         RECT m = monitor_rect(g_hwnd);
         SetWindowLongW(g_hwnd, GWL_STYLE, FULLSCREEN_STYLE);
         SetWindowPos(g_hwnd, HWND_TOP, m.left, m.top, m.right - m.left, m.bottom - m.top,
                      SWP_FRAMECHANGED | SWP_SHOWWINDOW);
     } else {
+        screen_mode(false);
+        g_mode_suspended = false;
         SetWindowLongW(g_hwnd, GWL_STYLE, WINDOWED_STYLE);
         RECT r = g_windowed_rect;
         SetWindowPos(g_hwnd, HWND_NOTOPMOST, r.left, r.top, r.right - r.left, r.bottom - r.top,
@@ -363,6 +508,20 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SETFOCUS:
         g_input.has_focus = true;
         return 0;
+    case WM_ACTIVATEAPP:
+        /* in our own display mode: give the desktop its mode back while
+         * another program is in front, and take ours again on return */
+        if (!wp && g_mode_changed) {
+            screen_mode(false);
+            g_mode_suspended = true;
+            ShowWindow(hwnd, SW_MINIMIZE);
+        } else if (wp && g_mode_suspended && g_frame.fullscreen) {
+            g_mode_suspended = false;
+            ShowWindow(hwnd, SW_RESTORE);
+            if (screen_mode(true)) cover_screen();
+            win32_sw_invalidate();
+        }
+        break;
     case WM_KILLFOCUS:
         g_input.has_focus = false;
         release_everything();
@@ -408,7 +567,10 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC dc = BeginPaint(hwnd, &ps);
-        if (g_frame.backend == UB_BACKEND_SOFTWARE && g_frame.fb) win32_sw_present(dc, &g_frame);
+        if (g_frame.backend == UB_BACKEND_SOFTWARE && g_frame.fb) {
+            win32_sw_invalidate();
+            win32_sw_present(dc, &g_frame);
+        }
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -424,7 +586,8 @@ static bool register_class(void)
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_OWNDC;
     wc.lpfnWndProc = wnd_proc;
     wc.hInstance = g_inst;
-    wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
+    wc.hIcon = LoadIconW(g_inst, MAKEINTRESOURCEW(1)); /* from res/ */
+    if (!wc.hIcon) wc.hIcon = LoadIconW(NULL, (LPCWSTR)IDI_APPLICATION);
     wc.hCursor = LoadCursorW(NULL, (LPCWSTR)IDC_ARROW);
     wc.lpszClassName = L"UnibloxWindow";
     return RegisterClassW(&wc) != 0;
@@ -577,6 +740,12 @@ static int win32_main(void)
     prefs.fps_cap = 120;
     prefs.sw_height = 480;
     app_preinit(&prefs);
+    if (sys.invariant_tsc && g_tsc_khz > 1000 && !prefs.timer_qpc) {
+        win32_use_tsc(g_tsc_khz);
+        ub_info("timer: the CPU's steady time-stamp counter (%u kHz)", (u32)g_tsc_khz);
+    } else {
+        ub_info("timer: QueryPerformanceCounter%s", sys.invariant_tsc ? " (timer=qpc in the settings)" : "");
+    }
 
     int w, h;
     initial_size(&prefs, &sys, &w, &h);
@@ -588,6 +757,8 @@ static int win32_main(void)
     ub_info("display: %s renderer, %dx%d window, frame rate cap %u%s",
             g_frame.backend == UB_BACKEND_OPENGL ? "OpenGL" : "software", w, h, g_frame.fps_cap,
             g_frame.fps_cap ? " fps" : " (unlimited)");
+    g_fs_w = prefs.fs_width;
+    g_fs_h = prefs.fs_height;
     if (prefs.fullscreen) apply_fullscreen(true);
     g_want_fullscreen = g_frame.fullscreen;
 
@@ -646,6 +817,7 @@ static int win32_main(void)
 
     ub_info("shutting down");
     plat_set_mouse_capture(false);
+    screen_mode(false);
     app_shutdown();
     win32_audio_close();
     ub_mixer_shutdown();

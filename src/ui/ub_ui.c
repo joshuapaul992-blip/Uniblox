@@ -685,6 +685,32 @@ bool ui_slider(const char *label, f32 *v, f32 lo, f32 hi)
     return *v != before;
 }
 
+int ui_stepper(const char *label, const char *value)
+{
+    u32 id = make_id(label);
+    ui_rect r = ui_next_rect(U.wh);
+    ui_rect vr = value_rect(label, r, id);
+    record(id, label, r);
+    int bw = U.wh + 4;
+    ui_rect lb = ui_r(vr.x, vr.y, bw, vr.h), rb = ui_r(vr.x + vr.w - bw, vr.y, bw, vr.h);
+    ui_rect mid = ui_r(vr.x + bw + 2, vr.y, vr.w - 2 * bw - 4, vr.h);
+    int fl = interact(id ^ 0x2545F491u, lb), fr = interact(id ^ 0x9E3779B9u, rb);
+    frame_rect(lb, (fl & F_HELD) ? UI_PRESS : (fl & F_HOVER) ? UI_HOVER : UI_WIDGET, UI_BORDER);
+    frame_rect(rb, (fr & F_HELD) ? UI_PRESS : (fr & F_HOVER) ? UI_HOVER : UI_WIDGET, UI_BORDER);
+    int cw = ub_render_text_width("<");
+    ub_render_text(lb.x + (lb.w - cw) / 2, lb.y + (lb.h - U.lh) / 2 + 1, "<", UI_TEXT | UB_TEXT_FLAT);
+    ub_render_text(rb.x + (rb.w - cw) / 2, rb.y + (rb.h - U.lh) / 2 + 1, ">", UI_TEXT | UB_TEXT_FLAT);
+    fill(mid, UI_FIELD);
+    int tw = ub_render_text_width(value);
+    text_in(mid, tw < mid.w - 8 ? (mid.w - tw) / 2 : 4, value, UI_TEXT);
+    char sub[80];
+    ub_fmt(sub, sizeof sub, "%s <", label);
+    record(id ^ 1, sub, lb);
+    ub_fmt(sub, sizeof sub, "%s >", label);
+    record(id ^ 2, sub, rb);
+    return (fr & F_CLICK) ? 1 : (fl & F_CLICK) ? -1 : 0;
+}
+
 /* ---- pop-up lists ---- */
 
 static bool take_result(u32 id, int *out)

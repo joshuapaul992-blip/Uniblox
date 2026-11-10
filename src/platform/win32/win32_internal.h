@@ -29,6 +29,7 @@ void win32_audio_close(void);
 bool win32_sw_init(const ub_system_info *sys, int sw_height);
 ub_framebuffer *win32_sw_prepare(int client_w, int client_h);
 void win32_sw_present(HDC wdc, ub_frame *frame);
+void win32_sw_invalidate(void);   /* the window was uncovered: send everything next time */
 bool win32_sw_palette_message(HWND hwnd, UINT msg, WPARAM wp, LRESULT *result);
 void win32_sw_shutdown(void);
 
@@ -38,5 +39,17 @@ void win32_sw_shutdown(void);
 bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver);
 void win32_gl_swap(void);
 void win32_gl_shutdown(void);
+
+static inline u64 win32_read_tsc(void)
+{
+    u32 lo, hi;
+    __asm__ __volatile__("rdtsc" : "=a"(lo), "=d"(hi));
+    return ((u64)hi << 32) | lo;
+}
+/* From now on plat_time_us() counts CPU clock ticks (at khz per ms). */
+void win32_use_tsc(u64 khz);
+/* The UI font: Tahoma where it is installed (2000 and later, or with IE4 /
+ * Office on NT 4.0), else Arial (every NT); semibold. */
+HFONT win32_ui_font(int px);
 
 #endif

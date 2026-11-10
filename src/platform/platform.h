@@ -41,7 +41,7 @@ typedef struct {
     u32 palette_serial;     /* app increments this when palette contents change */
 } ub_framebuffer;
 
-#define UB_TEXT_QUEUE_MAX 64
+#define UB_TEXT_QUEUE_MAX 128
 #define UB_TEXT_ITEM_LEN 120
 
 /* Text for the software backend, drawn by the OS at window resolution after
@@ -77,6 +77,8 @@ typedef struct {
     u32 fps_cap;            /* 0 = unlimited */
     bool vsync;
     int sw_height;          /* software backend: render height (0 = window height) */
+    bool timer_qpc;         /* time with QueryPerformanceCounter even when the CPU's counter is steady */
+    int fs_width, fs_height;/* fullscreen display mode (NT 4.0 and later); 0 = keep the desktop's */
 } ub_display_prefs;
 
 /* Choose the software pixel format from the next frame on. The default
@@ -90,8 +92,26 @@ void plat_set_sw_resolution(int height);
 /* Borderless fullscreen on the monitor holding the window, or back. */
 void plat_set_fullscreen(bool on);
 
+/* Fullscreen display modes (NT 4.0 and later: NT 3.51 cannot change them).
+ * A smaller mode means fewer pixels to send each frame, and the monitor
+ * does the stretching. */
+typedef struct {
+    int w, h;
+} ub_display_mode;
+/* The sizes the screen can switch to at its current colour depth, smallest
+ * first; 0 when modes cannot be changed here. */
+int plat_display_modes(ub_display_mode *out, int max);
+/* The mode to use while fullscreen (0, 0 = keep the desktop's). */
+void plat_set_fullscreen_mode(int w, int h);
+
 /* Frame rate limit, 0 = unlimited. */
 void plat_set_fps_cap(u32 fps);
+
+/* Software backend: send the screen only the parts of the window that
+ * changed since the last frame (default on). Writing to the graphics card
+ * is slow on some systems (NT 3.51 with a VESA driver); comparing frames
+ * in memory is not. */
+void plat_set_present_changed_only(bool on);
 
 /* OpenGL backend: address of a GL function (core 1.1 or extension), NULL
  * if the driver lacks it. */
@@ -199,7 +219,8 @@ typedef struct {
     u64 total_phys_bytes;    /* installed RAM as reported by the OS */
     int display_bpp;         /* desktop colour depth */
     char audio_desc[64];     /* e.g. "22050 Hz 16-bit stereo" or "no audio device" */
-    char cpu_desc[64];       /* e.g. "GenuineIntel family 5 model 2, MMX, ~133 MHz" */
+    char cpu_desc[160];      /* e.g. "Intel(R) Core(TM) i7-8700 CPU @ 3.20GHz (family 6 model 158), MMX, SSE2, ~3192 MHz" */
+    bool invariant_tsc;      /* the time-stamp counter runs at one rate (Nehalem / Haswell and later) */
     u32 cpu_mhz;             /* measured, 0 if unknown */
     bool palette_display;    /* the display is palette-based (256 colours) */
     bool has_mouse_wheel;    /* the OS reports wheel events (NT 4.0+, or a driver) */

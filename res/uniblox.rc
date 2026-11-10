@@ -1,0 +1,33 @@
+/* Uniblox - Uniblox: icon and version information (Explorer shows them on
+ * NT 4.0 and later; Program Manager shows the icon on NT 3.51). The icon
+ * is drawn at build time by tools/make_icon.py. */
+1 ICON "uniblox.ico"
+
+1 VERSIONINFO
+FILEVERSION 0,7,0,0
+PRODUCTVERSION 0,7,0,0
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0
+FILEOS 0x40004
+FILETYPE 1
+FILESUBTYPE 0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Uniblox"
+            VALUE "FileDescription", "Uniblox"
+            VALUE "FileVersion", "0.7 (milestone 7)"
+            VALUE "InternalName", "uniblox"
+            VALUE "OriginalFilename", "uniblox.exe"
+            VALUE "ProductName", "Uniblox"
+            VALUE "ProductVersion", "0.7"
+            VALUE "Comments", "For Windows NT 3.51 and later"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

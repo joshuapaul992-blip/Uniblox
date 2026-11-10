@@ -25,6 +25,60 @@ recommended). The CPU only needs to be an x86 Pentium.
 and software otherwise. The frame rate is capped at 120 fps by default (F9
 cycles through 60/120/144/240/unlimited).
 
+**The settings menu** (Esc) has Resume, Settings, Load the place again and
+Quit. Settings has three tabs:
+- **Display:** renderer, fullscreen, fullscreen size, graphics quality or
+  render resolution, colours, sending only what changed, frame rate cap,
+  text overlay.
+- **Sound and controls:** volume, mute, mouse-look speed, invert mouse,
+  field of view.
+- **Game:** scripts, timer.
+
+Changes are saved at once. The renderer, timer and scripts take effect the
+next time Uniblox starts or loads a place; everything else changes
+immediately. Every setting is a `< value >` stepper rather than a pop-up
+list, because on the software renderer the OS draws text on top of
+everything.
+
+When the renderer casts no shadows (software, or OpenGL on low), the
+character gets a soft round shadow on the ground. It shrinks and fades as
+you jump.
+
+## NT 3.51 and 4.0 on a modern PC
+
+Uniblox runs on NT 3.51 and 4.0 installed on today's hardware, for
+example an i7-8700 with the [WINVBE](https://github.com/ages2001/WINVBE)
+VESA driver. There, the slow part is putting each frame on the screen, not
+drawing it. On NT 3.51 with WINVBE, the graphics card's memory is written
+uncached. At 2560×1421 a whole frame took about 150 ms to send, against
+3 ms to draw. What Uniblox does about it:
+
+- **It sends only what changed.** Each frame is compared with the last one
+  in normal memory (cheap), and only the changed tiles are written to the
+  screen. The text overlay is redrawn only where it changes. Standing
+  still, or working in the editor, sends almost nothing. When the camera
+  moves, everything changes and a whole frame is sent. The overlay's
+  `Present:` line shows how much changed. Turn it off with Settings >
+  Display > *Send only what changed* (`send_changes_only=0`).
+- **It can lower the screen's resolution while fullscreen** (NT 4.0 and
+  later: Settings > Display > *Fullscreen size*). At 1280×720 a frame is a
+  quarter of the bytes of 1440p, and the monitor does the stretching. Use
+  Alt+Tab and the desktop gets its own mode back; it's also restored on
+  exit. NT 3.51 cannot change display modes, so there a smaller window or
+  a 16-bit desktop is the way to send fewer bytes.
+- **Steady timing.** On CPUs with a steady (invariant) time-stamp counter
+  (Nehalem, Haswell and later), frames are timed with it. That's cheaper
+  and finer than NT's timer chip, which NT 3.51 and 4.0 read through slow
+  I/O ports. `timer=qpc` goes back to Windows' timer.
+- **What the CPU can and cannot do:** NT 3.51 and 4.0 never turn on SSE,
+  because they don't save its registers. Uniblox uses only instructions
+  the original Pentium has, on every Windows, and `make check` enforces
+  this. The CPU line in the log names the chip and what it offers.
+- **Fonts:** Tahoma isn't on NT 3.51 or a plain NT 4.0, so Uniblox checks
+  which font GDI actually picked and uses Arial when there's no Tahoma.
+- **Icons and version information** in both programs (Program Manager on
+  NT 3.51, Explorer's Properties on NT 4.0).
+
 ## Places
 
 A place is a saved world: a tree of objects (models, folders, parts) plus
@@ -324,7 +378,11 @@ fallback.
   - Save as, New and Open, and the unsaved-changes question
   - a 20,000-part place
 
-  The UI toolkit is tested the same way.
+  The UI toolkit is tested the same way, and so is the game's settings
+  menu: its file reads back what it wrote, and clicking through its steppers
+  changes the settings. Sending only what changed is checked against a full
+  redraw on random frames and odd window sizes: the picture must be
+  identical, pixel for pixel.
 
 - **Wine smoke test.** This drives the real `.exe` with keyboard and mouse
   events under Xvfb, then checks the log and settings file. It needs
@@ -339,7 +397,9 @@ fallback.
   tools/wine_smoke.sh winxp opengl
   ```
 
-  It also checks that the demo's loose parts settle and fall asleep, walks
+  It also opens the menu with Esc, changes the frame rate cap there and
+  checks that it took effect and was saved, and quits from the menu. It
+  checks that the demo's loose parts settle and fall asleep, walks
   into the scripted door and checks the script opened it, checks that no
   script failed, opens a Roblox place from the command line, saves it with
   F7, and opens the result through `place=`.
@@ -365,7 +425,7 @@ fallback.
 | File | What it is |
 |---|---|
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
-| `uniblox.cfg` | Settings saved on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `sw_height`, `colors`, camera, mute, `scripts` (1 runs the place's scripts, 0 doesn't) and `place` |
+| `uniblox.cfg` | Settings, saved by the menu and on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `fullscreen_w`/`fullscreen_h` (the screen's mode while fullscreen, NT 4.0+), `sw_height`, `colors`, `send_changes_only`, `timer` (auto/qpc), `overlay`, `volume`, `muted`, `mouse`, `invert_y`, `fov`, camera, `scripts` and `place` |
 | `places/` | Places saved with F7 in the game or from the editor (`autosave.ubx`: the editor's unsaved changes when it was closed) |
 | `ubedit.log`, `ubedit.cfg` | The editor's log and settings (`renderer`, `quality`, `gl_shaders`, `fps_cap`, window size, `sw_height`, grid size) |
 | `sounds/jump.wav`, `sounds/land.wav`, `sounds/click.wav` | Optional. Replace the built-in sounds; any PCM 8/16-bit mono/stereo WAV works |
@@ -392,7 +452,7 @@ can't write the log or settings.
 | F9 | Frame rate cap: 60, 120, 144, 240, unlimited |
 | F3 | Hide the text overlay |
 | M | Mute / unmute |
-| Esc | Quit |
+| Esc | The menu: resume, settings, load the place again, quit (Q) |
 
 The text overlay shows the place's name and the result of the last load
 or save. It also shows what physics is doing (moving parts, how many are

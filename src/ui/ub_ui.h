@@ -82,6 +82,9 @@ bool ui_choice(const char *label, int *sel, const char *const *items, int count)
 /* A colour from a palette grid (pop-up). True on a change. `palette` must
  * stay valid until the next frame. */
 bool ui_color(const char *label, u32 *rgb, const u32 *palette, int count);
+/* A setting stepped through with < and > buttons (no pop-up: game menus
+ * where text is drawn on top by the OS). Returns -1, 0 or +1. */
+int ui_stepper(const char *label, const char *value);
 /* A tree row (the explorer). Returns UI_ROW_* flags. */
 enum { UI_ROW_CLICK = 1, UI_ROW_TOGGLE = 2, UI_ROW_DOUBLE = 4 };
 int ui_tree_row(const char *label, int depth, bool has_children, bool expanded, bool selected, u32 icon_color);

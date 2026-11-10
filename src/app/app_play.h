@@ -19,6 +19,9 @@ typedef struct {
     f32 walk_phase, walk_amount;       /* limb swing */
     f32 death_t;                       /* how far it has fallen over */
     bool moving;
+    f32 look_scale;                    /* mouse-look speed (1 = normal) */
+    bool invert_y;
+    f32 fov_deg;
     ub_part_draw *statics;             /* parts nothing has moved or changed */
     int static_count, static_cap;
 } ub_play_view;
@@ -40,5 +43,6 @@ ub_part_draw play_part_draw(const ub_part *p);
 /* Roblox-style lighting -> the renderer's sky, sun and fog. */
 ub_render_env play_env(const ub_world *w);
 void play_draw_character(f32 x, f32 y, f32 z, f32 facing, f32 phase, f32 amount, f32 fallen);
+void play_draw_blob_shadow(ub_game *g);
 
 #endif
