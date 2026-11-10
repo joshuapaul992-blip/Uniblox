@@ -81,7 +81,8 @@ tests/          host unit tests (make test)
 | 6 | In-game editor | Build an obstacle course without writing code | **Built** as a separate program, `ubedit.exe`. A course built with editor actions only is played to the finish by the character (unit test); the real editor is driven through its UI in tests and under Wine. Needs a run on a real install |
 | 7 | Renderer polish + settings menu | In-game settings UI; more effects | **Built.** Settings menu (Esc) in the game, a shadow under the character, and NT 3.51/4.0 polish for modern PCs: only changed parts of the screen are sent, fullscreen display modes on NT 4.0+, steady-TSC timing, font fallback, icons. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 8A | Roblox GUIs (up to 2022) | Places' ScreenGuis, BillboardGuis and SurfaceGuis look and work as in Roblox, driven by their LocalScripts | **Built.** Every GUI class and property imported and saved, Roblox's layout rules, rounded/stroked/gradient drawing, rich text, images from a local folder, input, LocalScripts, remotes, UserInputService, Mouse, Camera. The demo has a working GUI. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
-| 8B | Roblox scripts (up to 2022) | 2022-era game scripts run unchanged | Luau syntax (type annotations, if-expressions, generalised iteration, string interpolation...), attributes and tags from files, more classes and services |
+| 8B | Roblox scripts (up to 2022) | 2022-era game scripts run unchanged | **Built.** Luau's 2022 syntax (type annotations, if-expressions, generalised iteration, new literals and escapes) and library (bit32, utf8, Random, DateTime, os.date, string.pack, table.freeze...), attributes and tags from place files, CollectionService, 118 classes with Roblox's defaults, overlap queries, ClickDetectors, ProximityPrompts, Humanoid states, offline answers from Roblox's online services. The demo has a lamp with a prompt and a clickable block. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
+| 8C | Real Roblox games from .rbxl | Open a 2022 game's place file and play it | Unions and meshes from the file and from a local content folder, decals and textures, terrain, sky and atmosphere; R6/R15 characters with Motor6D, Tools and Backpack, Teams and team spawns; hinges, springs, ropes, prismatic and ball-socket constraints and the body movers; XML `.rbxlx`/`.rbxmx`, sounds, and loading big places quickly in little memory |
 | 9 | Loopback networking | Single-player runs entirely through replication | |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
@@ -526,7 +527,36 @@ tests/          host unit tests (make test)
   StudsOffset is in the camera's axes, as in Roblox; the world-axes offset
   is StudsOffsetWorldSpace (the demo's door label uses that).
 
+## Milestone 8B notes
+
+- **Syntax** is parsed by Lua 5.1's parser with the changes listed in
+  `src/script/lua/UNIBLOX.md`. Types are skipped token by token (balanced
+  brackets, unions, function types, generics, `typeof`), so they cost
+  nothing at run time; string interpolation (backticks) came to Luau in
+  2023 and is not accepted.
+- **The library** (`src/script/ub_luaulib.c`): `table.freeze` is a flag on
+  the table checked by every write path in the VM; `coroutine.close` resets
+  the thread, and the scheduler drops wake-ups for dead threads. Dates use
+  UTC from `GetSystemTime` (NT 3.1 and later); `os.date` without `!` and
+  `DateTime:ToLocalTime` add the local offset from `GetLocalTime`.
+  `math.noise` is Ken Perlin's improved noise, 0 at whole numbers.
+- **Attributes and tags** come from `AttributesSerialize` and `Tags` on any
+  instance and become typed properties `@Name` and `Tags` (NUL-separated),
+  so they are saved, cloned and shown like other properties. Every
+  attribute type but CFrame and EnumItem is kept, NaN and infinity too.
+- **Interaction** (`src/script/ub_sapi_interact.c`): prompts are found by a
+  scan of the world at most four times a second, shown by distance and
+  `Exclusivity`, and drawn as BillboardGuis under an engine-owned CoreGui
+  root that the GUI engine lays out like the PlayerGui. ClickDetectors are
+  found from the part under the mouse upwards through models. Humanoid
+  states come from the character controller (Running, Jumping, Freefall,
+  Landed, Dead).
+
 ## Open items
+
+- Milestone 8B on a real install: walk to the demo's lamp and press E;
+  click the spinning block in the house. Send `uniblox.log` and a
+  screenshot of the prompt.
 
 - Milestone 8A on a real install: the demo's panel, message line, sign and
   door label in the software renderer (NT 3.51, 32-bit and 256 colours) and
@@ -550,9 +580,9 @@ tests/          host unit tests (make test)
 - Milestone 5 on a real install: walk into the demo's door, step on the
   green button, and send the `script:` lines from `uniblox.log`. Then try
   a Roblox place with scripts.
-- Not done yet: LocalScripts and GUI (no screen GUI exists yet), animations
-  (`LoadAnimation` returns a track that does nothing), `Humanoid:MoveTo`,
-  sounds from scripts, constraints, and `CollectionService` tags.
+- Not done yet: animations (`LoadAnimation` returns a track that does
+  nothing), sounds from scripts and constraints (milestone 8C). LocalScripts,
+  the GUI (8A) and `CollectionService` tags (8B) are done.
 
 - Milestone 4 on a real install: knock over the demo's tower and crates,
   and check that they settle. The overlay's physics time should stay well

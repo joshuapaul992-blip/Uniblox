@@ -389,7 +389,7 @@ static void test_demo_place(void)
     CHECK(ub_game_start(&g_g, &w, true));
     ub_script_stats st;
     ub_script_get_stats(&st);
-    CHECK(st.scripts == 6); /* the server's; the panel's LocalScript starts with the first frame */
+    CHECK(st.scripts == 7); /* the server's; the panel's LocalScript starts with the first frame */
     i32 ws = ub_world_workspace(&g_g.world);
     i32 house = ub_world_find_child(&g_g.world, ws, "House");
     i32 door = ub_world_find_child(&g_g.world, house, "Door");
@@ -423,7 +423,7 @@ static void test_demo_place(void)
     /* the panel came with the player, kept its count through the death
      * (ResetOnSpawn off) and is drawn; so are the sign and the door's label */
     ub_script_get_stats(&st);
-    CHECK(st.scripts == 7);
+    CHECK(st.scripts == 8);
     i32 hud = ub_world_find_child(&g_g.world, g_g.player_gui, "DemoHud");
     i32 panel = hud >= 0 ? ub_world_find_child(&g_g.world, hud, "Panel") : -1;
     i32 stats = panel >= 0 ? ub_world_find_child(&g_g.world, panel, "Stats") : -1;
@@ -442,7 +442,7 @@ static void test_demo_place(void)
     CHECK(ub_gui_screen(g_g.gui, &rects, &nr) != NULL && nr >= 1);
     const ub_gui_quad *q;
     int nq = ub_gui_quads(g_g.gui, &q);
-    CHECK(nq == 2); /* the sign and the door's label, both in view */
+    CHECK(nq == 3); /* the sign, the door's label and the lamp's prompt (the player is back at the spawn) */
     /* drawn by the software renderer over the real scene: the door's label
      * is in front of the wall, so it shows (dark, see-through) */
     {
@@ -494,6 +494,15 @@ static void test_demo_place(void)
         }
         ub_render_shutdown();
     }
+    /* the lamp by the path: E at its prompt switches it on */
+    i32 lamp = ub_world_find_child(&g_g.world, ws, "Lamp");
+    i32 bulb = lamp >= 0 ? ub_world_find_child(&g_g.world, lamp, "Bulb") : -1;
+    CHECK(bulb >= 0);
+    gui_frame(&g_g, 400, 400, false, false, 'E', 31.0);
+    frames(2, v3(0, 0, 0));
+    const ub_value *on = lamp >= 0 ? ub_world_prop_named(&g_g.world, lamp, "@On") : NULL;
+    CHECK(on && on->type == UB_PV_BOOL && on->v.b);
+    CHECK(bulb >= 0 && (g_g.world.parts[g_g.world.inst[bulb].part].flags & UB_PART_GLOW));
     /* chat commands */
     ub_script_chatted("fast");
     CHECK(g_g.walk_speed == 32);
