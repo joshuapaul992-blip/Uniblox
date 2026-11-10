@@ -1,9 +1,9 @@
 /* Uniblox - spatial queries on the world.
  *
  * Rays are tested against each part's real shape (box, wedge, corner
- * wedge, and the low-detail cylinder and ball), not just its bounding box,
- * so ramps can be walked up. Brute force over all parts for now; a spatial
- * index comes with physics (milestone 4). */
+ * wedge, and the low-detail cylinder and ball), not just its bounding box.
+ * Brute force over all parts: fine for tools and tests. The game itself
+ * uses ub_phys_raycast (physics/ub_physics.h), which has a spatial index. */
 #ifndef UB_QUERY_H
 #define UB_QUERY_H
 

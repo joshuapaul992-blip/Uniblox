@@ -62,6 +62,17 @@ typedef struct {
     u32 fog_color;
 } ub_lighting;
 
+/* Two parts held rigidly together (Roblox Weld, Snap, Motor6D,
+ * WeldConstraint...): they keep the offset they have when physics starts.
+ * Parts joined by welds move as one rigid body; if any of them is
+ * anchored, all of them stay put. */
+typedef struct {
+    i32 a, b;             /* instance indices of two parts */
+} ub_weld;
+
+#define UB_GRAVITY_DEFAULT 196.2f        /* studs/s^2, Roblox's default */
+#define UB_FALLEN_HEIGHT_DEFAULT (-500.0f)
+
 typedef struct {
     ub_instance *inst;
     i32 count, cap;
@@ -70,6 +81,10 @@ typedef struct {
     char *strings;        /* NUL-terminated strings, back to back */
     u32 str_len, str_cap;
     ub_lighting lighting;
+    ub_weld *welds;
+    i32 weld_count, weld_cap;
+    f32 gravity;          /* studs/s^2, downwards */
+    f32 fallen_height;    /* loose parts that fall below this are removed */
     char name[64];        /* place name, UTF-8 */
     i32 workspace;        /* index of the Workspace instance, -1 if none */
 } ub_world;
@@ -86,6 +101,10 @@ i32 ub_world_add(ub_world *w, i32 parent, ub_class cls, const char *class_name, 
 i32 ub_world_add_part(ub_world *w, i32 parent, ub_class cls, const char *class_name, const char *name,
                       const ub_part *part);
 
+/* Joins two part instances; false if either is not a part, they are the
+ * same, or out of memory. */
+bool ub_world_add_weld(ub_world *w, i32 a, i32 b);
+
 const char *ub_world_str(const ub_world *w, u32 offset);
 const char *ub_class_name(ub_class c);
 /* The first child of `parent` with this name, or -1. */
@@ -100,7 +119,8 @@ bool ub_world_is_descendant(const ub_world *w, i32 index, i32 ancestor);
  * Little-endian, chunked:  "UBXPLACE" u32 version, then chunks of
  * [4-byte tag][u32 length][payload]: INFO (name), STRS (string pool),
  * INST (instances in tree pre-order, each parent before its children),
- * PART, LITE (lighting), and "END ". Unknown chunks are skipped, so later
+ * PART, LITE (lighting), WSPC (gravity, fallen-parts height), WELD (pairs
+ * of instance indices) and "END ". Unknown chunks are skipped, so later
  * versions can add data. Saving is deterministic: save -> load -> save
  * gives identical bytes. */
 

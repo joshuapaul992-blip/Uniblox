@@ -30,6 +30,8 @@ void ub_world_init(ub_world *w)
     memset(w, 0, sizeof *w);
     w->workspace = -1;
     w->lighting = ub_lighting_default();
+    w->gravity = UB_GRAVITY_DEFAULT;
+    w->fallen_height = UB_FALLEN_HEIGHT_DEFAULT;
     ub_fmt(w->name, sizeof w->name, "Untitled");
 }
 
@@ -38,6 +40,7 @@ void ub_world_free(ub_world *w)
     plat_free(w->inst);
     plat_free(w->parts);
     plat_free(w->strings);
+    plat_free(w->welds);
     ub_world_init(w);
 }
 
@@ -125,6 +128,17 @@ i32 ub_world_add_part(ub_world *w, i32 parent, ub_class cls, const char *class_n
     w->parts[w->part_count] = *part;
     w->inst[idx].part = w->part_count++;
     return idx;
+}
+
+bool ub_world_add_weld(ub_world *w, i32 a, i32 b)
+{
+    if (a < 0 || b < 0 || a >= w->count || b >= w->count || a == b) return false;
+    if (w->inst[a].part < 0 || w->inst[b].part < 0) return false;
+    if (!grow((void **)&w->welds, &w->weld_cap, w->weld_count + 1, sizeof(ub_weld))) return false;
+    w->welds[w->weld_count].a = a;
+    w->welds[w->weld_count].b = b;
+    w->weld_count++;
+    return true;
 }
 
 i32 ub_world_find_child(const ub_world *w, i32 parent, const char *name)
@@ -328,6 +342,19 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
     put_u32(&b, w->lighting.fog_color);
     chunk_end(&b, c);
 
+    c = chunk_begin(&b, "WSPC");
+    put_f32(&b, w->gravity);
+    put_f32(&b, w->fallen_height);
+    chunk_end(&b, c);
+
+    c = chunk_begin(&b, "WELD");
+    put_u32(&b, (u32)w->weld_count);
+    for (i32 k = 0; k < w->weld_count; ++k) {
+        put_u32(&b, (u32)remap[w->welds[k].a]);
+        put_u32(&b, (u32)remap[w->welds[k].b]);
+    }
+    chunk_end(&b, c);
+
     c = chunk_begin(&b, "END ");
     chunk_end(&b, c);
 
@@ -408,6 +435,8 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
     u32 inst_count = 0, part_count = 0;
     const u8 *inst_p = NULL;
     u32 inst_len = 0;
+    const u8 *weld_p = NULL;
+    u32 weld_count = 0;
     while (!ended) {
         if (top.len - top.pos < 8) return UB_LOAD_CORRUPT;
         const u8 *tag = top.p + top.pos;
@@ -466,6 +495,15 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
             w->lighting.fog_end = get_f32(&r);
             w->lighting.fog_color = get_u32(&r) & 0xFFFFFF;
             if (r.bad) return UB_LOAD_CORRUPT;
+        } else if (memcmp(tag, "WSPC", 4) == 0) {
+            f32 g = get_f32(&r), fh = get_f32(&r);
+            if (r.bad) return UB_LOAD_CORRUPT;
+            w->gravity = sane(g, -1.0e4f, 1.0e4f, UB_GRAVITY_DEFAULT);
+            w->fallen_height = sane(fh, -1.0e6f, 1.0e6f, UB_FALLEN_HEIGHT_DEFAULT);
+        } else if (memcmp(tag, "WELD", 4) == 0) {
+            weld_count = get_u32(&r);
+            if (r.bad || weld_count > (len - 4) / 8 || (len - 4) != weld_count * 8) return UB_LOAD_CORRUPT;
+            weld_p = r.p + 4;
         } else if (memcmp(tag, "END ", 4) == 0) {
             ended = true;
         }
@@ -513,5 +551,14 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
         if (cls == UB_CLASS_WORKSPACE && w->workspace < 0) w->workspace = (i32)i;
     }
     plat_free(part_used);
+
+    /* welds last: they refer to instances by index */
+    rd wr = { weld_p, weld_count * 8, 0, false };
+    for (u32 i = 0; i < weld_count; ++i) {
+        u32 a = get_u32(&wr), b = get_u32(&wr);
+        if (a >= inst_count || b >= inst_count || a == b || w->inst[a].part < 0 || w->inst[b].part < 0)
+            return UB_LOAD_CORRUPT;
+        if (!ub_world_add_weld(w, (i32)a, (i32)b)) return UB_LOAD_NO_MEMORY;
+    }
     return UB_LOAD_OK;
 }

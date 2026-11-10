@@ -152,7 +152,9 @@ static f32 roblox_float(u32 v)
 
 typedef enum {
     K_OTHER, K_WORKSPACE, K_LIGHTING, K_FOLDER, K_MODEL,
-    K_PART, K_WEDGE, K_CORNER, K_TRUSS, K_SPAWN, K_SEAT, K_MESH, K_NEGATE, K_TERRAIN
+    K_PART, K_WEDGE, K_CORNER, K_TRUSS, K_SPAWN, K_SEAT, K_MESH, K_NEGATE, K_TERRAIN,
+    K_JOINT,             /* Weld, Snap, Motor6D...: Part0 + Part1 */
+    K_WELD_CONSTRAINT,   /* WeldConstraint: Part0Internal + Part1Internal */
 } kind;
 
 typedef struct {
@@ -179,6 +181,8 @@ typedef struct {
     f32 transparency;
     u8 anchored, can_collide;
     bool parented;
+    i32 part0, part1;    /* joints: referents of the joined parts, -1 = none */
+    u8 joint_on;         /* joints: Enabled */
 } rec;
 
 typedef struct {
@@ -191,6 +195,7 @@ typedef struct {
     char *names;
     u32 names_len, names_cap;
     ub_lighting light;
+    f32 gravity, fallen_height;
     bool used_zstd, used_lz4;
 } importer;
 
@@ -245,6 +250,10 @@ static kind classify(const char *n)
         { "Seat", K_SEAT }, { "VehicleSeat", K_SEAT }, { "SkateboardPlatform", K_SEAT },
         { "MeshPart", K_MESH }, { "UnionOperation", K_MESH }, { "IntersectOperation", K_MESH },
         { "PartOperation", K_MESH }, { "NegateOperation", K_NEGATE }, { "Terrain", K_TERRAIN },
+        /* rigid joints; motors and Motor6D are held still for now */
+        { "Weld", K_JOINT }, { "ManualWeld", K_JOINT }, { "Snap", K_JOINT }, { "Glue", K_JOINT },
+        { "ManualGlue", K_JOINT }, { "Motor", K_JOINT }, { "Motor6D", K_JOINT }, { "VelocityMotor", K_JOINT },
+        { "WeldConstraint", K_WELD_CONSTRAINT },
     };
     for (int i = 0; i < UB_ARRAY_COUNT(table); ++i) {
         const char *a = n, *b = table[i].name;
@@ -326,6 +335,8 @@ static ub_load_result chunk_inst(importer *im, rd *r)
         e->shape = 1;
         e->anchored = 1;
         e->can_collide = 1;
+        e->part0 = e->part1 = -1;
+        e->joint_on = 1;
         if (map_get(im, acc) >= 0) {
             plat_free(refs);
             return UB_LOAD_CORRUPT; /* duplicate referent */
@@ -358,7 +369,8 @@ static ub_load_result chunk_prop(importer *im, rd *r)
         }
         return UB_LOAD_OK;
     }
-    if (!part && !light) return UB_LOAD_OK;
+    bool joint = c->k == K_JOINT || c->k == K_WELD_CONSTRAINT, ws = c->k == K_WORKSPACE;
+    if (!part && !light && !joint && !ws) return UB_LOAD_OK;
 
     /* scratch for interleaved arrays: up to three values per instance */
     u32 *tmp = (u32 *)plat_alloc(sizeof(u32) * ((size_t)n * 3 + 1));
@@ -417,6 +429,34 @@ static ub_load_result chunk_prop(importer *im, rd *r)
                 else recs[i].can_collide = r->p[r->pos + i] != 0;
             }
             r->pos += n;
+        }
+    } else if (joint && type == 0x13 &&
+               (c->k == K_JOINT ? name_is(pname, pl, "Part0") || name_is(pname, pl, "Part1")
+                                : name_is(pname, pl, "Part0Internal") || name_is(pname, pl, "Part1Internal"))) {
+        bool first = pname[4] == '0';
+        if (rd_interleaved32(r, n, tmp)) {
+            i32 acc = 0; /* referents accumulate; one that matches no instance is none */
+            for (u32 i = 0; i < n; ++i) {
+                acc += untransform(tmp[i]);
+                if (first) recs[i].part0 = acc;
+                else recs[i].part1 = acc;
+            }
+        }
+    } else if (joint && type == 0x02 && name_is(pname, pl, "Enabled")) {
+        if (need(r, n)) {
+            for (u32 i = 0; i < n; ++i) recs[i].joint_on = r->p[r->pos + i] != 0;
+            r->pos += n;
+        }
+    } else if (joint && type == 0x03 && c->k == K_WELD_CONSTRAINT && name_is(pname, pl, "State")) {
+        /* bit 0 is Enabled (an enabled WeldConstraint saves State = 3) */
+        if (rd_interleaved32(r, n, tmp))
+            for (u32 i = 0; i < n; ++i) recs[i].joint_on = (untransform(tmp[i]) & 1) != 0;
+    } else if (ws && type == 0x04 && n > 0 &&
+               (name_is(pname, pl, "Gravity") || name_is(pname, pl, "FallenPartsDestroyHeight"))) {
+        if (rd_interleaved32(r, n, tmp)) {
+            f32 v = roblox_float(tmp[0]);
+            if (pname[0] == 'G') im->gravity = v;
+            else im->fallen_height = v;
         }
     } else if (light && n > 0) {
         /* Lighting is a service: one instance; read its first value */
@@ -546,11 +586,18 @@ static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st
         return UB_LOAD_NO_MEMORY;
     }
     ub_load_result res = UB_LOAD_OK;
+    for (u32 i = 0; i < im->rec_count; ++i) made[i] = -1;
+    /* A model file (.rbxm) has no Workspace: put what it holds in one, so
+     * it is drawn and simulated like a place. */
+    bool has_ws = false;
+    for (u32 i = 0; i < im->class_count; ++i) has_ws |= im->classes[i].k == K_WORKSPACE && im->classes[i].count > 0;
+    i32 top = -1;
+    if (!has_ws && (top = ub_world_add(w, -1, UB_CLASS_WORKSPACE, NULL, "Workspace")) < 0) res = UB_LOAD_NO_MEMORY;
     for (u32 root = 0; root < im->rec_count && res == UB_LOAD_OK; ++root) {
         if (im->recs[root].parent >= 0 || visited[root]) continue;
         u32 sp = 0;
         stack[sp++] = (i32)root;
-        stack[sp++] = -1; /* (record, world parent) pairs */
+        stack[sp++] = top; /* (record, world parent) pairs */
         while (sp > 0) {
             i32 wparent = stack[--sp];
             i32 ri = stack[--sp];
@@ -591,6 +638,20 @@ static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st
             }
         }
     }
+    /* joints become welds between the two parts they name */
+    for (u32 i = 0; i < im->rec_count && res == UB_LOAD_OK; ++i) {
+        const rec *e = &im->recs[i];
+        kind k = im->classes[e->cls].k;
+        if (k != K_JOINT && k != K_WELD_CONSTRAINT) continue;
+        i32 ra = map_get(im, e->part0), rb = map_get(im, e->part1);
+        i32 a = ra >= 0 ? made[ra] : -1, b = rb >= 0 ? made[rb] : -1;
+        if (!e->joint_on || a < 0 || b < 0 || a == b || w->inst[a].part < 0 || w->inst[b].part < 0) {
+            st->joints_skipped++;
+            continue;
+        }
+        if (!ub_world_add_weld(w, a, b)) res = UB_LOAD_NO_MEMORY;
+        else st->welds++;
+    }
     plat_free(stack);
     plat_free(made);
     plat_free(visited);
@@ -615,6 +676,8 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
     memset(&im, 0, sizeof im);
     im.light = ub_lighting_default();
     im.light.fog_end = 0;
+    im.gravity = UB_GRAVITY_DEFAULT;
+    im.fallen_height = UB_FALLEN_HEIGHT_DEFAULT;
     im.recs = (rec *)plat_alloc(sizeof(rec) * (inst_count ? inst_count : 1));
     im.rec_cap = inst_count;
     im.map_cap = 16;
@@ -680,6 +743,9 @@ ub_load_result ub_rbxl_load(ub_world *w, const u8 *data, u32 size, ub_import_sta
         w->lighting.clock_time = ub_clampf(w->lighting.clock_time, 0.0f, 24.0f);
         w->lighting.brightness = ub_clampf(w->lighting.brightness, 0.0f, 10.0f);
         if (!(w->lighting.fog_end >= 0.0f) || w->lighting.fog_end > 1.0e5f) w->lighting.fog_end = 0.0f;
+        w->gravity = im.gravity >= -1.0e4f && im.gravity <= 1.0e4f ? im.gravity : UB_GRAVITY_DEFAULT;
+        w->fallen_height = im.fallen_height >= -1.0e6f && im.fallen_height <= 1.0e6f ? im.fallen_height
+                                                                                     : UB_FALLEN_HEIGHT_DEFAULT;
     }
     plat_free(im.classes);
     plat_free(im.recs);

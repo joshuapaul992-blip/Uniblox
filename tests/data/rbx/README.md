@@ -12,3 +12,4 @@ independent source.
 | `baseplate-727.rbxl` | `places/baseplate-727-with-tags` | Modern Studio file, Zstandard chunks |
 | `cframe-special-cases.rbxm` | `models/cframe-special-cases` | The 24 compact rotation IDs |
 | `three-unique-parts.rbxm` | `models/three-unique-parts` | Plain parts with distinct properties |
+| `weldconstraint.rbxm` | `models/weldconstraint` | Two loose parts joined by a WeldConstraint |

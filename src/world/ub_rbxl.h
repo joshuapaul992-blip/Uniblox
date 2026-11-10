@@ -13,8 +13,10 @@
  * Read part properties: CFrame, Size, Color (Color3uint8 or BrickColor),
  * Material, Shape, Transparency, Anchored, CanCollide. Lighting: ClockTime
  * or TimeOfDay, GeographicLatitude, Brightness, Ambient, OutdoorAmbient,
- * FogEnd, FogColor. Terrain voxels, decals, textures and scripts are not
- * imported (scripts are kept as plain instances).
+ * FogEnd, FogColor. Workspace: Gravity, FallenPartsDestroyHeight. Joints
+ * (Weld, ManualWeld, Snap, Glue, Motor, Motor6D, WeldConstraint) become
+ * rigid welds; motors do not turn yet. Terrain voxels, decals, textures
+ * and scripts are not imported (scripts are kept as plain instances).
  *
  * Positions and rotations are converted from Roblox's right-handed axes
  * (+Z towards the viewer) to Uniblox's left-handed ones (+Z forward).
@@ -31,6 +33,8 @@ typedef struct {
     u32 invisible;        /* parts with Transparency ~1, kept but not drawn */
     u32 terrain;          /* Terrain instances (voxels not imported) */
     u32 classes;          /* distinct classes */
+    u32 welds;            /* joints imported as welds */
+    u32 joints_skipped;   /* disabled, or naming something that is not a part */
     char compression[32]; /* e.g. "zstd+lz4" */
 } ub_import_stats;
 

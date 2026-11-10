@@ -9,10 +9,13 @@
  *   - F9 cycles the frame rate cap: 60, 120, 144, 240, unlimited
  *   - F3 hides the text overlay; M mutes; Enter or '/' opens a chat line;
  *     left click beeps (panned/pitched by position); Esc quits
+ *   - F7 saves the place as places/<name>.ubx
  *   - settings are saved to uniblox.cfg
  *
- * There is no collision yet (that is milestone 4): you can walk through
- * walls, and the floor is always at height 0. */
+ * Physics runs at a fixed 120 steps a second (physics/ub_physics.h); the
+ * character is a humanoid-style controller (physics/ub_character.h).
+ * Moving things are drawn blended between the last two steps, so motion
+ * is smooth at any frame rate. */
 #include "app/app.h"
 #include "audio/ub_mixer.h"
 #include "core/ub_log.h"
@@ -20,26 +23,24 @@
 #include "core/ub_string.h"
 #include "core/ub_utf.h"
 #include "core/ub_vec.h"
+#include "physics/ub_character.h"
+#include "physics/ub_physics.h"
 #include "render/ub_render.h"
-#include "world/ub_query.h"
 #include "world/ub_rbxl.h"
 #include "world/ub_world.h"
 #include "crt/ub_crt.h"
 
 #define WORLD_LIMIT 100000.0f
-#define MOVE_SPEED 16.0f
 #define TURN_SPEED 1.8f        /* radians/s for arrow keys */
 #define LOOK_SENSITIVITY 0.006f
 #define PITCH_MIN (-1.35f)
 #define PITCH_MAX 0.35f
 #define ZOOM_MIN 6.0f
 #define ZOOM_MAX 60.0f
-#define GRAVITY 60.0f
-#define JUMP_SPEED 22.0f
 #define CONFIG_PATH "uniblox.cfg"
 #define TYPED_MAX 40
 #define BENCH_SECONDS 10
-#define STEP_UP 2.2f            /* highest ledge the player walks up without jumping */
+#define MAX_STEPS_PER_FRAME 12   /* below 10 fps the game slows down instead of stalling */
 #define PLACE_MAX_BYTES (512u << 20)
 
 static ub_system_info g_sys;
@@ -47,6 +48,17 @@ static ub_world g_world;
 static i32 g_spinner = -1;            /* instance index of the animated part, -1 if none */
 static ub_part_draw *g_statics;       /* visible non-moving parts, handed to the renderer */
 static int g_static_count;
+static i32 *g_moving;                 /* visible parts that physics moves (part indices) */
+static int g_moving_count;
+static ub_physics g_phys;
+static bool g_phys_ok;
+static ub_character g_char;
+static f32 g_phys_accum;              /* simulated time owed, seconds */
+static f32 g_sim_time;
+static f32 g_world_time;              /* since the place was loaded */
+static bool g_rest_logged;
+static u32 g_phys_us;                 /* physics CPU time last frame */
+static f32 g_kill_height;             /* the player respawns below this */
 static vec3 g_spawn;                  /* where the player (re)appears */
 static vec3 g_bench_center;
 static bool g_demo_world;
@@ -56,7 +68,7 @@ static char g_place_arg[260];         /* place from the command line or config *
 static char g_cfg_place[260];         /* place= from the config, written back on exit */
 static char g_status[160];            /* last load/save message for the overlay */
 
-static f32 g_px, g_pz = 4.0f, g_py, g_vy;   /* player feet position */
+static vec3 g_feet;                   /* player feet, as drawn this frame */
 static f32 g_facing;                  /* player yaw */
 static f32 g_walk_phase, g_walk_amount;  /* limb swing animation */
 static f32 g_yaw, g_pitch = -0.35f;   /* camera angles around the player */
@@ -117,6 +129,13 @@ static i32 add_part(i32 parent, const char *name, ub_shape shape, f32 x, f32 y, 
     return ub_world_add_part(&g_world, parent, UB_CLASS_PART, NULL, name, &p);
 }
 
+/* Make a part loose (unanchored), so physics moves it. */
+static i32 loosen(i32 inst)
+{
+    if (inst >= 0) g_world.parts[g_world.inst[inst].part].flags &= (u8)~UB_PART_ANCHORED;
+    return inst;
+}
+
 static void add_tree(i32 ws, f32 x, f32 z, f32 scale)
 {
     i32 tree = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "Tree");
@@ -158,9 +177,9 @@ static void build_demo_world(void)
     add_part(house, "Landing", UB_SHAPE_BOX, -12, 1.5f, 53, 6, 3, 6, 0x8090A0, UB_MAT_METAL);
     add_part(house, "Pedestal", UB_SHAPE_CYLINDER, 0, 1.5f, 40, 4, 3, 4, 0x7A8590, UB_MAT_METAL);
     add_part(house, "Spinner", UB_SHAPE_BOX, 0, 6, 40, 3, 3, 3, 0x2E8BEF, UB_MAT_PLASTIC);
-    add_part(house, "Ball", UB_SHAPE_BALL, -6, 1.5f, 30, 3, 3, 3, 0xF2C230, UB_MAT_PLASTIC);
-    add_part(house, "Ball", UB_SHAPE_BALL, 6, 1.0f, 33, 2, 2, 2, 0x30C060, UB_MAT_PLASTIC);
-    add_part(house, "Ball", UB_SHAPE_BALL, -4, 1.0f, 50, 2, 2, 2, 0xE04080, UB_MAT_PLASTIC);
+    loosen(add_part(house, "Ball", UB_SHAPE_BALL, -6, 1.6f, 30, 3, 3, 3, 0xF2C230, UB_MAT_PLASTIC));
+    loosen(add_part(house, "Ball", UB_SHAPE_BALL, 6, 1.1f, 33, 2, 2, 2, 0x30C060, UB_MAT_PLASTIC));
+    loosen(add_part(house, "Ball", UB_SHAPE_BALL, -4, 1.1f, 50, 2, 2, 2, 0xE04080, UB_MAT_PLASTIC));
     i32 table = ub_world_add(&g_world, house, UB_CLASS_MODEL, NULL, "Table");
     add_part(table, "Top", UB_SHAPE_BOX, 6, 3.0f, 50, 6, 0.4f, 4, 0x9C6B3A, UB_MAT_WOOD);
     for (int i = 0; i < 4; ++i)
@@ -184,11 +203,28 @@ static void build_demo_world(void)
     add_tree(ws, -34, 68, 0.9f);
     add_tree(ws, 38, 62, 1.1f);
     add_tree(ws, -8, -30, 1.0f);
+    /* loose blocks: a twisted tower and a pyramid of crates (they settle,
+     * then sleep; push them over) */
     static const u32 tower[4] = { 0xD94040, 0xF2B233, 0x3FAE4A, 0x3F6FD9 };
     i32 stack = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "Tower");
     for (int i = 0; i < 4; ++i) {
-        i32 b = add_part(stack, "Block", UB_SHAPE_BOX, 28, 1.5f + (f32)i * 3.0f, 20, 3, 3, 3, tower[i], UB_MAT_PLASTIC);
+        i32 b = add_part(stack, "Block", UB_SHAPE_BOX, 28, 1.5f + (f32)i * 3.02f, 20, 3, 3, 3, tower[i], UB_MAT_PLASTIC);
         g_world.parts[g_world.inst[b].part].rot = mat3_from_euler((f32)i * 0.3f, 0, 0);
+        loosen(b);
+    }
+    i32 crates = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "Crates");
+    for (int row = 0; row < 3; ++row)
+        for (int i = 0; i < 3 - row; ++i)
+            loosen(add_part(crates, "Crate", UB_SHAPE_BOX, -15.0f + (f32)i * 3.1f + (f32)row * 1.55f,
+                            1.5f + (f32)row * 3.02f, 13, 3, 3, 3, 0xB0884E, UB_MAT_WOOD));
+    /* a cart: a plank and two wheels welded into one body */
+    i32 cart = ub_world_add(&g_world, ws, UB_CLASS_MODEL, NULL, "Cart");
+    i32 deck = loosen(add_part(cart, "Deck", UB_SHAPE_BOX, 12, 1.6f, 8, 3, 0.4f, 5, 0x9C6B3A, UB_MAT_WOOD));
+    for (int i = 0; i < 2; ++i) {
+        i32 axle = loosen(add_part(cart, "Wheels", UB_SHAPE_CYLINDER, 12, 0.9f, i ? 9.8f : 6.2f, 1.6f, 3.6f, 1.6f,
+                                   0x303030, UB_MAT_METAL));
+        g_world.parts[g_world.inst[axle].part].rot = mat3_from_euler(0, 0, UB_HALF_PI); /* axle along x */
+        ub_world_add_weld(&g_world, deck, axle);
     }
     add_part(ws, "GridPad", UB_SHAPE_BOX, -40, 0.5f, -20, 20, 1, 20, 0xA3A2A5, UB_MAT_GRID);
     add_part(ws, "GridRamp", UB_SHAPE_WEDGE, -40, 1.5f, -7, 8, 2, 6, 0xA3A2A5, UB_MAT_GRID);
@@ -196,32 +232,34 @@ static void build_demo_world(void)
     g_imported = false;
 }
 
-/* Height of the walkable surface under (x, z), searching down from `from_y`. */
-static bool ground_below(f32 x, f32 from_y, f32 z, f32 *out)
-{
-    ub_ray_hit h;
-    if (!ub_world_raycast(&g_world, g_world.workspace, v3(x, from_y, z), v3(0, -1, 0), 5000.0f, &h)) return false;
-    *out = h.point.y;
-    return true;
-}
-
-/* After loading: hand static parts to the renderer, find the spawn point. */
+/* After loading: start physics, hand non-moving parts to the renderer,
+ * find the spawn point and put the player there. */
 static void world_changed(void)
 {
     i32 ws = ub_world_workspace(&g_world);
     g_spinner = g_demo_world ? ub_world_find_child(&g_world, ub_world_find_child(&g_world, ws, "House"), "Spinner") : -1;
+    if (g_phys_ok) ub_phys_free(&g_phys);
+    i32 kinematic = g_spinner >= 0 ? g_world.inst[g_spinner].part : -1;
+    u64 t0 = plat_time_us();
+    g_phys_ok = ub_phys_init(&g_phys, &g_world, &kinematic, kinematic >= 0 ? 1 : 0);
+    u32 build_ms = (u32)((plat_time_us() - t0) / 1000u);
+    if (!g_phys_ok) ub_error("physics: out of memory building the world; nothing will move");
+
     plat_free(g_statics);
+    plat_free(g_moving);
     g_statics = (ub_part_draw *)plat_alloc(sizeof(ub_part_draw) * (size_t)(g_world.part_count + 1));
-    g_static_count = 0;
+    g_moving = (i32 *)plat_alloc(sizeof(i32) * (size_t)(g_world.part_count + 1));
+    g_static_count = g_moving_count = 0;
     i32 spawn = -1;
     vec3 lo = v3(1e30f, 1e30f, 1e30f), hi = v3(-1e30f, -1e30f, -1e30f);
-    for (i32 i = 0; i < g_world.count && g_statics; ++i) {
+    for (i32 i = 0; i < g_world.count && g_statics && g_moving; ++i) {
         const ub_instance *in = &g_world.inst[i];
         if (in->part < 0 || !ub_world_is_descendant(&g_world, i, ws)) continue;
         if (in->cls == UB_CLASS_SPAWN && spawn < 0) spawn = i;
         const ub_part *p = &g_world.parts[in->part];
-        if (p->transparency >= 250 || i == g_spinner) continue; /* invisible, or animated */
-        g_statics[g_static_count++] = part_draw(p);
+        if (p->transparency >= 250) continue; /* invisible */
+        if (g_phys_ok && ub_phys_part_body(&g_phys, in->part) > 0) g_moving[g_moving_count++] = in->part;
+        else g_statics[g_static_count++] = part_draw(p);
         lo = v3(UB_MIN(lo.x, p->pos.x), UB_MIN(lo.y, p->pos.y), UB_MIN(lo.z, p->pos.z));
         hi = v3(UB_MAX(hi.x, p->pos.x), UB_MAX(hi.y, p->pos.y), UB_MAX(hi.z, p->pos.z));
     }
@@ -232,20 +270,34 @@ static void world_changed(void)
         g_spawn = v3_add(sp->pos, v3_scale(sp->rot.y, sp->size.y * 0.5f));
     } else {
         vec3 c = g_static_count ? v3_scale(v3_add(lo, hi), 0.5f) : v3(0, 0, 0);
-        f32 gy;
-        g_spawn = ground_below(c.x, hi.y + 100.0f, c.z, &gy) ? v3(c.x, gy, c.z) : v3(c.x, 0, c.z);
+        ub_phys_hit h;
+        g_spawn = g_phys_ok && ub_phys_raycast(&g_phys, v3(c.x, hi.y + 100.0f, c.z), v3(0, -1, 0), 1.0e5f, -1, &h)
+                      ? h.point : v3(c.x, 0, c.z);
     }
+    g_kill_height = UB_MIN(g_world.fallen_height, g_spawn.y - 50.0f);
     g_bench_center = g_demo_world ? v3(0, 3, 40) : v3_add(g_spawn, v3(0, 3, 0));
-    g_px = g_spawn.x;
-    g_py = g_spawn.y;
-    g_pz = g_spawn.z;
-    g_vy = 0;
+    g_feet = g_spawn;
+    g_phys_accum = 0;
+    g_world_time = 0;
+    g_rest_logged = false;
+    if (g_phys_ok && !ub_char_init(&g_char, &g_phys, g_spawn)) {
+        ub_error("physics: out of memory adding the character");
+        ub_phys_free(&g_phys);
+        g_phys_ok = false;
+    }
     char title[128];
     ub_fmt(title, sizeof title, "Uniblox - %s", g_world.name);
     plat_set_title(title);
-    ub_info("world: \"%s\", %d instances, %d parts drawn, spawn at %d,%d,%d%s", g_world.name, g_world.count,
-            g_static_count, ub_roundf(g_spawn.x), ub_roundf(g_spawn.y), ub_roundf(g_spawn.z),
-            spawn >= 0 ? "" : " (no SpawnLocation)");
+    ub_info("world: \"%s\", %d instances, %d parts drawn (%d moving), spawn at %d,%d,%d%s", g_world.name,
+            g_world.count, g_static_count + g_moving_count, g_moving_count, ub_roundf(g_spawn.x),
+            ub_roundf(g_spawn.y), ub_roundf(g_spawn.z), spawn >= 0 ? "" : " (no SpawnLocation)");
+    if (g_phys_ok) {
+        int loose = 0;
+        for (i32 i = 0; i < g_phys.body_count; ++i) loose += g_phys.bodies[i].type == UB_BODY_DYNAMIC;
+        ub_info("physics: %d loose part group(s), %d moving parts, %d welds, %d solid anchored parts, gravity %d, "
+                "built in %u ms", loose, g_moving_count, g_phys.stats.welds, g_phys.static_count,
+                ub_roundf(g_world.gravity), build_ms);
+    }
 }
 
 /* The last path component without its extension, for naming imports. */
@@ -651,6 +703,10 @@ void app_shutdown(void)
     ub_render_set_static(NULL, 0);
     plat_free(g_statics);
     g_statics = NULL;
+    plat_free(g_moving);
+    g_moving = NULL;
+    if (g_phys_ok) ub_phys_free(&g_phys);
+    g_phys_ok = false;
     ub_world_free(&g_world);
     ub_render_shutdown();
     ub_info("demo: %u jumps, %u clicks", g_jumps, g_clicks);
@@ -825,55 +881,73 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         if (in->key_down['A']) mr -= 1;
     }
     if (mf != 0 && mr != 0) { mf *= 0.7071f; mr *= 0.7071f; }
-    f32 mx = fx * mf + rx * mr, mz = fz * mf + rz * mr;
-    if (mf != 0 || mr != 0) {
+    vec3 move = v3(fx * mf + rx * mr, 0, fz * mf + rz * mr);
+    bool moving = mf != 0 || mr != 0;
+    if (moving) {
         /* turn the character smoothly towards where it is going
          * (yaw of direction (x, z) is atan2(x, z): yaw 0 faces +Z) */
-        f32 want = ub_atan2f(mx, mz);
+        f32 want = ub_atan2f(move.x, move.z);
         f32 diff = ub_wrap_angle(want - g_facing);
         g_facing = ub_wrap_angle(g_facing + diff * ub_clampf(dt * 12.0f, 0, 1));
     }
-    bool moving = mf != 0 || mr != 0;
-    g_walk_amount = ub_clampf(g_walk_amount + (moving ? dt : -dt) * 6.0f, 0.0f, 1.0f);
-    if (moving) g_walk_phase = ub_wrap_angle(g_walk_phase + dt * 10.0f);
-    g_px = ub_clampf(g_px + mx * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
-    g_pz = ub_clampf(g_pz + mz * MOVE_SPEED * dt, -WORLD_LIMIT, WORLD_LIMIT);
-    if (!(g_px == g_px) || !(g_pz == g_pz)) { g_px = g_spawn.x; g_pz = g_spawn.z; } /* NaN guard */
+    /* Roblox-style: holding Space keeps jumping each time the feet land */
+    bool jump = play_keys && (in->key_down[UB_KEY_SPACE] || in->key_pressed[UB_KEY_SPACE]);
 
-    /* stand on whatever is below: search from a step's height above the
-     * feet, so walking up stairs and ramps works; walls are not solid yet
-     * (that comes with physics in milestone 4) */
-    f32 ground = -1e9f;
-    bool has_ground = ground_below(g_px, g_py + STEP_UP, g_pz, &ground);
-    bool on_ground = has_ground && g_py <= ground + 0.05f;
-    if (play_keys && (in->key_down[UB_KEY_SPACE] || in->key_pressed[UB_KEY_SPACE]) && on_ground) {
-        g_vy = JUMP_SPEED;
-        g_jumps++;
-        ub_debug("jump %u", g_jumps);
-        ub_mixer_play(&g_snd_jump, ub_play_default());
-        on_ground = false;
-    }
-    if (on_ground && g_vy <= 0) {
-        g_py = ground; /* follow the surface, including steps up */
-        g_vy = 0;
-    } else {
-        g_vy -= GRAVITY * dt;
-        g_py += g_vy * dt;
-        if (has_ground && g_py <= ground) {
-            ub_play_params p = ub_play_default();
-            p.volume = ub_clampf(-g_vy / JUMP_SPEED, 0.2f, 1.0f);
-            ub_mixer_play(&g_snd_land, p);
-            g_py = ground;
-            g_vy = 0;
+    /* --- physics: fixed steps for the time that has passed --- */
+    u64 p0 = plat_time_us();
+    f32 alpha = 1.0f;
+    if (g_phys_ok) {
+        g_phys_accum += dt;
+        int steps = 0;
+        while (g_phys_accum >= UB_PHYS_DT && steps < MAX_STEPS_PER_FRAME) {
+            g_sim_time += UB_PHYS_DT;
+            g_world_time += UB_PHYS_DT;
+            if (g_spinner >= 0) {
+                const ub_part *sp = &g_world.parts[g_world.inst[g_spinner].part];
+                i32 sb = ub_phys_part_body(&g_phys, g_world.inst[g_spinner].part);
+                mat3 r = mat3_from_euler(g_sim_time * 0.9f, g_sim_time * 0.5f, g_sim_time * 0.3f);
+                if (sb > 0) ub_phys_set_target(&g_phys, sb, sp->pos, &r);
+            }
+            ub_char_before_step(&g_char, &g_phys, move, jump);
+            ub_phys_step(&g_phys);
+            ub_char_after_step(&g_char, &g_phys);
+            g_phys_accum -= UB_PHYS_DT;
+            steps++;
+            if (g_char.jumped) {
+                g_char.jumped = false;
+                g_jumps++;
+                ub_debug("jump %u", g_jumps);
+                ub_mixer_play(&g_snd_jump, ub_play_default());
+            }
+            if (g_char.landed_speed > 0) {
+                if (g_char.landed_speed > 8.0f) {
+                    ub_play_params pp = ub_play_default();
+                    pp.volume = ub_clampf(g_char.landed_speed / 60.0f, 0.2f, 1.0f);
+                    ub_mixer_play(&g_snd_land, pp);
+                }
+                g_char.landed_speed = 0;
+            }
+            vec3 feet = ub_char_feet(&g_char, &g_phys, 1.0f);
+            if (feet.y < g_kill_height || !(feet.y == feet.y)) {
+                ub_info("fell out of the world; respawning");
+                ub_char_teleport(&g_char, &g_phys, g_spawn);
+            }
+        }
+        if (steps == MAX_STEPS_PER_FRAME) g_phys_accum = 0; /* too slow to keep up: slow down instead */
+        alpha = g_phys_accum / UB_PHYS_DT;
+        g_feet = ub_char_feet(&g_char, &g_phys, alpha);
+        if (!g_rest_logged && g_phys.stats.awake == 0 && g_phys.stats.steps > 2) {
+            g_rest_logged = true;
+            ub_info("physics: all loose parts at rest after %u.%02u s", (u32)g_world_time,
+                    (u32)(g_world_time * 100.0f) % 100u);
         }
     }
-    if (g_py < g_spawn.y - 500.0f) { /* fell off the world */
-        ub_info("fell out of the world; respawning");
-        g_px = g_spawn.x;
-        g_py = g_spawn.y;
-        g_pz = g_spawn.z;
-        g_vy = 0;
-    }
+    g_phys_us = (u32)(plat_time_us() - p0);
+    vec3 vel = g_phys_ok ? ub_char_velocity(&g_char, &g_phys) : v3(0, 0, 0);
+    f32 hspeed = ub_sqrtf(vel.x * vel.x + vel.z * vel.z);
+    bool walking = moving && hspeed > 2.0f;
+    g_walk_amount = ub_clampf(g_walk_amount + (walking ? dt : -dt) * 6.0f, 0.0f, 1.0f);
+    if (walking) g_walk_phase = ub_wrap_angle(g_walk_phase + dt * 10.0f * hspeed / UB_CHAR_WALK_SPEED);
 
     /* --- other input --- */
     if (play_keys && in->key_pressed['M']) {
@@ -894,10 +968,6 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         plat_request_quit();
     }
 
-    /* --- animate --- */
-    if (g_spinner >= 0 && g_world.inst[g_spinner].part >= 0)
-        g_world.parts[g_world.inst[g_spinner].part].rot = mat3_from_euler(g_time * 0.9f, g_time * 0.5f, g_time * 0.3f);
-
     /* --- camera --- */
     ub_camera cam;
     if (g_bench) {
@@ -913,13 +983,12 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         cam.yaw = ub_wrap_angle(a + UB_PI);
         cam.focus = target;
     } else {
-        vec3 target = v3(g_px, g_py + 3.5f, g_pz);
+        vec3 target = v3_add(g_feet, v3(0, 3.5f, 0));
         cam.yaw = g_yaw;
         cam.pitch = g_pitch;
         f32 cp = ub_cosf(g_pitch);
         vec3 fwd = v3(fx * cp, ub_sinf(g_pitch), fz * cp);
         cam.pos = v3_sub(target, v3_scale(fwd, g_zoom));
-        if (cam.pos.y < 0.5f) cam.pos.y = 0.5f; /* stay above the ground */
         cam.focus = target;
     }
     cam.fov_y = 70.0f * UB_PI / 180.0f;
@@ -928,12 +997,14 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     /* --- render --- */
     ub_render_env env = env_from_world();
     ub_render_begin(frame, &cam, &env);
-    /* static parts were handed over once (world_changed); only moving ones here */
-    if (g_spinner >= 0 && g_world.inst[g_spinner].part >= 0) {
-        ub_part_draw d = part_draw(&g_world.parts[g_world.inst[g_spinner].part]);
+    /* static parts were handed over once (world_changed); only moving ones
+     * here, blended between the last two physics steps */
+    for (int i = 0; i < g_moving_count; ++i) {
+        ub_part_draw d = part_draw(&g_world.parts[g_moving[i]]);
+        if (!ub_phys_part_pose(&g_phys, g_moving[i], alpha, &d.pos, &d.rot)) continue; /* fell out */
         ub_render_part(&d);
     }
-    if (!g_bench) draw_character(g_px, g_py, g_pz, g_facing, g_walk_phase, g_walk_amount);
+    if (!g_bench) draw_character(g_feet.x, g_feet.y, g_feet.z, g_facing, g_walk_phase, g_walk_amount);
     ub_render_end_scene();
 
     /* --- overlay --- */
@@ -967,7 +1038,13 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         if (g_bench) {
             LINE("BENCHMARK running: %u s left (Esc cancels)", (u32)((f32)BENCH_SECONDS - g_bench_t) + 1u);
         } else {
-            LINE("Place: %s (%d parts)%s", g_world.name, g_static_count, g_imported ? " - imported from Roblox" : "");
+            LINE("Place: %s (%d parts)%s", g_world.name, g_static_count + g_moving_count,
+                 g_imported ? " - imported from Roblox" : "");
+            if (g_phys_ok) {
+                u32 phys10 = g_phys_us / 100u;
+                LINE("Physics: %d loose parts, %d awake, %d contacts, %u.%u ms%s", g_moving_count, g_phys.stats.awake,
+                     g_phys.stats.contacts, phys10 / 10, phys10 % 10, g_char.grounded ? "" : "  (in the air)");
+            }
             if (g_status[0]) LINE("%s", g_status);
             LINE("Audio: %s%s", g_sys.audio_desc, g_muted ? " (muted)" : "");
             if (g_bench_result[0]) LINE("%s", g_bench_result);

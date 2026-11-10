@@ -53,9 +53,9 @@ src/crt/        memcpy/memset/... (GCC emits calls to these); later
 src/core/       types, strings, UTF-8, safe paths, log, math (later containers, arenas)
 src/audio/      WAV loader, software mixer (32 voices, pitch, pan)
 src/platform/   OS interface; win32/ backend (later posix/ for the server)
-src/render/     software renderer: meshes, procedural textures, palette (later gl/ for OpenGL 1.x)
-src/world/      object tree, typed properties, events, place file I/O
-src/physics/    box/sphere collision, impulse solver, sleeping islands
+src/render/     software and OpenGL renderers: meshes, procedural textures, palette
+src/world/      object tree, welds, place files (.ubx) and the Roblox importer
+src/physics/    convex hull + sphere collision, soft-step solver, sleeping islands, character
 src/script/     sandboxed Lua 5.1 + Uniblox API
 src/net/        loopback + UDP transports, reliability, replication
 src/ui/         immediate-mode GUI (HUD and editor)
@@ -73,7 +73,7 @@ tests/          host unit tests (make test)
 | 2 | Software renderer | Textured, lit room of parts at 15+ fps, 320x240, on a Pentium-class VM, in 8-bit and 16-bit display modes | **Built.** Passes unit tests and the Wine smoke test. Needs: F5 benchmark on a Pentium-class VM, and a run on a real 256-colour desktop |
 | 2.5 | High-quality OpenGL renderer | Native 1080p/1440p, resizable and fullscreen, shadows, specular, anti-aliasing; 120 fps cap by default | **Built.** Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real GPU |
 | 3 | World model + place files | Save/load round-trips byte for byte | **Built.** `.ubx` round-trips byte for byte; real Roblox `.rbxl`/`.rbxm` files import. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
-| 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | |
+| 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | **Built.** Towers of 20 parts come to rest and sleep; the character walks, jumps, steps up, collides and pushes. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
 | 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | |
 | 6 | In-game editor | Build an obstacle course without writing code | |
 | 7 | Renderer polish + settings menu | In-game settings UI; more effects | Hardware OpenGL path moved forward into milestone 2.5 |
@@ -253,8 +253,8 @@ tests/          host unit tests (make test)
 - **Standing on parts:** the character finds the ground with a ray cast
   against every can-collide part (`src/world/ub_query.c`, a convex ray
   test against each part's low-detail mesh). It can step up 2.2 studs.
-  Falling 500 studs below the spawn point puts you back on it. Walls
-  aren't solid until milestone 4.
+  Falling 500 studs below the spawn point puts you back on it. (Milestone
+  4 replaced this with the physics engine and character controller.)
 - **Bugs found while testing:**
   - Vector3, Color3 and CFrame positions are stored as three separately
     interleaved arrays, not one. Reading them as one gave nonsense
@@ -264,7 +264,71 @@ tests/          host unit tests (make test)
   - The settings file is rewritten on exit, which dropped a `place=` line
     the user had added. It's now written back.
 
+## Milestone 4 notes
+
+- **Bodies** (`src/physics/ub_physics.c`): parts joined by welds (union-find
+  over the world's welds) form one rigid body, with mass, centre of mass
+  and inertia worked out exactly from each shape's hull (tetrahedra from
+  the origin, Blow & Binstock) and the material's density. An assembly with
+  an anchored part goes into one static body. Static shapes live in a
+  bounding-volume tree built once (median splits); moving shapes are
+  sorted along x each step (sweep and prune) and tested against the tree.
+- **Collision** (`src/physics/ub_collide.c`): separating-axis test over
+  face normals and only those edge pairs that form a face of the Minkowski
+  difference (Gregorius, GDC 2013), then the incident face is clipped
+  against the reference face for up to four points. Balls are true
+  spheres. Contacts up to 0.04 studs apart (plus how far things move in a
+  step) are kept as speculative contacts, so fast parts don't tunnel and
+  resting contacts don't flicker.
+- **Solver: soft step**, after Box2D 3. Collisions are found 120 times a
+  second; each step is solved in 6 substeps with soft contacts (a 180 Hz
+  spring with damping ratio 3), warm started, with a relax pass after each
+  substep and one restitution pass. Friction acts at the centre of each
+  contact patch, with a twist limit. Balls get rolling resistance. Impacts
+  are first caught by the patch as a whole, so a dropped part lands flat.
+- **What it took to get stacks to stand:** plain sequential impulses
+  converge too slowly for a tall stack under Roblox's strong gravity (5.6
+  g in real units). Each step leaves some sinking speed, the boxes tip, and
+  the tower explodes. Tests showed the solver itself was correct: the
+  contact coupling is symmetric to 3e-8 and a single solve never adds
+  energy. More iterations, warm-start scaling, alternating order, patch
+  friction and shock propagation all failed to fix it (shock propagation
+  made it worse, since it breaks momentum when the lower box is bouncing).
+  The soft step fixed it.
+- **Sleeping:** resting groups (islands of touching loose bodies) sleep
+  after 0.5 s below 0.35 studs/s and 0.35 rad/s. They wake when something
+  awake touches them or when pushed. Two sleepers are never tested against
+  each other.
+- **Character** (`src/physics/ub_character.c`): a body of two spheres from
+  2.2 to 5.4 studs above the feet, with no rotation and no gravity from the
+  engine. Five ground rays find the floor, so it steps up to 2.2 studs,
+  snaps down small drops and follows platforms. Walking speed is steered
+  with limited acceleration, so heavy things push back. The jump speed
+  comes from the jump height and gravity, with half a step of gravity
+  applied on the jump step so it peaks at exactly 7.2 studs.
+- **Speed** (modern PC, -O2): the 18,306-part city builds its physics in
+  5.6 ms. 500 loose boxes dropped on it take 0.73 ms per step and sleep
+  after 3.2 s. 300 tumbling parts in a pit take about 2.5 ms per step.
+  Cylinders cost the most (12-sided hulls; 16 sides was 60% slower).
+- **Bugs found on the way:**
+  - A `.rbxm` model file has no Workspace, so its parts were never drawn
+    (since milestone 3) or simulated. They're now put in one.
+  - Clipping repeated points along shared edges, and one old contact could
+    warm-start several new ones. Both are fixed, though neither caused the
+    stack trouble.
+
 ## Open items
+
+- Milestone 4 on a real install: knock over the demo's tower and crates,
+  and check that they settle. The overlay's physics time should stay well
+  under 1 ms on the Sandy Bridge machine.
+- Physics on a Pentium-class machine is untested. Sleeping keeps quiet
+  scenes cheap, but a big pile of tumbling parts will be slow.
+- No hinges, motors, springs or ropes yet (Roblox constraints import as
+  nothing; motors are held still as welds). No continuous collision, so a
+  very fast part can still pass through a thin one.
+- Stacks taller than about 20 parts, or of tiny 1-stud cubes with
+  alternating materials, can still topple.
 
 - Milestone 3 on a real install: open a place you made in Studio (save it
   as binary `.rbxl`), and send the `imported Roblox place` line from
@@ -274,7 +338,6 @@ tests/          host unit tests (make test)
 - Not imported yet: mesh and union geometry (needs local mesh files),
   terrain, textures and decals, and see-through rendering (parts are
   either drawn opaque or hidden).
-
 - Milestone 2 speed on a Pentium-class machine: run F5 in 86Box or PCem
   and send the `benchmark:` line from `uniblox.log`. On a modern CPU under
   Wine a frame takes about 1.1 ms to render and 0.9 ms to display; that
