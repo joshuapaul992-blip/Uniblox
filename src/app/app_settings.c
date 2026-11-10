@@ -21,9 +21,10 @@ void settings_defaults(ub_settings *s)
     s->mouse_pct = 100;
     s->fov = 70;
     s->scripts = true;
-    s->zoom = 22;
+    s->zoom = 13; /* studs (Roblox's camera starts 12.5 away) */
     s->pitch_deg = -20;
-    s->hide_overlay = true; /* the client UI shows what players need; F3 adds the details */
+    s->hide_overlay = true;
+    s->shift_lock = true; /* the client UI shows what players need; F3 adds the details */
 }
 
 static i32 parse_int(const char *s)
@@ -88,6 +89,7 @@ void settings_parse(ub_settings *s, const char *text)
         else if (key_is(buf, "muted", &v)) s->muted = parse_int(v) != 0;
         else if (key_is(buf, "mouse", &v)) s->mouse_pct = UB_CLAMP(parse_int(v), 10, 500);
         else if (key_is(buf, "invert_y", &v)) s->invert_y = parse_int(v) != 0;
+        else if (key_is(buf, "shift_lock", &v)) s->shift_lock = parse_int(v) != 0;
         else if (key_is(buf, "fov", &v)) s->fov = UB_CLAMP(parse_int(v), 40, 110);
         else if (key_is(buf, "scripts", &v)) s->scripts = parse_int(v) != 0;
         else if (key_is(buf, "zoom", &v)) s->zoom = parse_int(v);
@@ -128,6 +130,8 @@ int settings_write(const ub_settings *s, char *buf, int cap)
                   "overlay=%d\r\nvolume=%d\r\nmuted=%d\r\n"
                   "# mouse: mouse-look speed in percent; fov: field of view in degrees\r\n"
                   "mouse=%d\r\ninvert_y=%d\r\nfov=%d\r\n"
+                  "# shift_lock: 1 = Shift turns shift lock on and off (the place may still forbid it)\r\n"
+                  "shift_lock=%d\r\n"
                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\n"
                   "# scripts: 1 = run the place's scripts, 0 = do not\r\n"
                   "scripts=%d\r\n"
@@ -137,7 +141,7 @@ int settings_write(const ub_settings *s, char *buf, int cap)
                   renderer[p->backend % 4], s->render_threads, s->quality, s->gl_shaders, p->fps_cap, p->vsync, p->fullscreen,
                   p->window_w, p->window_h, p->fs_width, p->fs_height, p->sw_height, s->colors, s->changed_only,
                   p->timer_qpc ? "qpc" : "auto", !s->hide_overlay, s->volume, s->muted, s->mouse_pct, s->invert_y,
-                  s->fov, s->zoom, s->yaw_deg, s->pitch_deg, s->scripts, s->place);
+                  s->fov, s->shift_lock, s->zoom, s->yaw_deg, s->pitch_deg, s->scripts, s->place);
 }
 
 /* ------------------------------------------------------------ the menu */
@@ -240,6 +244,7 @@ static int controls_page(ub_settings *s)
         f |= SET_CONTROLS;
     }
     if (on_off("Invert mouse up/down", &s->invert_y)) f |= SET_CONTROLS;
+    if (on_off("Shift lock switch", &s->shift_lock)) f |= SET_CONTROLS;
     ub_fmt(txt, sizeof txt, "%d degrees", s->fov);
     if ((d = ui_stepper("Field of view", txt)) != 0) {
         s->fov = UB_CLAMP(s->fov + d * 5, 40, 110);

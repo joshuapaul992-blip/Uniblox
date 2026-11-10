@@ -343,8 +343,10 @@ void test_settings(void)
     g_s.invert_y = true;
     g_s.fov = 85;
     g_s.hide_overlay = true;
+    g_s.shift_lock = false;
+    g_s.render_threads = 2;
     ub_fmt(g_s.place, sizeof g_s.place, "places/castle.ubx");
-    char text[3072];
+    char text[4096];
     int n = settings_write(&g_s, text, sizeof text);
     CHECK(n > 0 && n < (int)sizeof text - 1);
     ub_settings b;
@@ -352,6 +354,7 @@ void test_settings(void)
     settings_parse(&b, text);
     CHECK(memcmp(&b.prefs, &g_s.prefs, sizeof b.prefs) == 0);
     CHECK(b.mouse_pct == 150 && b.invert_y && b.fov == 85 && b.hide_overlay && !strcmp(b.place, "places/castle.ubx"));
+    CHECK(!b.shift_lock && b.render_threads == 2);
     /* old files (before milestone 7) still read */
     settings_defaults(&b);
     settings_parse(&b, "renderer=opengl\r\nfps_cap=60\r\nmuted=1\r\nplace=\r\n");

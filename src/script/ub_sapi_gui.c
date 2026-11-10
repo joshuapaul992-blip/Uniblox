@@ -1930,12 +1930,38 @@ static int m_fetchstatus(lua_State *L)
 static struct {
     char mouse_icon[200];
     i32 target_filter;
-    int mouse_behavior;
-    bool icon_enabled;
-    int camera_type;
-    i32 camera_subject;
     i32 selected;
-} V = { "", -1, 0, true, 0, -1, -1 };
+} V = { "", -1, -1 };
+#define CAM (S.g->cam)
+static int E_CAMERAMODE, E_OCCLUSION, E_DEVCAMMODE;
+
+/* The Player's camera properties (milestone 9B): the camera reads them. */
+bool camera_player_get(lua_State *L, i32 idx, const char *k)
+{
+    if (idx < 0 || idx != S.g->player) return false;
+    if (streq(k, "CameraMode")) push_enum(L, E_CAMERAMODE, (u32)CAM.camera_mode);
+    else if (streq(k, "CameraMinZoomDistance")) lua_pushnumber(L, CAM.min_zoom);
+    else if (streq(k, "CameraMaxZoomDistance")) lua_pushnumber(L, CAM.max_zoom);
+    else if (streq(k, "DevEnableMouseLock")) lua_pushboolean(L, CAM.mouse_lock_ok);
+    else if (streq(k, "DevCameraOcclusionMode")) push_enum(L, E_OCCLUSION, (u32)CAM.occlusion);
+    else if (streq(k, "DevComputerCameraMode")) push_enum(L, E_DEVCAMMODE, 0); /* UserChoice */
+    else return false;
+    return true;
+}
+
+bool camera_player_set(lua_State *L, i32 idx, const char *k, int v)
+{
+    if (idx < 0 || idx != S.g->player) return false;
+    if (streq(k, "CameraMode")) CAM.camera_mode = check_enum(L, v, E_CAMERAMODE) == 1;
+    else if (streq(k, "CameraMinZoomDistance")) CAM.min_zoom = numf(L, v);
+    else if (streq(k, "CameraMaxZoomDistance")) CAM.max_zoom = numf(L, v);
+    else if (streq(k, "DevEnableMouseLock")) CAM.mouse_lock_ok = lua_toboolean(L, v) != 0;
+    else if (streq(k, "DevCameraOcclusionMode")) CAM.occlusion = check_enum(L, v, E_OCCLUSION) == 1;
+    else if (streq(k, "DevComputerCameraMode")) check_enum(L, v, E_DEVCAMMODE);
+    else return false;
+    ub_game_camera_limits(S.g);
+    return true; /* (the caller fires the changed signals) */
+}
 
 bool gui_virtual_index(lua_State *L, i32 idx, const char *k)
 {
@@ -1959,8 +1985,10 @@ bool gui_virtual_index(lua_State *L, i32 idx, const char *k)
                  streq(k, "GyroscopeEnabled") || streq(k, "VREnabled") || streq(k, "OnScreenKeyboardVisible") ||
                  streq(k, "ModalEnabled"))
             lua_pushboolean(L, 0);
-        else if (streq(k, "MouseBehavior")) push_enum(L, E_MOUSEBEHAVIOR, V.mouse_behavior);
-        else if (streq(k, "MouseIconEnabled")) lua_pushboolean(L, V.icon_enabled);
+        else if (streq(k, "MouseBehavior"))
+            /* what the mouse does now: the camera locks it in first person and shift lock */
+            push_enum(L, E_MOUSEBEHAVIOR, CAM.mouse_behavior ? CAM.mouse_behavior : CAM.mouse_locked ? UB_MOUSE_LOCK_CENTER : 0);
+        else if (streq(k, "MouseIconEnabled")) lua_pushboolean(L, CAM.icon_enabled);
         else if (streq(k, "MouseDeltaSensitivity")) lua_pushnumber(L, 1);
         else return false;
         return true;
@@ -2006,8 +2034,8 @@ bool gui_virtual_index(lua_State *L, i32 idx, const char *k)
             push_cf(L, rbx_vec(in->cam.focus), &id);
         } else if (streq(k, "FieldOfView")) lua_pushnumber(L, in->cam.fov_y * 180.0 / UB_PI);
         else if (streq(k, "ViewportSize")) push_vector2(L, (f32)in->screen_w, (f32)in->screen_h);
-        else if (streq(k, "CameraType")) push_enum(L, E_CAMERATYPE, V.camera_type);
-        else if (streq(k, "CameraSubject")) push_inst(L, ub_world_alive(W, V.camera_subject) ? V.camera_subject : S.g->humanoid);
+        else if (streq(k, "CameraType")) push_enum(L, E_CAMERATYPE, CAM.camera_type);
+        else if (streq(k, "CameraSubject")) push_inst(L, ub_world_alive(W, CAM.subject) ? CAM.subject : S.g->humanoid);
         else if (streq(k, "NearPlaneZ")) lua_pushnumber(L, -0.1);
         else if (streq(k, "HeadScale")) lua_pushnumber(L, 1);
         else if (streq(k, "WorldToViewportPoint") || streq(k, "WorldToScreenPoint")) {
@@ -2057,11 +2085,11 @@ bool gui_virtual_newindex(lua_State *L, i32 idx, const char *k, int v)
         return true;
     }
     if (idx == VIRT_USERINPUT && streq(k, "MouseBehavior")) {
-        V.mouse_behavior = check_enum(L, v, E_MOUSEBEHAVIOR);
+        CAM.mouse_behavior = check_enum(L, v, E_MOUSEBEHAVIOR);
         return true;
     }
     if (idx == VIRT_USERINPUT && streq(k, "MouseIconEnabled")) {
-        V.icon_enabled = lua_toboolean(L, v) != 0;
+        CAM.icon_enabled = lua_toboolean(L, v) != 0;
         return true;
     }
     if (idx == VIRT_USERINPUT && (streq(k, "ModalEnabled") || streq(k, "MouseDeltaSensitivity"))) return true;
@@ -2072,15 +2100,27 @@ bool gui_virtual_newindex(lua_State *L, i32 idx, const char *k, int v)
             return true;
         }
         if (streq(k, "CameraType")) {
-            V.camera_type = check_enum(L, v, E_CAMERATYPE);
+            CAM.camera_type = check_enum(L, v, E_CAMERATYPE);
+            prop_changed(L, idx, k);
             return true;
         }
         if (streq(k, "CameraSubject")) {
-            V.camera_subject = opt_inst(L, v);
+            CAM.subject = opt_inst(L, v);
+            prop_changed(L, idx, k);
             return true;
         }
-        if (streq(k, "CFrame") || streq(k, "Focus") || streq(k, "CoordinateFrame")) {
-            check_cf(L, v); /* a scripted camera comes with milestone 8B; the player's camera stays */
+        if (streq(k, "CFrame") || streq(k, "CoordinateFrame")) {
+            /* the camera goes there when it is Scriptable (and is taken back by
+             * the player's camera otherwise, as in Roblox) */
+            scf *c = check_cf(L, v);
+            CAM.script_pos = rbx_vec(c->p);
+            CAM.script_fwd = rbx_vec(v3_scale(c->r.z, -1));
+            CAM.script_cf = true;
+            prop_changed(L, idx, "CFrame");
+            return true;
+        }
+        if (streq(k, "Focus")) {
+            check_cf(L, v);
             return true;
         }
     }
@@ -2331,11 +2371,13 @@ void open_gui(lua_State *L)
     E_TWEENSTATUS = enum_type_named("TweenStatus");
     E_CAMERATYPE = enum_type_named("CameraType");
     E_MOUSEBEHAVIOR = enum_type_named("MouseBehavior");
+    E_CAMERAMODE = enum_type_named("CameraMode");
+    E_OCCLUSION = enum_type_named("DevCameraOcclusionMode");
+    E_DEVCAMMODE = enum_type_named("DevComputerCameraMovementMode");
     E_FONTSIZE = enum_type_named("FontSize");
     E_PLATFORM = enum_type_named("Platform");
     memset(&V, 0, sizeof V);
-    V.target_filter = V.camera_subject = V.selected = -1;
-    V.icon_enabled = true;
+    V.target_filter = V.selected = -1;
     g_last_sw = g_last_sh = 0;
     g_last_mx = g_last_my = -1;
 

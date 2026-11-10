@@ -650,6 +650,189 @@ static void test_client_ui(void)
     ub_game_stop(&g_g);
 }
 
+/* ------------------------------------------------- the camera (9B) */
+
+static ub_play_view g_cv;
+
+/* One frame of the player's camera: input, the game, the camera. */
+static void cam_frame(const ub_input *in)
+{
+    vec3 move;
+    bool jump;
+    play_view_input(&g_cv, &g_g, in, 1.0f / 60.0f, true, true, &move, &jump);
+    ub_game_update(&g_g, 1.0f / 60.0f, move, jump);
+    play_view_update(&g_cv, &g_g, 1.0f / 60.0f);
+}
+
+static ub_input cam_in(int wheel, int key)
+{
+    ub_input in;
+    memset(&in, 0, sizeof in);
+    in.has_focus = true;
+    in.wheel = wheel * UB_WHEEL_NOTCH;
+    if (key) in.key_pressed[key] = in.key_down[key] = true;
+    return in;
+}
+
+static void cam_settle(int n)
+{
+    ub_input in = cam_in(0, 0);
+    for (int i = 0; i < n; ++i) cam_frame(&in);
+}
+
+static void test_camera(void)
+{
+    ub_world w;
+    door_world(&w, NULL);
+    /* a place that keeps the camera between 0.5 and 40 studs, with shift lock */
+    i32 sp = ub_world_add(&w, -1, UB_CLASS_OTHER, "StarterPlayer", "StarterPlayer");
+    ub_cdb_fill_defaults(&w, sp, "StarterPlayer");
+    ub_value mz = ub_vfloat(40);
+    ub_world_set_prop_named(&w, sp, "CameraMaxZoomDistance", &mz);
+    CHECK(ub_game_start(&g_g, &w, false));
+    CHECK(g_g.cam.min_zoom == 0.5f && g_g.cam.max_zoom == 40 && g_g.cam.mouse_lock_ok && g_g.cam.camera_type == UB_CAMTYPE_CUSTOM);
+    play_view_init(&g_cv);
+    play_view_reset(&g_cv, &g_g);
+    g_cv.yaw = 0; /* looking towards +Z, at the door */
+    g_cv.pitch = 0;
+    ub_game_teleport(&g_g, v3(-10, 0, 2));
+    cam_settle(30);
+    ub_camera c = play_view_camera(&g_cv, &g_g);
+    vec3 head = v3_add(g_g.feet, v3(0, 4.5f, 0));
+    printf("  camera: %.1f studs behind the head\n", (double)v3_length(v3_sub(c.pos, head)));
+    CHECK(fabsf(v3_length(v3_sub(c.pos, head)) - 12.5f) < 0.2f && !g_g.cam.first_person && !g_g.cam.mouse_locked);
+
+    /* the wheel: one notch in is 0.8 of the way; far enough in it goes
+     * into first person; out again comes back to 2.5 studs */
+    ub_input in = cam_in(1, 0);
+    cam_frame(&in);
+    CHECK(fabsf(g_cv.zoom - 10.0f) < 0.01f);
+    cam_settle(40);
+    c = play_view_camera(&g_cv, &g_g);
+    CHECK(fabsf(v3_length(v3_sub(c.pos, v3_add(g_g.feet, v3(0, 4.5f, 0)))) - 10.0f) < 0.2f); /* eased there */
+    for (int i = 0; i < 12; ++i) {
+        in = cam_in(1, 0);
+        cam_frame(&in);
+    }
+    CHECK(g_cv.zoom == 0.5f && g_cv.first_person && g_g.cam.first_person && g_g.cam.mouse_locked);
+    c = play_view_camera(&g_cv, &g_g);
+    head = v3_add(g_g.feet, v3(0, 4.5f, 0));
+    CHECK(v3_length(v3_sub(c.pos, head)) < 0.01f && g_cv.fade == 1.0f); /* at the eyes; the body is not drawn */
+    /* in first person the mouse turns the camera without a button, and the character faces where it looks */
+    in = cam_in(0, 0);
+    in.mouse_captured = true;
+    in.mouse_dx = 100;
+    cam_frame(&in);
+    CHECK(g_cv.yaw > 0.3f && fabsf(g_cv.facing - g_cv.yaw) < 1e-4f);
+    in = cam_in(-1, 0);
+    cam_frame(&in);
+    CHECK(g_cv.zoom == 2.5f && !g_cv.first_person);
+    for (int i = 0; i < 30; ++i) {
+        in = cam_in(-1, 0);
+        cam_frame(&in);
+    }
+    CHECK(g_cv.zoom == 40); /* the place's limit */
+    in = cam_in(0, 'I'); /* I zooms in, O out */
+    cam_frame(&in);
+    CHECK(g_cv.zoom < 40);
+    in = cam_in(0, 'O');
+    cam_frame(&in);
+    CHECK(fabsf(g_cv.zoom - 40) < 0.01f);
+
+    /* walls: behind the player (the wall at z = 9.5..10.5 is between the
+     * camera and a player standing at z = 12) the camera comes in front */
+    g_cv.zoom = 12.5f;
+    g_cv.yaw = 0;
+    ub_game_teleport(&g_g, v3(-10, 0, 12));
+    cam_settle(30);
+    c = play_view_camera(&g_cv, &g_g);
+    printf("  camera: a wall behind the player: %.2f studs away (z = %.2f)\n", (double)g_cv.cam_len, (double)c.pos.z);
+    CHECK(c.pos.z > 10.5f && g_cv.cam_len < 2.0f && g_cv.fade > 0.3f);
+    /* ...unless it is see-through */
+    i32 wall = ub_world_find_child(&g_g.world, ub_world_workspace(&g_g.world), "WallLeft");
+    g_g.world.parts[g_g.world.inst[wall].part].transparency = 200;
+    cam_settle(120);
+    CHECK(g_cv.cam_len > 12.0f && g_cv.fade == 0);
+    g_g.world.parts[g_g.world.inst[wall].part].transparency = 0;
+    /* walking away from the wall, it eases back out */
+    ub_game_teleport(&g_g, v3(-10, 0, 40));
+    cam_settle(120);
+    CHECK(g_cv.cam_len > 12.0f);
+
+    /* shift lock: Shift; the view moves over the right shoulder, the mouse
+     * is locked and the character faces the camera's way */
+    in = cam_in(0, UB_KEY_SHIFT);
+    cam_frame(&in);
+    CHECK(g_cv.shift_lock && g_g.cam.shift_lock && g_g.cam.mouse_locked);
+    cam_settle(60);
+    c = play_view_camera(&g_cv, &g_g);
+    head = v3_add(g_g.feet, v3(0, 4.5f, 0));
+    vec3 right = v3(ub_cosf(g_cv.yaw), 0, -ub_sinf(g_cv.yaw));
+    CHECK(fabsf(v3_dot(v3_sub(c.focus, head), right) - 1.75f) < 0.05f && fabsf(g_cv.facing - g_cv.yaw) < 1e-4f);
+    in = cam_in(0, UB_KEY_SHIFT);
+    cam_frame(&in);
+    CHECK(!g_cv.shift_lock);
+    /* a place can forbid it, and so can the player's setting */
+    g_g.cam.mouse_lock_ok = false;
+    in = cam_in(0, UB_KEY_SHIFT);
+    cam_frame(&in);
+    CHECK(!g_cv.shift_lock);
+    g_g.cam.mouse_lock_ok = true;
+    g_cv.shift_lock_allowed = false;
+    cam_frame(&in);
+    CHECK(!g_cv.shift_lock);
+    g_cv.shift_lock_allowed = true;
+
+    /* LockFirstPerson */
+    g_g.cam.camera_mode = 1;
+    cam_settle(2);
+    CHECK(g_cv.zoom == 0.5f && g_g.cam.first_person);
+    in = cam_in(-3, 0);
+    cam_frame(&in);
+    CHECK(g_cv.zoom == 0.5f);
+    g_g.cam.camera_mode = 0;
+    ub_game_stop(&g_g);
+
+    /* scripts: the Player's camera properties, MouseBehavior, and a
+     * Scriptable camera put where a script says */
+    play_view_free(&g_cv);
+    door_world(&w, NULL);
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Cam",
+               "local p = game.Players:GetPlayers()[1]\n"
+               "local ok = p.CameraMaxZoomDistance == 128 and p.CameraMinZoomDistance == 0.5\n"
+               "ok = ok and p.CameraMode == Enum.CameraMode.Classic and p.DevEnableMouseLock\n"
+               "local changed = 0\n"
+               "p:GetPropertyChangedSignal('CameraMaxZoomDistance'):Connect(function() changed += 1 end)\n"
+               "p.CameraMaxZoomDistance = 30\n"
+               "p.CameraMinZoomDistance = 50 -- more than the max: the max follows\n"
+               "p.DevEnableMouseLock = false\n"
+               "local cam = workspace.CurrentCamera\n"
+               "ok = ok and cam.CameraType == Enum.CameraType.Custom\n"
+               "ok = ok and game:GetService('UserInputService').MouseBehavior == Enum.MouseBehavior.Default\n"
+               "cam.CameraType = Enum.CameraType.Scriptable\n"
+               "cam.CFrame = CFrame.new(Vector3.new(0, 40, 10), Vector3.new(0, 0, 0))\n"
+               "task.wait()\n"
+               "ok = ok and changed == 1 and cam.CameraType == Enum.CameraType.Scriptable\n"
+               "local f = Instance.new('Folder') f.Name = ok and 'cam ok' or 'cam failed' f.Parent = workspace\n");
+    CHECK(ub_game_start(&g_g, &w, true));
+    play_view_init(&g_cv);
+    play_view_reset(&g_cv, &g_g);
+    cam_settle(10);
+    CHECK(find_result(&g_g, "cam ok") >= 0);
+    CHECK(g_g.cam.max_zoom == 50 && g_g.cam.min_zoom == 50 && !g_g.cam.mouse_lock_ok);
+    c = play_view_camera(&g_cv, &g_g);
+    /* (Roblox's z is ours flipped: the camera is at z = -10, looking down towards the origin) */
+    CHECK(fabsf(c.pos.x) < 0.01f && fabsf(c.pos.y - 40) < 0.01f && fabsf(c.pos.z + 10) < 0.01f);
+    CHECK(c.pitch < -1.2f && !g_g.cam.mouse_locked);
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0);
+    if (st.errors || find_result(&g_g, "cam ok") < 0) print_output();
+    ub_game_stop(&g_g);
+    play_view_free(&g_cv);
+}
+
 /* Death and respawn: a kill brick, Died and CharacterAdded. */
 static void test_death(void)
 {
@@ -1039,4 +1222,5 @@ void test_game(void)
     test_death();
     test_demo_place();
     test_client_ui();
+    test_camera();
 }

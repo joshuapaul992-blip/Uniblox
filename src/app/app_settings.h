@@ -20,6 +20,7 @@ typedef struct {
     bool muted;
     int mouse_pct;            /* mouse-look speed, 100 = normal */
     bool invert_y;
+    bool shift_lock;          /* Shift toggles shift lock */
     int fov;                  /* degrees, vertical */
     bool scripts;
     int render_threads;       /* fast software renderer: 0 = one per processor */

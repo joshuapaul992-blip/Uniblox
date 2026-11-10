@@ -137,9 +137,10 @@ void play_view_init(ub_play_view *v)
 {
     memset(v, 0, sizeof *v);
     v->pitch = -0.35f;
-    v->zoom = 22.0f;
+    v->zoom = v->zoom_now = v->cam_len = 12.5f;
     v->look_scale = 1.0f;
     v->fov_deg = 70.0f;
+    v->shift_lock_allowed = true;
 }
 
 void play_view_free(ub_play_view *v)
@@ -169,23 +170,99 @@ void play_view_reset(ub_play_view *v, ub_game *g)
 {
     v->death_t = 0;
     v->walk_amount = 0;
+    v->have_cam = false;
+    v->cam_len = v->zoom_now = v->zoom;
     rebuild_statics(v, g);
 }
 
-void play_view_input(ub_play_view *v, const ub_input *in, f32 dt, bool keys, bool look, vec3 *move, bool *jump)
+/* Is a part's instance the character's body (not a tool it holds)? */
+static bool body_part(const ub_game *g, i32 inst)
 {
-    bool want_look = in->mouse_down[UB_MOUSE_RIGHT] && in->has_focus && look;
-    if (want_look != in->mouse_captured) ub_debug("mouse look %s", want_look ? "on" : "off");
+    const ub_world *w = &g->world;
+    if (g->char_model < 0) return false;
+    for (i32 a = inst; a >= 0; a = w->inst[a].parent) {
+        if (a == g->char_model) return true;
+        if (!ub_strcmp(ub_world_str(w, w->inst[a].class_name), "Tool")) return false;
+    }
+    return false;
+}
+
+/* ------------------------------------------------------------- camera */
+
+#define HEAD_ABOVE_FEET 4.5f   /* the camera's subject: HumanoidRootPart + 1.5 studs, as Roblox's */
+#define SNAP_IN 2.0f           /* zooming in closer than this goes into first person */
+#define SNAP_OUT 2.5f          /* zooming out of first person comes back to here */
+#define SHOULDER 1.75f         /* shift lock: studs to the right */
+#define WALL_GAP 0.4f          /* how far from a wall the camera stays */
+
+static f32 ease(f32 dt, f32 rate) { return ub_clampf(dt * rate, 0.0f, 1.0f); }
+
+/* The zoom limits now: the place's, or first person only (LockFirstPerson). */
+static void zoom_limits(const ub_game *g, f32 *lo, f32 *hi)
+{
+    *lo = g->cam.min_zoom > 0 ? g->cam.min_zoom : PLAY_ZOOM_MIN;
+    *hi = g->cam.max_zoom >= *lo ? g->cam.max_zoom : PLAY_ZOOM_MAX;
+    if (g->cam.camera_mode == 1) *hi = *lo;
+}
+
+/* One step of zoom: in (dir < 0) or out, by `factor` (< 1), snapping in
+ * and out of first person as Roblox's camera does. */
+static f32 zoom_step(f32 z, int dir, f32 factor, f32 lo, f32 hi)
+{
+    if (dir < 0) {
+        z *= factor;
+        if (z < SNAP_IN && lo < PLAY_FIRST_PERSON) z = lo;
+    } else {
+        z = z < PLAY_FIRST_PERSON ? SNAP_OUT : z / factor;
+    }
+    return ub_clampf(z, lo, hi);
+}
+
+void play_view_input(ub_play_view *v, ub_game *g, const ub_input *in, f32 dt, bool keys, bool look, vec3 *move,
+                     bool *jump)
+{
+    const ub_cam_state *cs = &g->cam;
+    bool scripted = cs->camera_type == UB_CAMTYPE_SCRIPTABLE || cs->camera_type == UB_CAMTYPE_FIXED;
+    f32 lo, hi;
+    zoom_limits(g, &lo, &hi);
+
+    /* zoom: the wheel, I and O */
+    for (int n = in->wheel; n >= UB_WHEEL_NOTCH; n -= UB_WHEEL_NOTCH) v->zoom = zoom_step(v->zoom, -1, 0.8f, lo, hi);
+    for (int n = in->wheel; n <= -UB_WHEEL_NOTCH; n += UB_WHEEL_NOTCH) v->zoom = zoom_step(v->zoom, 1, 0.8f, lo, hi);
+    if (keys && in->key_pressed['I']) v->zoom = zoom_step(v->zoom, -1, 0.85f, lo, hi);
+    else if (keys && in->key_down['I']) v->zoom = zoom_step(v->zoom, -1, 1.0f - ub_clampf(dt * 1.6f, 0, 0.5f), lo, hi);
+    if (keys && in->key_pressed['O']) v->zoom = zoom_step(v->zoom, 1, 0.85f, lo, hi);
+    else if (keys && in->key_down['O']) v->zoom = zoom_step(v->zoom, 1, 1.0f - ub_clampf(dt * 1.6f, 0, 0.5f), lo, hi);
+    v->zoom = ub_clampf(v->zoom, lo, hi);
+    bool was_first = v->first_person;
+    v->first_person = v->zoom < PLAY_FIRST_PERSON && !scripted;
+    if (v->first_person != was_first) ub_info("camera: %s", v->first_person ? "first person" : "third person");
+
+    /* shift lock: Shift, where the player and the place allow it */
+    if (!v->shift_lock_allowed || !cs->mouse_lock_ok) v->shift_lock = false;
+    else if (keys && in->key_pressed[UB_KEY_SHIFT]) {
+        v->shift_lock = !v->shift_lock;
+        ub_info("shift lock %s", v->shift_lock ? "on" : "off");
+    }
+
+    /* the mouse: locked to the middle in first person and shift lock (and
+     * when a script asks), else turning the camera while the right button
+     * is held */
+    bool focus = in->has_focus && look && !scripted;
+    v->locked = focus && (v->first_person || v->shift_lock || cs->mouse_behavior == UB_MOUSE_LOCK_CENTER);
+    bool drag = focus && (in->mouse_down[UB_MOUSE_RIGHT] || cs->mouse_behavior == UB_MOUSE_LOCK_CURRENT);
+    bool want_look = v->locked || drag;
+    if (want_look != in->mouse_captured) ub_debug("mouse look %s%s", want_look ? "on" : "off", v->locked ? " (locked)" : "");
     plat_set_mouse_capture(want_look);
-    f32 sens = LOOK_SENSITIVITY * (v->look_scale > 0 ? v->look_scale : 1.0f);
-    v->yaw += (f32)in->mouse_dx * sens;
-    v->pitch = ub_clampf(v->pitch - (f32)in->mouse_dy * sens * (v->invert_y ? -1.0f : 1.0f), PLAY_PITCH_MIN, PLAY_PITCH_MAX);
+    if (in->mouse_captured && !scripted) {
+        f32 sens = LOOK_SENSITIVITY * (v->look_scale > 0 ? v->look_scale : 1.0f);
+        v->yaw += (f32)in->mouse_dx * sens;
+        v->pitch -= (f32)in->mouse_dy * sens * (v->invert_y ? -1.0f : 1.0f);
+    }
+    v->pitch = ub_clampf(v->pitch, PLAY_PITCH_MIN, PLAY_PITCH_MAX);
     if (keys && in->key_down[UB_KEY_LEFT]) v->yaw -= TURN_SPEED * dt;
     if (keys && in->key_down[UB_KEY_RIGHT]) v->yaw += TURN_SPEED * dt;
     v->yaw = ub_wrap_angle(v->yaw);
-    for (int n = in->wheel; n >= UB_WHEEL_NOTCH; n -= UB_WHEEL_NOTCH) v->zoom *= 0.88f;
-    for (int n = in->wheel; n <= -UB_WHEEL_NOTCH; n += UB_WHEEL_NOTCH) v->zoom /= 0.88f;
-    v->zoom = ub_clampf(v->zoom, PLAY_ZOOM_MIN, PLAY_ZOOM_MAX);
 
     /* movement, relative to the camera */
     f32 fx = ub_sinf(v->yaw), fz = ub_cosf(v->yaw);
@@ -200,7 +277,9 @@ void play_view_input(ub_play_view *v, const ub_input *in, f32 dt, bool keys, boo
     if (mf != 0 && mr != 0) { mf *= 0.7071f; mr *= 0.7071f; }
     *move = v3(fx * mf + rx * mr, 0, fz * mf + rz * mr);
     v->moving = mf != 0 || mr != 0;
-    if (v->moving) {
+    if ((v->first_person || v->shift_lock) && !scripted && !g->dead) {
+        v->facing = v->yaw; /* it faces where the camera looks, and walks sideways and back */
+    } else if (v->moving) {
         /* turn the character smoothly towards where it is going
          * (yaw of direction (x, z) is atan2(x, z): yaw 0 faces +Z) */
         f32 want = ub_atan2f(move->x, move->z);
@@ -209,6 +288,52 @@ void play_view_input(ub_play_view *v, const ub_input *in, f32 dt, bool keys, boo
     }
     /* Roblox-style: holding Space keeps jumping each time the feet land */
     *jump = keys && (in->key_down[UB_KEY_SPACE] || in->key_pressed[UB_KEY_SPACE]);
+}
+
+/* Where the camera looks from: the subject's head (a part when a script
+ * made one the CameraSubject). */
+static vec3 camera_focus(const ub_game *g)
+{
+    i32 s = g->cam.subject;
+    if (s >= 0 && s != g->humanoid && ub_world_alive(&g->world, s) && g->world.inst[s].part >= 0) {
+        vec3 p;
+        mat3 r;
+        ub_game_part_pose(g, g->world.inst[s].part, &p, &r);
+        return p;
+    }
+    return v3_add(g->feet, v3(0, HEAD_ABOVE_FEET, 0));
+}
+
+/* How far along a ray the camera can go before a wall (Poppercam): solid
+ * parts stop it, see-through ones (half or more) do not. */
+static f32 clear_length(const ub_game *g, vec3 from, vec3 dir, f32 len)
+{
+    if (!g->phys_ok || len <= 0) return len;
+    f32 done = 0;
+    for (int tries = 0; tries < 6 && done < len; ++tries) {
+        ub_phys_hit h;
+        if (!ub_phys_raycast(&g->phys, v3_add(from, v3_scale(dir, done)), dir, len - done + WALL_GAP, g->chr.body, &h))
+            return len;
+        const ub_part *p = h.part >= 0 && h.part < g->world.part_count ? &g->world.parts[h.part] : NULL;
+        if (p && p->transparency >= 128) {
+            done += h.t + 0.05f; /* look on through it */
+            continue;
+        }
+        f32 t = done + h.t - WALL_GAP;
+        return t < 0 ? 0 : t < len ? t : len;
+    }
+    return len;
+}
+
+static ub_camera script_camera(const ub_play_view *v, const ub_game *g)
+{
+    ub_camera c = v->cam;
+    vec3 f = v3_normalize(g->cam.script_fwd);
+    c.pos = g->cam.script_pos;
+    c.yaw = ub_atan2f(f.x, f.z);
+    c.pitch = ub_atan2f(f.y, ub_sqrtf(f.x * f.x + f.z * f.z));
+    c.focus = v3_add(c.pos, v3_scale(f, 10));
+    return c;
 }
 
 void play_view_update(ub_play_view *v, ub_game *g, f32 dt)
@@ -230,20 +355,73 @@ void play_view_update(ub_play_view *v, ub_game *g, f32 dt)
     g->pose_phase = v->walk_phase;
     g->pose_amount = v->walk_amount;
     g->pose_fallen = v->death_t;
+
+    /* the camera */
+    f32 lo, hi;
+    zoom_limits(g, &lo, &hi);
+    v->zoom = ub_clampf(v->zoom, lo, hi); /* (a script may have changed the limits) */
+    v->first_person = v->zoom < PLAY_FIRST_PERSON;
+    bool scripted = g->cam.camera_type == UB_CAMTYPE_SCRIPTABLE || g->cam.camera_type == UB_CAMTYPE_FIXED;
+    if (v->first_person) v->zoom_now = v->zoom; /* straight to the eyes */
+    else if (v->zoom_now < PLAY_FIRST_PERSON) v->zoom_now = SNAP_IN;
+    else v->zoom_now += (v->zoom - v->zoom_now) * ease(dt, 10.0f);
+    v->shoulder += ((v->shift_lock && !v->first_person ? 1.0f : 0.0f) - v->shoulder) * ease(dt, 12.0f);
+
+    vec3 head = camera_focus(g);
+    f32 fx = ub_sinf(v->yaw), fz = ub_cosf(v->yaw), cp = ub_cosf(v->pitch);
+    vec3 fwd = v3(fx * cp, ub_sinf(v->pitch), fz * cp), right = v3(fz, 0, -fx);
+    /* from the head out to the shoulder (shift lock), then back from there */
+    f32 side = clear_length(g, head, right, SHOULDER * v->shoulder);
+    vec3 focus = v3_add(head, v3_scale(right, side));
+    f32 want = v->first_person ? 0.0f : v->zoom_now;
+    f32 len = g->cam.occlusion == 0 ? clear_length(g, focus, v3_scale(fwd, -1), want) : want;
+    /* walls pull the camera in at once; it eases back out */
+    if (len < v->cam_len || v->first_person) v->cam_len = len;
+    else v->cam_len += (len - v->cam_len) * ease(dt, 8.0f);
+
+    ub_camera cam;
+    memset(&cam, 0, sizeof cam);
+    cam.yaw = v->yaw;
+    cam.pitch = v->pitch;
+    cam.pos = v3_sub(focus, v3_scale(fwd, v->cam_len));
+    cam.focus = focus;
+    f32 fov = g->script_fov > 1 ? g->script_fov : v->fov_deg > 10 ? v->fov_deg : 70.0f;
+    cam.fov_y = ub_clampf(fov, 1, 120) * UB_PI / 180.0f;
+    cam.far_dist = 600.0f + (hi > 128 ? hi : 0);
+    if (scripted) {
+        /* Scriptable: where a script put it; Fixed: where it was */
+        if (g->cam.camera_type == UB_CAMTYPE_SCRIPTABLE && g->cam.script_cf) cam = script_camera(v, g);
+        else if (v->have_cam) cam = v->cam;
+        cam.fov_y = ub_clampf(fov, 1, 120) * UB_PI / 180.0f;
+    }
+    v->cam = cam;
+    v->have_cam = true;
+
+    /* close up, the character fades; in first person it is not drawn (its
+     * tools still are) */
+    f32 dist = scripted ? 100.0f : v->cam_len;
+    v->fade = v->first_person && !scripted ? 1.0f : ub_clampf((2.5f - dist) / 1.5f, 0.0f, 1.0f);
+
+    /* what the camera did, for scripts and the client UI */
+    g->cam.first_person = v->first_person && !scripted;
+    g->cam.shift_lock = v->shift_lock && !scripted;
+    g->cam.mouse_locked = v->locked;
+    g->cam.distance = scripted ? v3_length(v3_sub(cam.pos, head)) : v->cam_len;
 }
 
 ub_camera play_view_camera(const ub_play_view *v, const ub_game *g)
 {
+    if (v->have_cam) return v->cam;
+    /* (before the first update) */
     ub_camera cam;
-    vec3 target = v3_add(g->feet, v3(0, 3.5f, 0));
+    memset(&cam, 0, sizeof cam);
+    vec3 target = camera_focus(g);
     f32 fx = ub_sinf(v->yaw), fz = ub_cosf(v->yaw), cp = ub_cosf(v->pitch);
     cam.yaw = v->yaw;
     cam.pitch = v->pitch;
-    vec3 fwd = v3(fx * cp, ub_sinf(v->pitch), fz * cp);
-    cam.pos = v3_sub(target, v3_scale(fwd, v->zoom));
+    cam.pos = v3_sub(target, v3_scale(v3(fx * cp, ub_sinf(v->pitch), fz * cp), v->zoom));
     cam.focus = target;
-    f32 fov = g->script_fov > 1 ? g->script_fov : v->fov_deg > 10 ? v->fov_deg : 70.0f;
-    cam.fov_y = ub_clampf(fov, 1, 120) * UB_PI / 180.0f;
+    cam.fov_y = ub_clampf(v->fov_deg > 10 ? v->fov_deg : 70.0f, 1, 120) * UB_PI / 180.0f;
     cam.far_dist = 600.0f;
     return cam;
 }
@@ -256,6 +434,12 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
         i32 pi = g->live[i];
         if (!ub_game_part_visible(g, pi)) continue;
         ub_part_draw d = play_part_draw(&g->world, &g->world.parts[pi]);
+        if (v->fade > 0.01f && body_part(g, ub_world_part_inst(&g->world, pi))) {
+            /* close up the character fades out (Roblox's LocalTransparencyModifier) */
+            if (v->fade > 0.97f) continue;
+            u32 t = g->world.parts[pi].transparency, f = (u32)(v->fade * 255.0f);
+            d.flags = (u8)((d.flags & UB_DRAW_GLOW) | ub_draw_see_through((u8)(t > f ? t : f)));
+        }
         ub_game_part_pose(g, pi, &d.pos, &d.rot);
         ub_render_part(&d);
     }
@@ -281,7 +465,7 @@ void play_view_draw(ub_play_view *v, ub_game *g, bool character)
         r.material = UB_MAT_PLASTIC;
         ub_render_part(&r);
     }
-    if (character) play_draw_blob_shadow(g); /* (the character itself is its rig's parts, drawn above) */
+    if (character && !v->first_person) play_draw_blob_shadow(g); /* (the character itself is its rig's parts, drawn above) */
 }
 
 /* A soft round shadow on the ground under the character, for when the
@@ -332,6 +516,12 @@ void play_gui_input(ub_game *g, const ub_frame *frame, const ub_input *in, const
     /* window pixels -> GUI screen pixels (smaller when software renders below the window size) */
     gi.mouse_x = frame->width > 0 ? (f32)in->mouse_x * (f32)sw / (f32)frame->width : 0;
     gi.mouse_y = frame->height > 0 ? (f32)in->mouse_y * (f32)sh / (f32)frame->height : 0;
+    if (g->cam.mouse_locked) {
+        /* first person and shift lock: the mouse is the middle of the screen
+         * (clicks, tools and ClickDetectors aim there) */
+        gi.mouse_x = (f32)sw * 0.5f;
+        gi.mouse_y = (f32)sh * 0.5f;
+    }
     for (int b = 0; b < 3; ++b) {
         gi.down[b] = in->mouse_down[b];
         gi.pressed[b] = in->mouse_pressed[b];
@@ -340,7 +530,7 @@ void play_gui_input(ub_game *g, const ub_frame *frame, const ub_input *in, const
     gi.wheel = in->wheel / UB_WHEEL_NOTCH;
     gi.text = in->text;
     memcpy(gi.key_pressed, in->key_repeat, sizeof gi.key_pressed);
-    gi.mouse_free = !look && in->has_focus && !in->mouse_captured;
+    gi.mouse_free = (!look || g->cam.mouse_locked) && in->has_focus && (!in->mouse_captured || g->cam.mouse_locked);
     ub_gui_update(g->gui, &g->world, sw, sh, cam, &gi, time);
     /* and the same input for scripts */
     ub_game_input *si = &g->input;

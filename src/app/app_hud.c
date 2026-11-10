@@ -33,6 +33,7 @@ static struct {
     i32 health, health_fill;
     i32 notes, note_frame[4], note_title[4], note_text[4];
     i32 bubble[MAX_BUBBLES], bubble_text[MAX_BUBBLES];
+    i32 cursor, cursor_ring, cursor_dot;   /* the middle of the screen while the mouse is locked */
     i32 menu, menu_tabs[3], menu_body, menu_lines[10], menu_btns[3], menu_btn_text[3];
     u32 cache[512];                /* hash of the last text set on each label slot (avoids relayout) */
     bool cache_set[512];
@@ -216,6 +217,22 @@ static void build(void)
     }
     /* chat bubbles: billboards made on demand */
     for (int i = 0; i < MAX_BUBBLES; ++i) H.bubble[i] = H.bubble_text[i] = -1;
+    /* the locked mouse: a ring (shift lock) and a dot */
+    H.cursor = screen("MouseLock", 8);
+    H.cursor_ring = panel(H.cursor, "Ring", 0xFFFFFF, 1, 11);
+    i32 st = mk("UIStroke", H.cursor_ring, "Edge");
+    setv(st, "Color", vcolor(0xFFFFFF));
+    setv(st, "Thickness", ub_vfloat(2));
+    setv(st, "Transparency", ub_vfloat(0.15f));
+    i32 st2 = mk("UIStroke", H.cursor_ring, "Shade"); /* (a dark rim so it shows on the sky too) */
+    setv(st2, "Color", vcolor(0x000000));
+    setv(st2, "Thickness", ub_vfloat(1));
+    setv(st2, "Transparency", ub_vfloat(0.6f));
+    H.cursor_dot = panel(H.cursor, "Dot", 0xFFFFFF, 0.05f, 3);
+    i32 st3 = mk("UIStroke", H.cursor_dot, "Shade");
+    setv(st3, "Color", vcolor(0x000000));
+    setv(st3, "Transparency", ub_vfloat(0.5f));
+    enable(H.cursor, false);
     /* the menu */
     H.menu = screen("GameMenu", 10);
     i32 dim = panel(H.menu, "Dim", 0x000000, 0.45f, 0);
@@ -497,6 +514,18 @@ void hud_frame(int sw, int sh, const char *typing, f32 dt)
         off.v.v3.y = 2.4f + (f32)i * 1.6f;
         setv(H.bubble[i], "StudsOffsetWorldSpace", off);
         set_text(H.bubble_text[i], 100 + i, b->text);
+    }
+
+    /* the locked mouse's mark, in the middle of the screen (GUI coordinates
+     * below the inset, so the ScreenGui ignores it) */
+    bool mark = g->cam.mouse_locked && g->cam.icon_enabled && !H.menu_open;
+    enable(H.cursor, mark);
+    if (mark) {
+        int cx = sw / 2, cy = sh / 2;
+        bool ring = g->cam.shift_lock && !g->cam.first_person;
+        show(H.cursor_ring, ring);
+        place(H.cursor_ring, cx - 11, cy - 11, 22, 22);
+        place(H.cursor_dot, cx - 3, cy - 3, 6, 6);
     }
 
     /* the menu */

@@ -273,6 +273,8 @@ void sound_reset(void);
 
 /* Teams (ub_sapi_interact.c): Player.Team / TeamColor / Neutral */
 bool teams_get(lua_State *L, i32 idx, const char *k);
+bool camera_player_get(lua_State *L, i32 idx, const char *k);
+bool camera_player_set(lua_State *L, i32 idx, const char *k, int v);
 bool teams_set(lua_State *L, i32 idx, const char *k, int v);
 
 /* Errors as Roblox words them. */
