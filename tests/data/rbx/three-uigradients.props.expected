@@ -1,0 +1,15 @@
+UIGradient|Color|colorseq|0.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0
+UIGradient|Enabled|bool|1
+UIGradient|Offset|vector2|0.0 0.0
+UIGradient|Rotation|float|0.0
+UIGradient|Transparency|numseq|0.0 0.5 0.0 0.2 0.75 0.0 0.5 0.0 0.0 0.6 0.8 0.0 1.0 1.0 0.0
+UIGradient|Color|colorseq|0.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0
+UIGradient|Enabled|bool|1
+UIGradient|Offset|vector2|0.0 0.0
+UIGradient|Rotation|float|0.0
+UIGradient|Transparency|numseq|0.0 0.0 0.0 0.5 1.0 0.0 1.0 0.0 0.0
+UIGradient|Color|colorseq|0.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0
+UIGradient|Enabled|bool|1
+UIGradient|Offset|vector2|0.0 0.0
+UIGradient|Rotation|float|0.0
+UIGradient|Transparency|numseq|0.0 0.0 0.0 1.0 0.0 0.0

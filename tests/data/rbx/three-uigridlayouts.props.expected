@@ -1,0 +1,24 @@
+UIGridLayout|CellPadding|udim2|0.0 0 -0.100000001 100
+UIGridLayout|CellSize|udim2|0.200000003 -150 -0.300000012 300
+UIGridLayout|FillDirection|enum|0
+UIGridLayout|FillDirectionMaxCells|int|0
+UIGridLayout|HorizontalAlignment|enum|1
+UIGridLayout|SortOrder|enum|0
+UIGridLayout|StartCorner|enum|0
+UIGridLayout|VerticalAlignment|enum|1
+UIGridLayout|CellPadding|udim2|0.400000006 -500 -0.5 600
+UIGridLayout|CellSize|udim2|0.600000024 -1200 -0.699999988 1000
+UIGridLayout|FillDirection|enum|0
+UIGridLayout|FillDirectionMaxCells|int|0
+UIGridLayout|HorizontalAlignment|enum|1
+UIGridLayout|SortOrder|enum|0
+UIGridLayout|StartCorner|enum|0
+UIGridLayout|VerticalAlignment|enum|1
+UIGridLayout|CellPadding|udim2|0.800000012 -200 -0.899999976 250
+UIGridLayout|CellSize|udim2|1.0 -300 -1.10000002 1200
+UIGridLayout|FillDirection|enum|0
+UIGridLayout|FillDirectionMaxCells|int|0
+UIGridLayout|HorizontalAlignment|enum|1
+UIGridLayout|SortOrder|enum|0
+UIGridLayout|StartCorner|enum|0
+UIGridLayout|VerticalAlignment|enum|1

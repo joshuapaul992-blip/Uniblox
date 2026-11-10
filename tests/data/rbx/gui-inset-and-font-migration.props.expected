@@ -1,0 +1,176 @@
+Folder/IgnoreGuiInset: true|AutoLocalize|bool|1
+Folder/IgnoreGuiInset: true|ClipToDeviceSafeArea|bool|1
+Folder/IgnoreGuiInset: true|DisplayOrder|int|0
+Folder/IgnoreGuiInset: true|Enabled|bool|1
+Folder/IgnoreGuiInset: true|ResetOnSpawn|bool|1
+Folder/IgnoreGuiInset: true|RootLocalizationTable|ref|
+Folder/IgnoreGuiInset: true|SafeAreaCompatibility|enum|1
+Folder/IgnoreGuiInset: true|IgnoreGuiInset|bool|1
+Folder/IgnoreGuiInset: true|SelectionBehaviorDown|enum|0
+Folder/IgnoreGuiInset: true|SelectionBehaviorLeft|enum|0
+Folder/IgnoreGuiInset: true|SelectionBehaviorRight|enum|0
+Folder/IgnoreGuiInset: true|SelectionBehaviorUp|enum|0
+Folder/IgnoreGuiInset: true|SelectionGroup|bool|0
+Folder/IgnoreGuiInset: true|ZIndexBehavior|enum|1
+Folder/IgnoreGuiInset: false|AutoLocalize|bool|1
+Folder/IgnoreGuiInset: false|ClipToDeviceSafeArea|bool|1
+Folder/IgnoreGuiInset: false|DisplayOrder|int|0
+Folder/IgnoreGuiInset: false|Enabled|bool|1
+Folder/IgnoreGuiInset: false|ResetOnSpawn|bool|1
+Folder/IgnoreGuiInset: false|RootLocalizationTable|ref|
+Folder/IgnoreGuiInset: false|SafeAreaCompatibility|enum|1
+Folder/IgnoreGuiInset: false|IgnoreGuiInset|bool|0
+Folder/IgnoreGuiInset: false|SelectionBehaviorDown|enum|0
+Folder/IgnoreGuiInset: false|SelectionBehaviorLeft|enum|0
+Folder/IgnoreGuiInset: false|SelectionBehaviorRight|enum|0
+Folder/IgnoreGuiInset: false|SelectionBehaviorUp|enum|0
+Folder/IgnoreGuiInset: false|SelectionGroup|bool|0
+Folder/IgnoreGuiInset: false|ZIndexBehavior|enum|1
+Folder/IgnoreGuiInset: false/TextLabel|Active|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|AnchorPoint|vector2|0.0 0.0
+Folder/IgnoreGuiInset: false/TextLabel|AutoLocalize|bool|1
+Folder/IgnoreGuiInset: false/TextLabel|AutomaticSize|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|BackgroundColor3|color3|1.0 1.0 1.0
+Folder/IgnoreGuiInset: false/TextLabel|BackgroundTransparency|float|0.0
+Folder/IgnoreGuiInset: false/TextLabel|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+Folder/IgnoreGuiInset: false/TextLabel|BorderMode|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|BorderSizePixel|int|1
+Folder/IgnoreGuiInset: false/TextLabel|ClipsDescendants|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|Draggable|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|Font|enum|10
+Folder/IgnoreGuiInset: false/TextLabel|LayoutOrder|int|0
+Folder/IgnoreGuiInset: false/TextLabel|LineHeight|float|1.0
+Folder/IgnoreGuiInset: false/TextLabel|MaxVisibleGraphemes|int|-1
+Folder/IgnoreGuiInset: false/TextLabel|NextSelectionDown|ref|
+Folder/IgnoreGuiInset: false/TextLabel|NextSelectionLeft|ref|
+Folder/IgnoreGuiInset: false/TextLabel|NextSelectionRight|ref|
+Folder/IgnoreGuiInset: false/TextLabel|NextSelectionUp|ref|
+Folder/IgnoreGuiInset: false/TextLabel|Position|udim2|0.0 0 0.0 0
+Folder/IgnoreGuiInset: false/TextLabel|RichText|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|RootLocalizationTable|ref|
+Folder/IgnoreGuiInset: false/TextLabel|Rotation|float|0.0
+Folder/IgnoreGuiInset: false/TextLabel|Selectable|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|SelectionBehaviorDown|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|SelectionBehaviorLeft|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|SelectionBehaviorRight|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|SelectionBehaviorUp|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|SelectionGroup|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|SelectionImageObject|ref|
+Folder/IgnoreGuiInset: false/TextLabel|SelectionOrder|int|0
+Folder/IgnoreGuiInset: false/TextLabel|Size|udim2|0.0 200 0.0 50
+Folder/IgnoreGuiInset: false/TextLabel|SizeConstraint|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|Text|string|Label
+Folder/IgnoreGuiInset: false/TextLabel|TextColor3|color3|0.0 0.0 0.0
+Folder/IgnoreGuiInset: false/TextLabel|TextScaled|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|TextSize|float|14.0
+Folder/IgnoreGuiInset: false/TextLabel|TextStrokeColor3|color3|0.0 0.0 0.0
+Folder/IgnoreGuiInset: false/TextLabel|TextStrokeTransparency|float|1.0
+Folder/IgnoreGuiInset: false/TextLabel|TextTransparency|float|0.0
+Folder/IgnoreGuiInset: false/TextLabel|TextTruncate|enum|0
+Folder/IgnoreGuiInset: false/TextLabel|TextWrapped|bool|0
+Folder/IgnoreGuiInset: false/TextLabel|TextXAlignment|enum|2
+Folder/IgnoreGuiInset: false/TextLabel|TextYAlignment|enum|1
+Folder/IgnoreGuiInset: false/TextLabel|Visible|bool|1
+Folder/IgnoreGuiInset: false/TextLabel|ZIndex|int|1
+Folder/IgnoreGuiInset: false/TextButton|Active|bool|1
+Folder/IgnoreGuiInset: false/TextButton|AnchorPoint|vector2|0.0 0.0
+Folder/IgnoreGuiInset: false/TextButton|AutoButtonColor|bool|1
+Folder/IgnoreGuiInset: false/TextButton|AutoLocalize|bool|1
+Folder/IgnoreGuiInset: false/TextButton|AutomaticSize|enum|0
+Folder/IgnoreGuiInset: false/TextButton|BackgroundColor3|color3|1.0 1.0 1.0
+Folder/IgnoreGuiInset: false/TextButton|BackgroundTransparency|float|0.0
+Folder/IgnoreGuiInset: false/TextButton|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+Folder/IgnoreGuiInset: false/TextButton|BorderMode|enum|0
+Folder/IgnoreGuiInset: false/TextButton|BorderSizePixel|int|1
+Folder/IgnoreGuiInset: false/TextButton|ClipsDescendants|bool|0
+Folder/IgnoreGuiInset: false/TextButton|Draggable|bool|0
+Folder/IgnoreGuiInset: false/TextButton|Font|enum|4
+Folder/IgnoreGuiInset: false/TextButton|LayoutOrder|int|0
+Folder/IgnoreGuiInset: false/TextButton|LineHeight|float|1.0
+Folder/IgnoreGuiInset: false/TextButton|MaxVisibleGraphemes|int|-1
+Folder/IgnoreGuiInset: false/TextButton|Modal|bool|0
+Folder/IgnoreGuiInset: false/TextButton|NextSelectionDown|ref|
+Folder/IgnoreGuiInset: false/TextButton|NextSelectionLeft|ref|
+Folder/IgnoreGuiInset: false/TextButton|NextSelectionRight|ref|
+Folder/IgnoreGuiInset: false/TextButton|NextSelectionUp|ref|
+Folder/IgnoreGuiInset: false/TextButton|Position|udim2|0.0 0 0.0 55
+Folder/IgnoreGuiInset: false/TextButton|RichText|bool|0
+Folder/IgnoreGuiInset: false/TextButton|RootLocalizationTable|ref|
+Folder/IgnoreGuiInset: false/TextButton|Rotation|float|0.0
+Folder/IgnoreGuiInset: false/TextButton|Selectable|bool|1
+Folder/IgnoreGuiInset: false/TextButton|Selected|bool|0
+Folder/IgnoreGuiInset: false/TextButton|SelectionBehaviorDown|enum|0
+Folder/IgnoreGuiInset: false/TextButton|SelectionBehaviorLeft|enum|0
+Folder/IgnoreGuiInset: false/TextButton|SelectionBehaviorRight|enum|0
+Folder/IgnoreGuiInset: false/TextButton|SelectionBehaviorUp|enum|0
+Folder/IgnoreGuiInset: false/TextButton|SelectionGroup|bool|0
+Folder/IgnoreGuiInset: false/TextButton|SelectionImageObject|ref|
+Folder/IgnoreGuiInset: false/TextButton|SelectionOrder|int|0
+Folder/IgnoreGuiInset: false/TextButton|Size|udim2|0.0 200 0.0 50
+Folder/IgnoreGuiInset: false/TextButton|SizeConstraint|enum|0
+Folder/IgnoreGuiInset: false/TextButton|Style|enum|0
+Folder/IgnoreGuiInset: false/TextButton|Text|string|Button
+Folder/IgnoreGuiInset: false/TextButton|TextColor3|color3|0.0 0.0 0.0
+Folder/IgnoreGuiInset: false/TextButton|TextScaled|bool|0
+Folder/IgnoreGuiInset: false/TextButton|TextSize|float|14.0
+Folder/IgnoreGuiInset: false/TextButton|TextStrokeColor3|color3|0.0 0.0 0.0
+Folder/IgnoreGuiInset: false/TextButton|TextStrokeTransparency|float|1.0
+Folder/IgnoreGuiInset: false/TextButton|TextTransparency|float|0.0
+Folder/IgnoreGuiInset: false/TextButton|TextTruncate|enum|0
+Folder/IgnoreGuiInset: false/TextButton|TextWrapped|bool|0
+Folder/IgnoreGuiInset: false/TextButton|TextXAlignment|enum|2
+Folder/IgnoreGuiInset: false/TextButton|TextYAlignment|enum|1
+Folder/IgnoreGuiInset: false/TextButton|Visible|bool|1
+Folder/IgnoreGuiInset: false/TextButton|ZIndex|int|1
+Folder/IgnoreGuiInset: false/TextBox|Active|bool|1
+Folder/IgnoreGuiInset: false/TextBox|AnchorPoint|vector2|0.0 0.0
+Folder/IgnoreGuiInset: false/TextBox|AutoLocalize|bool|1
+Folder/IgnoreGuiInset: false/TextBox|AutomaticSize|enum|0
+Folder/IgnoreGuiInset: false/TextBox|BackgroundColor3|color3|1.0 1.0 1.0
+Folder/IgnoreGuiInset: false/TextBox|BackgroundTransparency|float|0.0
+Folder/IgnoreGuiInset: false/TextBox|BorderColor3|color3|0.105882362 0.164705887 0.207843155
+Folder/IgnoreGuiInset: false/TextBox|BorderMode|enum|0
+Folder/IgnoreGuiInset: false/TextBox|BorderSizePixel|int|1
+Folder/IgnoreGuiInset: false/TextBox|ClearTextOnFocus|bool|1
+Folder/IgnoreGuiInset: false/TextBox|ClipsDescendants|bool|0
+Folder/IgnoreGuiInset: false/TextBox|Draggable|bool|0
+Folder/IgnoreGuiInset: false/TextBox|Font|enum|6
+Folder/IgnoreGuiInset: false/TextBox|LayoutOrder|int|0
+Folder/IgnoreGuiInset: false/TextBox|LineHeight|float|1.0
+Folder/IgnoreGuiInset: false/TextBox|MaxVisibleGraphemes|int|-1
+Folder/IgnoreGuiInset: false/TextBox|MultiLine|bool|0
+Folder/IgnoreGuiInset: false/TextBox|NextSelectionDown|ref|
+Folder/IgnoreGuiInset: false/TextBox|NextSelectionLeft|ref|
+Folder/IgnoreGuiInset: false/TextBox|NextSelectionRight|ref|
+Folder/IgnoreGuiInset: false/TextBox|NextSelectionUp|ref|
+Folder/IgnoreGuiInset: false/TextBox|PlaceholderColor3|color3|0.699999988 0.699999988 0.699999988
+Folder/IgnoreGuiInset: false/TextBox|PlaceholderText|string|
+Folder/IgnoreGuiInset: false/TextBox|Position|udim2|0.0 0 0.0 110
+Folder/IgnoreGuiInset: false/TextBox|RichText|bool|0
+Folder/IgnoreGuiInset: false/TextBox|RootLocalizationTable|ref|
+Folder/IgnoreGuiInset: false/TextBox|Rotation|float|0.0
+Folder/IgnoreGuiInset: false/TextBox|Selectable|bool|1
+Folder/IgnoreGuiInset: false/TextBox|SelectionBehaviorDown|enum|0
+Folder/IgnoreGuiInset: false/TextBox|SelectionBehaviorLeft|enum|0
+Folder/IgnoreGuiInset: false/TextBox|SelectionBehaviorRight|enum|0
+Folder/IgnoreGuiInset: false/TextBox|SelectionBehaviorUp|enum|0
+Folder/IgnoreGuiInset: false/TextBox|SelectionGroup|bool|0
+Folder/IgnoreGuiInset: false/TextBox|SelectionImageObject|ref|
+Folder/IgnoreGuiInset: false/TextBox|SelectionOrder|int|0
+Folder/IgnoreGuiInset: false/TextBox|ShowNativeInput|bool|1
+Folder/IgnoreGuiInset: false/TextBox|Size|udim2|0.0 200 0.0 50
+Folder/IgnoreGuiInset: false/TextBox|SizeConstraint|enum|0
+Folder/IgnoreGuiInset: false/TextBox|Text|string|TextBox
+Folder/IgnoreGuiInset: false/TextBox|TextColor3|color3|0.0 0.0 0.0
+Folder/IgnoreGuiInset: false/TextBox|TextEditable|bool|1
+Folder/IgnoreGuiInset: false/TextBox|TextScaled|bool|0
+Folder/IgnoreGuiInset: false/TextBox|TextSize|float|14.0
+Folder/IgnoreGuiInset: false/TextBox|TextStrokeColor3|color3|0.0 0.0 0.0
+Folder/IgnoreGuiInset: false/TextBox|TextStrokeTransparency|float|1.0
+Folder/IgnoreGuiInset: false/TextBox|TextTransparency|float|0.0
+Folder/IgnoreGuiInset: false/TextBox|TextTruncate|enum|0
+Folder/IgnoreGuiInset: false/TextBox|TextWrapped|bool|0
+Folder/IgnoreGuiInset: false/TextBox|TextXAlignment|enum|2
+Folder/IgnoreGuiInset: false/TextBox|TextYAlignment|enum|1
+Folder/IgnoreGuiInset: false/TextBox|Visible|bool|1
+Folder/IgnoreGuiInset: false/TextBox|ZIndex|int|1

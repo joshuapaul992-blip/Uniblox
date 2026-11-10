@@ -46,6 +46,8 @@ CORE_SRCS := \
 	src/audio/ub_wav.c \
 	src/render/ub_palette.c \
 	src/world/ub_world.c \
+	src/world/ub_props.c \
+	src/world/ub_classes.c \
 	src/world/ub_rbxl.c \
 	src/world/ub_query.c \
 	src/physics/ub_hull.c \

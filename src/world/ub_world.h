@@ -56,6 +56,58 @@ enum {
 #define UB_INST_SAVED_FLAGS 0x00FF
 #define UB_NO_STRING 0xFFFFFFFFu
 
+/* ------------------------------------------------- typed properties
+ *
+ * Any instance can carry named, typed properties: the GUI's (Size,
+ * BackgroundColor3, Text...), value objects' Value and whatever the importer
+ * or a script stores. They are saved in .ubx files. Strings and sequences
+ * own their memory. Keys are small ids for property names
+ * (ub_world_key). */
+typedef enum {
+    UB_PV_NONE, UB_PV_BOOL, UB_PV_INT, UB_PV_FLOAT, UB_PV_DOUBLE, UB_PV_STRING, UB_PV_ENUM,
+    UB_PV_COLOR3, UB_PV_VECTOR2, UB_PV_VECTOR3, UB_PV_UDIM, UB_PV_UDIM2, UB_PV_RECT, UB_PV_NUMRANGE,
+    UB_PV_NUMSEQ,         /* keypoints of (time, value, envelope) */
+    UB_PV_COLORSEQ,       /* keypoints of (time, r, g, b) */
+    UB_PV_REF,            /* an instance, -1 = nil */
+    UB_PV_FONT,           /* family (a content id), weight 100..900, style 0 normal / 1 italic */
+    UB_PV_BRICKCOLOR,     /* a BrickColor number */
+    UB_PV_COUNT
+} ub_ptype;
+
+typedef struct {
+    u8 type;              /* ub_ptype */
+    union {
+        bool b;
+        i32 i;
+        f32 f;
+        f64 d;
+        u32 e;            /* enum value, BrickColor number */
+        i32 ref;
+        struct { char *s; u32 len; } str;
+        struct { f32 r, g, b; } c3;
+        struct { f32 x, y; } v2;
+        struct { f32 x, y, z; } v3;
+        struct { f32 s; i32 o; } ud;
+        struct { f32 sx; i32 ox; f32 sy; i32 oy; } ud2;
+        struct { f32 x0, y0, x1, y1; } rect;
+        struct { f32 lo, hi; } range;
+        struct { f32 *k; u32 n; } seq;            /* n keypoints, 3 (NUMSEQ) or 4 (COLORSEQ) floats each */
+        struct { char *family; u16 weight; u8 style; } font;
+    } v;
+} ub_value;
+
+typedef struct {
+    u32 key;
+    ub_value val;
+} ub_prop;
+
+typedef struct {
+    ub_prop *p;
+    u16 n, cap;
+} ub_proplist;
+
+#define UB_SEQ_MAX_KEYS 20   /* Roblox allows 20 keypoints */
+
 typedef struct {
     i32 parent;           /* -1 for a top-level instance */
     i32 first_child, last_child, next_sibling;
@@ -107,6 +159,14 @@ typedef struct {
     f32 fallen_height;    /* loose parts that fall below this are removed */
     char name[64];        /* place name, UTF-8 */
     i32 workspace;        /* index of the Workspace instance, -1 if none */
+    /* typed properties: per instance, and the names of their keys */
+    ub_proplist *props;
+    i32 props_cap;
+    u32 *keys;            /* key id -> name (string pool offset) */
+    i32 key_count, key_cap;
+    i32 *key_hash;        /* open addressing: key ids, -1 empty */
+    i32 key_hash_cap;
+    u32 epoch;            /* bumped by every change to the tree, names and properties */
 } ub_world;
 
 void ub_world_init(ub_world *w);
@@ -164,13 +224,54 @@ i32 ub_world_workspace(ub_world *w);
 /* True if `index` is `ancestor` or below it. */
 bool ub_world_is_descendant(const ub_world *w, i32 index, i32 ancestor);
 
+/* ------------------------------------------------------- properties */
+
+/* The key for a property name (made if new); UB_NO_STRING if out of memory. */
+u32 ub_world_key(ub_world *w, const char *name);
+/* The key, or UB_NO_STRING if no property has ever had this name. */
+u32 ub_world_find_key(const ub_world *w, const char *name);
+const char *ub_world_key_name(const ub_world *w, u32 key);
+/* The value, or NULL if the instance has none under that key. Valid until
+ * the instance's properties change. */
+const ub_value *ub_world_prop(const ub_world *w, i32 inst, u32 key);
+const ub_value *ub_world_prop_named(const ub_world *w, i32 inst, const char *name);
+/* Stores a copy (strings and sequences are copied). False if out of
+ * memory or the value is malformed. */
+bool ub_world_set_prop(ub_world *w, i32 inst, u32 key, const ub_value *v);
+bool ub_world_set_prop_named(ub_world *w, i32 inst, const char *name, const ub_value *v);
+void ub_world_remove_prop(ub_world *w, i32 inst, u32 key);
+int ub_world_prop_count(const ub_world *w, i32 inst);
+const ub_prop *ub_world_prop_at(const ub_world *w, i32 inst, int i);
+/* Value helpers (no world needed). */
+void ub_value_free(ub_value *v);
+bool ub_value_copy(ub_value *dst, const ub_value *src);
+bool ub_value_equal(const ub_value *a, const ub_value *b);
+static inline ub_value ub_vbool(bool b) { ub_value v; v.type = UB_PV_BOOL; v.v.d = 0; v.v.b = b; return v; }
+static inline ub_value ub_vint(i32 i) { ub_value v; v.type = UB_PV_INT; v.v.d = 0; v.v.i = i; return v; }
+static inline ub_value ub_vfloat(f32 f) { ub_value v; v.type = UB_PV_FLOAT; v.v.d = 0; v.v.f = f; return v; }
+static inline ub_value ub_venum(u32 e) { ub_value v; v.type = UB_PV_ENUM; v.v.d = 0; v.v.e = e; return v; }
+/* a string value that points at `s` (not owned: only to pass to set_prop) */
+static inline ub_value ub_vstr(const char *s, u32 len)
+{
+    ub_value v;
+    v.type = UB_PV_STRING;
+    v.v.str.s = (char *)s;
+    v.v.str.len = len;
+    return v;
+}
+/* The instance's properties are dropped (when it is reclaimed). */
+void ub_world_clear_props(ub_world *w, i32 inst);
+/* Copies every property of `from` onto `to`. */
+bool ub_world_copy_props(ub_world *w, i32 to, i32 from);
+
 /* ------------------------------------------------------- .ubx place files
  *
  * Little-endian, chunked:  "UBXPLACE" u32 version, then chunks of
  * [4-byte tag][u32 length][payload]: INFO (name), STRS (string pool),
  * INST (instances in tree pre-order, each parent before its children),
  * PART, LITE (lighting), WSPC (gravity, fallen-parts height), WELD (pairs
- * of instance indices), SRCS (scripts' code) and "END ". Instances made
+ * of instance indices), SRCS (scripts' code), PROP (typed properties) and
+ * "END ". Instances made
  * at run time, destroyed or unparented are not saved. Unknown chunks are
  * skipped, so later
  * versions can add data. Saving is deterministic: save -> load -> save
