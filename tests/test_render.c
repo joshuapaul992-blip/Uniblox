@@ -189,6 +189,32 @@ void test_render(void)
             }
         }
 
+        /* See-through: half the pixels are left out (flat and textured), the
+         * box behind shows through them, and depth is not written there. */
+        for (int textured = 0; textured < 2; ++textured) {
+            ub_part_draw glass = part(UB_SHAPE_BOX, v3(0, 0, 0), v3(4, 4, 4), 0xFF0000,
+                                      textured ? UB_MAT_WOOD : UB_MAT_PLASTIC);
+            glass.flags = ub_draw_see_through(128);
+            CHECK(ub_draw_see_level(glass.flags) == 8);
+            ub_part_draw back = part(UB_SHAPE_BOX, v3(0, 0, 6), v3(8, 8, 1), 0x0000FF, UB_MAT_PLASTIC);
+            render_sky(&fb, &cam, &env);
+            sw_begin(&fb, &cam, &env);
+            sw_part(&glass);
+            sw_part(&back); /* drawn after: must still show through the gaps */
+            sw_end(NULL);
+            int red_px = 0, blue_px = 0;
+            for (int y = 100; y < 140; ++y)
+                for (int x = 130; x < 190; ++x) {
+                    u32 c = pass ? ub_palette[g_px8[y * W + x]] : g_px32[y * W + x];
+                    if ((c >> 16 & 255) > (c & 255)) red_px++;
+                    else if ((c & 255) > 100) blue_px++;
+                }
+            CHECK(red_px == 1200 && blue_px == 1200);
+        }
+        ub_part_draw ghost = part(UB_SHAPE_BOX, v3(0, 0, 0), v3(4, 4, 4), 0xFF0000, UB_MAT_PLASTIC);
+        ghost.flags = ub_draw_see_through(255);
+        CHECK(ub_draw_see_level(ghost.flags) == 15 && ub_draw_see_level(ub_draw_see_through(0)) == 0);
+
         /* Two boxes sharing an edge: no gap and no sky between them. */
         ub_part_draw l = part(UB_SHAPE_BOX, v3(-2, 0, 0), v3(4, 4, 4), 0x2050C0, UB_MAT_PLASTIC);
         ub_part_draw r = part(UB_SHAPE_BOX, v3(2, 0, 0), v3(4, 4, 4), 0xC05020, UB_MAT_PLASTIC);

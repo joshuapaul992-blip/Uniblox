@@ -15,8 +15,9 @@
  * or TimeOfDay, GeographicLatitude, Brightness, Ambient, OutdoorAmbient,
  * FogEnd, FogColor. Workspace: Gravity, FallenPartsDestroyHeight. Joints
  * (Weld, ManualWeld, Snap, Glue, Motor, Motor6D, WeldConstraint) become
- * rigid welds; motors do not turn yet. Terrain voxels, decals, textures
- * and scripts are not imported (scripts are kept as plain instances).
+ * rigid welds; motors do not turn yet. Scripts keep their code (Source),
+ * Disabled and RunContext. Terrain voxels, decals and textures are not
+ * imported.
  *
  * Positions and rotations are converted from Roblox's right-handed axes
  * (+Z towards the viewer) to Uniblox's left-handed ones (+Z forward).
@@ -35,6 +36,7 @@ typedef struct {
     u32 classes;          /* distinct classes */
     u32 welds;            /* joints imported as welds */
     u32 joints_skipped;   /* disabled, or naming something that is not a part */
+    u32 scripts;          /* Script, LocalScript and ModuleScript, with their code */
     char compression[32]; /* e.g. "zstd+lz4" */
 } ub_import_stats;
 

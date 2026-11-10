@@ -28,6 +28,7 @@ enum {
     UB_PART_CAN_COLLIDE = 1 << 1,
     UB_PART_PLACEHOLDER = 1 << 2,  /* stands in for a mesh we cannot load */
     UB_PART_GLOW        = 1 << 3,  /* neon: lit at full brightness */
+    UB_PART_REMOVED     = 1 << 4,  /* its instance was destroyed (only while running) */
 };
 
 /* Shapes and materials use the renderer's numbering (ub_shape, ub_material). */
@@ -42,14 +43,28 @@ typedef struct {
     u8 flags;             /* UB_PART_* */
 } ub_part;
 
+/* Instance flags. The low byte is saved; the rest only exists while the
+ * game runs. */
+enum {
+    UB_INST_DISABLED  = 1 << 0,   /* a script that does not run */
+    UB_INST_CLIENT    = 1 << 1,   /* a script for the player's own machine (LocalScript-like) */
+    UB_INST_DESTROYED = 1 << 8,   /* Destroy()ed: gone for good */
+    UB_INST_RUNTIME   = 1 << 9,   /* made by the game (the player's character): never saved */
+    UB_INST_DETACHED  = 1 << 10,  /* not parented (Parent = nil): not saved */
+    UB_INST_FREE      = 1 << 11,  /* an empty slot (reclaimed), reused by the next add */
+};
+#define UB_INST_SAVED_FLAGS 0x00FF
+#define UB_NO_STRING 0xFFFFFFFFu
+
 typedef struct {
     i32 parent;           /* -1 for a top-level instance */
     i32 first_child, last_child, next_sibling;
     u16 cls;              /* ub_class */
-    u16 flags;            /* reserved, saved as-is */
+    u16 flags;            /* UB_INST_* */
     u32 name;             /* offset into the string pool */
     u32 class_name;       /* original class name, e.g. "MeshPart" or "Script" */
     i32 part;             /* index into parts[], or -1 */
+    u32 source;           /* scripts: their code (string pool), or UB_NO_STRING */
 } ub_instance;
 
 typedef struct {
@@ -78,8 +93,13 @@ typedef struct {
     i32 count, cap;
     ub_part *parts;
     i32 part_count, part_cap;
+    i32 *part_inst;       /* part index -> its instance */
+    i32 part_inst_cap;
     char *strings;        /* NUL-terminated strings, back to back */
     u32 str_len, str_cap;
+    u32 *str_cache;       /* recent strings by hash, so repeated names share one copy */
+    i32 *free_inst, *free_part;  /* reclaimed slots, reused first */
+    i32 free_inst_count, free_inst_cap, free_part_count, free_part_cap;
     ub_lighting lighting;
     ub_weld *welds;
     i32 weld_count, weld_cap;
@@ -107,6 +127,36 @@ bool ub_world_add_weld(ub_world *w, i32 a, i32 b);
 
 const char *ub_world_str(const ub_world *w, u32 offset);
 const char *ub_class_name(ub_class c);
+/* ---------------------------------------------------- changing the tree
+ * (what scripts do). Destroying only flags an instance, so its index stays
+ * valid; the slot is reused only once its owner calls ub_world_reclaim. */
+
+/* Moves `inst` under `parent` (-1 = nowhere, i.e. Parent = nil), as its last
+ * child. False if that would make a loop or the instance is destroyed. */
+bool ub_world_set_parent(ub_world *w, i32 inst, i32 parent);
+/* Destroy(): unparents it and flags it and everything below as destroyed. */
+void ub_world_destroy(ub_world *w, i32 inst);
+/* Copies an instance and everything below it (parts, scripts, welds
+ * inside it); the copy has no parent. Returns its index or -1. */
+i32 ub_world_clone(ub_world *w, i32 inst);
+/* Frees the slot of a destroyed instance for reuse (and its part's). Only
+ * when nothing refers to the index any more. Its children are left
+ * without a parent. */
+void ub_world_reclaim(ub_world *w, i32 inst);
+/* Instances in use (not free slots). */
+static inline i32 ub_world_live_count(const ub_world *w) { return w->count - w->free_inst_count; }
+bool ub_world_set_name(ub_world *w, i32 inst, const char *name);
+/* Scripts' code. */
+bool ub_world_set_source(ub_world *w, i32 inst, const char *source);
+const char *ub_world_source(const ub_world *w, i32 inst); /* "" if none */
+/* The instance a part belongs to. */
+i32 ub_world_part_inst(const ub_world *w, i32 part);
+/* True if it is alive: not destroyed. */
+static inline bool ub_world_alive(const ub_world *w, i32 inst)
+{
+    return inst >= 0 && inst < w->count && !(w->inst[inst].flags & UB_INST_DESTROYED);
+}
+
 /* The first child of `parent` with this name, or -1. */
 i32 ub_world_find_child(const ub_world *w, i32 parent, const char *name);
 /* The Workspace instance, created if missing. */
@@ -120,7 +170,9 @@ bool ub_world_is_descendant(const ub_world *w, i32 index, i32 ancestor);
  * [4-byte tag][u32 length][payload]: INFO (name), STRS (string pool),
  * INST (instances in tree pre-order, each parent before its children),
  * PART, LITE (lighting), WSPC (gravity, fallen-parts height), WELD (pairs
- * of instance indices) and "END ". Unknown chunks are skipped, so later
+ * of instance indices), SRCS (scripts' code) and "END ". Instances made
+ * at run time, destroyed or unparented are not saved. Unknown chunks are
+ * skipped, so later
  * versions can add data. Saving is deterministic: save -> load -> save
  * gives identical bytes. */
 

@@ -41,6 +41,10 @@ void ub_world_free(ub_world *w)
     plat_free(w->parts);
     plat_free(w->strings);
     plat_free(w->welds);
+    plat_free(w->part_inst);
+    plat_free(w->str_cache);
+    plat_free(w->free_inst);
+    plat_free(w->free_part);
     ub_world_init(w);
 }
 
@@ -61,9 +65,25 @@ static bool grow(void **p, i32 *cap, i32 need, size_t elem)
     return true;
 }
 
+#define STR_CACHE 4096 /* entries; strings are never changed, so equal ones can share */
+
 static u32 add_string(ub_world *w, const char *s)
 {
     u32 n = (u32)ub_strlen(s) + 1;
+    u32 h = 2166136261u;
+    for (u32 i = 0; i + 1 < n; ++i) h = (h ^ (u8)s[i]) * 16777619u;
+    h &= STR_CACHE - 1;
+    if (!w->str_cache) {
+        w->str_cache = (u32 *)plat_alloc(sizeof(u32) * STR_CACHE);
+        if (w->str_cache)
+            for (int i = 0; i < STR_CACHE; ++i) w->str_cache[i] = 0xFFFFFFFFu;
+    }
+    if (w->str_cache && w->str_cache[h] != 0xFFFFFFFFu) {
+        const char *c = w->strings + w->str_cache[h];
+        u32 i = 0;
+        while (i < n && c[i] == s[i]) ++i;
+        if (i == n) return w->str_cache[h];
+    }
     if (w->str_len + n > w->str_cap) {
         u32 nc = w->str_cap ? w->str_cap * 2 : 1024;
         while (nc < w->str_len + n) nc *= 2;
@@ -79,6 +99,7 @@ static u32 add_string(ub_world *w, const char *s)
     u32 off = w->str_len;
     memcpy(w->strings + off, s, n);
     w->str_len += n;
+    if (w->str_cache) w->str_cache[h] = off;
     return off;
 }
 
@@ -106,7 +127,7 @@ i32 ub_world_add(ub_world *w, i32 parent, ub_class cls, const char *class_name, 
     u32 n = add_string(w, name ? name : "");
     u32 cn = add_string(w, class_name ? class_name : ub_class_name(cls));
     if (n == 0xFFFFFFFFu || cn == 0xFFFFFFFFu) return -1;
-    i32 idx = w->count++;
+    i32 idx = w->free_inst_count > 0 ? w->free_inst[--w->free_inst_count] : w->count++;
     ub_instance *in = &w->inst[idx];
     memset(in, 0, sizeof *in);
     in->first_child = in->last_child = in->next_sibling = -1;
@@ -114,6 +135,7 @@ i32 ub_world_add(ub_world *w, i32 parent, ub_class cls, const char *class_name, 
     in->name = n;
     in->class_name = cn;
     in->part = -1;
+    in->source = UB_NO_STRING;
     link_child(w, parent, idx);
     if (cls == UB_CLASS_WORKSPACE && w->workspace < 0) w->workspace = idx;
     return idx;
@@ -123,10 +145,13 @@ i32 ub_world_add_part(ub_world *w, i32 parent, ub_class cls, const char *class_n
                       const ub_part *part)
 {
     if (!grow((void **)&w->parts, &w->part_cap, w->part_count + 1, sizeof(ub_part))) return -1;
+    if (!grow((void **)&w->part_inst, &w->part_inst_cap, w->part_count + 1, sizeof(i32))) return -1;
     i32 idx = ub_world_add(w, parent, cls, class_name, name);
     if (idx < 0) return -1;
-    w->parts[w->part_count] = *part;
-    w->inst[idx].part = w->part_count++;
+    i32 pi = w->free_part_count > 0 ? w->free_part[--w->free_part_count] : w->part_count++;
+    w->parts[pi] = *part;
+    w->part_inst[pi] = idx;
+    w->inst[idx].part = pi;
     return idx;
 }
 
@@ -139,6 +164,185 @@ bool ub_world_add_weld(ub_world *w, i32 a, i32 b)
     w->welds[w->weld_count].b = b;
     w->weld_count++;
     return true;
+}
+
+/* ------------------------------------------------------ tree changes */
+
+static void unlink_child(ub_world *w, i32 child)
+{
+    ub_instance *c = &w->inst[child];
+    if (c->parent < 0) return;
+    ub_instance *p = &w->inst[c->parent];
+    i32 prev = -1;
+    for (i32 k = p->first_child; k >= 0 && k != child; k = w->inst[k].next_sibling) prev = k;
+    if (prev < 0) p->first_child = c->next_sibling;
+    else w->inst[prev].next_sibling = c->next_sibling;
+    if (p->last_child == child) p->last_child = prev;
+    c->parent = -1;
+    c->next_sibling = -1;
+}
+
+bool ub_world_set_parent(ub_world *w, i32 inst, i32 parent)
+{
+    if (!ub_world_alive(w, inst) || parent >= w->count) return false;
+    if (parent >= 0 && (!ub_world_alive(w, parent) || ub_world_is_descendant(w, parent, inst))) return false;
+    if (w->inst[inst].parent == parent) return true;
+    unlink_child(w, inst);
+    link_child(w, parent, inst);
+    if (parent >= 0) w->inst[inst].flags &= (u16)~UB_INST_DETACHED;
+    else w->inst[inst].flags |= UB_INST_DETACHED;
+    return true;
+}
+
+void ub_world_destroy(ub_world *w, i32 inst)
+{
+    if (!ub_world_alive(w, inst)) return;
+    ub_world_set_parent(w, inst, -1);
+    /* flag the whole subtree (children stay linked, so walk it) */
+    i32 stack_small[64];
+    i32 *stack = stack_small, cap = 64, sp = 0;
+    stack[sp++] = inst;
+    while (sp > 0) {
+        i32 i = stack[--sp];
+        w->inst[i].flags |= UB_INST_DESTROYED;
+        if (w->inst[i].part >= 0) w->parts[w->inst[i].part].flags |= UB_PART_REMOVED;
+        for (i32 c = w->inst[i].first_child; c >= 0; c = w->inst[c].next_sibling) {
+            if (sp == cap) {
+                i32 *ns = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap * 2);
+                if (!ns) break;
+                memcpy(ns, stack, sizeof(i32) * (size_t)cap);
+                if (stack != stack_small) plat_free(stack);
+                stack = ns;
+                cap *= 2;
+            }
+            stack[sp++] = c;
+        }
+    }
+    if (stack != stack_small) plat_free(stack);
+}
+
+static bool push_free(i32 **list, i32 *count, i32 *cap, i32 v)
+{
+    if (!grow((void **)list, cap, *count + 1, sizeof(i32))) return false;
+    (*list)[(*count)++] = v;
+    return true;
+}
+
+void ub_world_reclaim(ub_world *w, i32 inst)
+{
+    if (inst < 0 || inst >= w->count) return;
+    ub_instance *in = &w->inst[inst];
+    if (!(in->flags & UB_INST_DESTROYED) || (in->flags & UB_INST_FREE)) return;
+    if (!grow((void **)&w->free_inst, &w->free_inst_cap, w->free_inst_count + 1, sizeof(i32))) return;
+    if (in->part >= 0 && !push_free(&w->free_part, &w->free_part_count, &w->free_part_cap, in->part)) return;
+    unlink_child(w, inst);
+    for (i32 c = in->first_child; c >= 0;) {
+        i32 next = w->inst[c].next_sibling;
+        w->inst[c].parent = -1;
+        w->inst[c].next_sibling = -1;
+        c = next;
+    }
+    if (in->part >= 0) {
+        w->part_inst[in->part] = -1;
+        w->parts[in->part].flags = UB_PART_REMOVED;
+        w->parts[in->part].transparency = 255;
+    }
+    for (i32 k = 0; k < w->weld_count;) { /* welds to it go (they would join whatever reuses the slot) */
+        if (w->welds[k].a == inst || w->welds[k].b == inst) w->welds[k] = w->welds[--w->weld_count];
+        else ++k;
+    }
+    in->first_child = in->last_child = in->next_sibling = in->parent = -1;
+    in->part = -1;
+    in->source = UB_NO_STRING;
+    in->flags = UB_INST_DESTROYED | UB_INST_FREE;
+    w->free_inst[w->free_inst_count++] = inst;
+}
+
+i32 ub_world_clone(ub_world *w, i32 inst)
+{
+    if (!ub_world_alive(w, inst)) return -1;
+    i32 old_count = w->count;
+    i32 *map = (i32 *)plat_alloc(sizeof(i32) * (size_t)(old_count + 1));
+    i32 *stack = (i32 *)plat_alloc(sizeof(i32) * 2 * (size_t)(old_count + 1));
+    if (!map || !stack) {
+        plat_free(map);
+        plat_free(stack);
+        return -1;
+    }
+    for (i32 i = 0; i < old_count; ++i) map[i] = -1;
+    i32 root = -1, sp = 0;
+    stack[sp++] = inst;
+    stack[sp++] = -1; /* (instance, new parent) pairs */
+    while (sp > 0) {
+        i32 np = stack[--sp], i = stack[--sp];
+        ub_instance src = w->inst[i]; /* copy: adding may move the array */
+        i32 ni;
+        if (src.part >= 0) {
+            ub_part p = w->parts[src.part];
+            p.flags &= (u8)~UB_PART_REMOVED;
+            ni = ub_world_add_part(w, np, (ub_class)src.cls, NULL, NULL, &p);
+        } else {
+            ni = ub_world_add(w, np, (ub_class)src.cls, NULL, NULL);
+        }
+        if (ni < 0) break;
+        ub_instance *d = &w->inst[ni];
+        d->name = src.name; /* the pool never changes, so share the strings */
+        d->class_name = src.class_name;
+        d->source = src.source;
+        d->flags = (u16)(src.flags & UB_INST_SAVED_FLAGS);
+        map[i] = ni;
+        if (root < 0) {
+            root = ni;
+            d->flags |= UB_INST_DETACHED;
+        }
+        /* children in reverse so they keep their order */
+        i32 kids = 0;
+        for (i32 c = src.first_child; c >= 0; c = w->inst[c].next_sibling) kids++;
+        i32 base = sp, k = 0;
+        sp += 2 * kids;
+        for (i32 c = src.first_child; c >= 0; c = w->inst[c].next_sibling, ++k) {
+            stack[base + 2 * (kids - 1 - k)] = c;
+            stack[base + 2 * (kids - 1 - k) + 1] = ni;
+        }
+    }
+    /* welds whose two parts were both copied */
+    i32 nw = w->weld_count;
+    for (i32 k = 0; k < nw; ++k) {
+        i32 a = w->welds[k].a, b = w->welds[k].b;
+        if (a < old_count && b < old_count && map[a] >= 0 && map[b] >= 0) ub_world_add_weld(w, map[a], map[b]);
+    }
+    plat_free(map);
+    plat_free(stack);
+    return root;
+}
+
+bool ub_world_set_name(ub_world *w, i32 inst, const char *name)
+{
+    if (inst < 0 || inst >= w->count) return false;
+    u32 n = add_string(w, name ? name : "");
+    if (n == 0xFFFFFFFFu) return false;
+    w->inst[inst].name = n;
+    return true;
+}
+
+bool ub_world_set_source(ub_world *w, i32 inst, const char *source)
+{
+    if (inst < 0 || inst >= w->count) return false;
+    u32 n = add_string(w, source ? source : "");
+    if (n == 0xFFFFFFFFu) return false;
+    w->inst[inst].source = n;
+    return true;
+}
+
+const char *ub_world_source(const ub_world *w, i32 inst)
+{
+    if (inst < 0 || inst >= w->count || w->inst[inst].source == UB_NO_STRING) return "";
+    return ub_world_str(w, w->inst[inst].source);
+}
+
+i32 ub_world_part_inst(const ub_world *w, i32 part)
+{
+    return part >= 0 && part < w->part_count && w->part_inst ? w->part_inst[part] : -1;
 }
 
 i32 ub_world_find_child(const ub_world *w, i32 parent, const char *name)
@@ -265,9 +469,11 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
         plat_free(stack);
         return false;
     }
+    /* made at run time, destroyed or unparented: not part of the place */
+    const u16 skip = UB_INST_DESTROYED | UB_INST_RUNTIME | UB_INST_DETACHED;
     i32 n = 0;
     for (i32 root = 0; root < w->count; ++root) {
-        if (w->inst[root].parent >= 0) continue;
+        if (w->inst[root].parent >= 0 || (w->inst[root].flags & skip)) continue;
         i32 sp = 0;
         stack[sp++] = root;
         while (sp > 0) {
@@ -275,14 +481,16 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
             order[n++] = i;
             /* push children in reverse so they pop in order */
             i32 kids = 0;
-            for (i32 c = w->inst[i].first_child; c >= 0; c = w->inst[c].next_sibling) kids++;
+            for (i32 c = w->inst[i].first_child; c >= 0; c = w->inst[c].next_sibling)
+                kids += !(w->inst[c].flags & skip);
             i32 base = sp;
             sp += kids;
             i32 k = 0;
             for (i32 c = w->inst[i].first_child; c >= 0; c = w->inst[c].next_sibling)
-                stack[base + kids - 1 - k++] = c;
+                if (!(w->inst[c].flags & skip)) stack[base + kids - 1 - k++] = c;
         }
     }
+    for (i32 i = 0; i < w->count; ++i) remap[i] = -1;
     for (i32 i = 0; i < n; ++i) remap[order[i]] = i;
 
     buf b = { 0 };
@@ -307,7 +515,7 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
         const ub_instance *in = &w->inst[order[k]];
         put_u32(&b, (u32)(in->parent >= 0 ? remap[in->parent] : -1));
         put_u16(&b, in->cls);
-        put_u16(&b, in->flags);
+        put_u16(&b, in->flags & UB_INST_SAVED_FLAGS);
         put_u32(&b, in->name);
         put_u32(&b, in->class_name);
         put_u32(&b, (u32)(in->part >= 0 ? parts_written++ : -1)); /* parts renumbered in tree order */
@@ -348,10 +556,24 @@ bool ub_ubx_save(const ub_world *w, u8 **data, u32 *size)
     chunk_end(&b, c);
 
     c = chunk_begin(&b, "WELD");
-    put_u32(&b, (u32)w->weld_count);
+    u32 saved_welds = 0;
+    for (i32 k = 0; k < w->weld_count; ++k) saved_welds += remap[w->welds[k].a] >= 0 && remap[w->welds[k].b] >= 0;
+    put_u32(&b, saved_welds);
     for (i32 k = 0; k < w->weld_count; ++k) {
+        if (remap[w->welds[k].a] < 0 || remap[w->welds[k].b] < 0) continue;
         put_u32(&b, (u32)remap[w->welds[k].a]);
         put_u32(&b, (u32)remap[w->welds[k].b]);
+    }
+    chunk_end(&b, c);
+
+    c = chunk_begin(&b, "SRCS");
+    u32 nsrc = 0;
+    for (i32 k = 0; k < n; ++k) nsrc += w->inst[order[k]].source != UB_NO_STRING;
+    put_u32(&b, nsrc);
+    for (i32 k = 0; k < n; ++k) { /* (instance, string offset): the code is in STRS */
+        if (w->inst[order[k]].source == UB_NO_STRING) continue;
+        put_u32(&b, (u32)k);
+        put_u32(&b, w->inst[order[k]].source);
     }
     chunk_end(&b, c);
 
@@ -435,8 +657,8 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
     u32 inst_count = 0, part_count = 0;
     const u8 *inst_p = NULL;
     u32 inst_len = 0;
-    const u8 *weld_p = NULL;
-    u32 weld_count = 0;
+    const u8 *weld_p = NULL, *src_p = NULL;
+    u32 weld_count = 0, src_len = 0;
     while (!ended) {
         if (top.len - top.pos < 8) return UB_LOAD_CORRUPT;
         const u8 *tag = top.p + top.pos;
@@ -504,6 +726,9 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
             weld_count = get_u32(&r);
             if (r.bad || weld_count > (len - 4) / 8 || (len - 4) != weld_count * 8) return UB_LOAD_CORRUPT;
             weld_p = r.p + 4;
+        } else if (memcmp(tag, "SRCS", 4) == 0) {
+            src_p = r.p;
+            src_len = len;
         } else if (memcmp(tag, "END ", 4) == 0) {
             ended = true;
         }
@@ -542,15 +767,36 @@ ub_load_result ub_ubx_load(ub_world *w, const u8 *data, u32 size)
         ub_instance *in = &w->inst[i];
         in->first_child = in->last_child = in->next_sibling = -1;
         in->cls = (u16)cls;
-        in->flags = (u16)flags;
+        in->flags = (u16)(flags & UB_INST_SAVED_FLAGS);
         in->name = name;
         in->class_name = cname;
         in->part = part;
+        in->source = UB_NO_STRING;
         w->count = (i32)i + 1;
         link_child(w, parent, (i32)i);
         if (cls == UB_CLASS_WORKSPACE && w->workspace < 0) w->workspace = (i32)i;
     }
     plat_free(part_used);
+    if (part_count) {
+        w->part_inst = (i32 *)plat_alloc(sizeof(i32) * part_count);
+        if (!w->part_inst) return UB_LOAD_NO_MEMORY;
+        w->part_inst_cap = (i32)part_count;
+        for (u32 i = 0; i < part_count; ++i) w->part_inst[i] = -1;
+        for (i32 i = 0; i < w->count; ++i)
+            if (w->inst[i].part >= 0) w->part_inst[w->inst[i].part] = i;
+    }
+
+    /* scripts' code */
+    if (src_p) {
+        rd sr = { src_p, src_len, 0, false };
+        u32 nsrc = get_u32(&sr);
+        if (sr.bad || nsrc > (src_len - 4) / 8) return UB_LOAD_CORRUPT;
+        for (u32 i = 0; i < nsrc; ++i) {
+            u32 at = get_u32(&sr), off = get_u32(&sr);
+            if (at >= inst_count || off >= w->str_len || (off > 0 && w->strings[off - 1] != 0)) return UB_LOAD_CORRUPT;
+            w->inst[at].source = off;
+        }
+    }
 
     /* welds last: they refer to instances by index */
     rd wr = { weld_p, weld_count * 8, 0, false };

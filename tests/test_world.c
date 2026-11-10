@@ -475,8 +475,118 @@ static void test_raycast(void)
     ub_world_free(&w);
 }
 
+/* ------------------------------------------------- changing the tree */
+
+static void test_mutation(void)
+{
+    ub_world w;
+    build_sample(&w);
+    i32 house = ub_world_find_child(&w, w.workspace, "House");
+    i32 wall0 = ub_world_find_child(&w, house, "Wall0"), wall1 = ub_world_find_child(&w, house, "Wall1");
+    i32 wall2 = ub_world_find_child(&w, house, "Wall2");
+    CHECK(house >= 0 && wall0 >= 0 && wall1 >= 0 && wall2 >= 0);
+    /* every part knows its instance */
+    for (i32 i = 0; i < w.count; ++i)
+        if (w.inst[i].part >= 0) CHECK(ub_world_part_inst(&w, w.inst[i].part) == i);
+    /* reparent: Wall1 moves to the Workspace, the house keeps the others in order */
+    CHECK(ub_world_set_parent(&w, wall1, w.workspace));
+    CHECK(w.inst[wall1].parent == w.workspace && w.inst[w.workspace].last_child == wall1);
+    CHECK(w.inst[house].first_child == wall0 && w.inst[wall0].next_sibling == wall2);
+    CHECK(!ub_world_set_parent(&w, house, wall0));   /* into its own child: a loop */
+    CHECK(!ub_world_set_parent(&w, w.workspace, house));
+    /* clone the house: parts, names, the weld inside it */
+    CHECK(ub_world_set_parent(&w, wall1, house));
+    i32 parts_before = w.part_count, welds_before = w.weld_count;
+    i32 copy = ub_world_clone(&w, house);
+    CHECK(copy >= 0 && w.inst[copy].parent == -1 && (w.inst[copy].flags & UB_INST_DETACHED));
+    CHECK(w.part_count == parts_before + 3 && w.weld_count == welds_before + 1);
+    i32 cw0 = ub_world_find_child(&w, copy, "Wall0");
+    CHECK(cw0 >= 0 && cw0 != wall0 && memcmp(&w.parts[w.inst[cw0].part], &w.parts[w.inst[wall0].part], sizeof(ub_part)) == 0);
+    CHECK(strcmp(ub_world_str(&w, w.inst[ub_world_find_child(&w, ub_world_find_child(&w, copy, "Bits"), "Door script")].class_name), "Script") == 0);
+    CHECK(ub_world_set_name(&w, copy, "House2") && ub_world_set_parent(&w, copy, w.workspace));
+    CHECK(!(w.inst[copy].flags & UB_INST_DETACHED));
+    /* destroy: the subtree is gone, its parts flagged, and it is not saved */
+    i32 door = ub_world_find_child(&w, ub_world_find_child(&w, house, "Bits"), "Door script");
+    CHECK(ub_world_set_source(&w, door, "print('hi')") && strcmp(ub_world_source(&w, door), "print('hi')") == 0);
+    ub_world_destroy(&w, wall2);
+    CHECK(!ub_world_alive(&w, wall2) && (w.parts[w.inst[wall2].part].flags & UB_PART_REMOVED));
+    CHECK(!ub_world_set_parent(&w, wall2, w.workspace)); /* destroyed for good */
+    i32 temp = ub_world_add(&w, -1, UB_CLASS_FOLDER, NULL, "Temp");
+    w.inst[temp].flags |= UB_INST_DETACHED;
+    i32 rt = ub_world_add(&w, w.workspace, UB_CLASS_MODEL, NULL, "Player1");
+    w.inst[rt].flags |= UB_INST_RUNTIME;
+    u8 *d1, *d2;
+    u32 n1, n2;
+    CHECK(ub_ubx_save(&w, &d1, &n1));
+    ub_world b;
+    ub_world_init(&b);
+    CHECK(ub_ubx_load(&b, d1, n1) == UB_LOAD_OK);
+    CHECK(ub_ubx_save(&b, &d2, &n2) && n1 == n2 && memcmp(d1, d2, n1) == 0);
+    i32 bh = ub_world_find_child(&b, b.workspace, "House");
+    CHECK(bh >= 0 && ub_world_find_child(&b, bh, "Wall2") < 0 && ub_world_find_child(&b, b.workspace, "House2") >= 0);
+    CHECK(ub_world_find_child(&b, -1, "Temp") < 0 && ub_world_find_child(&b, b.workspace, "Player1") < 0);
+    i32 bdoor = ub_world_find_child(&b, ub_world_find_child(&b, bh, "Bits"), "Door script");
+    CHECK(bdoor >= 0 && strcmp(ub_world_source(&b, bdoor), "print('hi')") == 0);
+    CHECK(b.weld_count == 2); /* the original and the copy's */
+    for (i32 i = 0; i < b.count; ++i)
+        if (b.inst[i].part >= 0) CHECK(ub_world_part_inst(&b, b.inst[i].part) == i);
+    free(d1);
+    free(d2);
+    ub_world_free(&b);
+
+    /* reclaiming: a destroyed instance's slots (and its part's) are reused,
+     * its children lose their parent, welds to it go */
+    i32 cwall0 = ub_world_find_child(&w, copy, "Wall0"), cwall1 = ub_world_find_child(&w, copy, "Wall1");
+    i32 old_count = w.count, old_parts = w.part_count, welds = w.weld_count;
+    i32 cpart = w.inst[cwall0].part;
+    ub_world_reclaim(&w, cwall0); /* not destroyed: refused */
+    CHECK(ub_world_alive(&w, cwall0) && w.free_inst_count == 0);
+    ub_world_destroy(&w, copy);
+    ub_world_reclaim(&w, cwall0);
+    ub_world_reclaim(&w, cwall0); /* twice: no effect */
+    CHECK(w.free_inst_count == 1 && w.free_part_count == 1 && w.weld_count == welds - 1);
+    ub_world_reclaim(&w, copy);
+    CHECK(w.inst[cwall1].parent == -1 && !ub_world_alive(&w, cwall1));
+    CHECK(ub_world_live_count(&w) == old_count - 2);
+    ub_part np;
+    memset(&np, 0, sizeof np);
+    np.rot = mat3_identity();
+    np.size = v3(1, 1, 1);
+    i32 fresh = ub_world_add_part(&w, w.workspace, UB_CLASS_PART, NULL, "Fresh", &np);
+    CHECK(fresh == copy && w.inst[fresh].part == cpart && w.count == old_count && w.part_count == old_parts);
+    CHECK(ub_world_alive(&w, fresh) && ub_world_part_inst(&w, cpart) == fresh && w.inst[fresh].first_child == -1);
+    CHECK(ub_world_find_child(&w, w.workspace, "Fresh") == fresh && w.parts[cpart].flags == 0);
+    i32 fresh2 = ub_world_add(&w, w.workspace, UB_CLASS_FOLDER, NULL, "Fresh2");
+    CHECK(fresh2 == cwall0 && w.inst[fresh2].part == -1 && w.free_inst_count == 0);
+    /* equal names share the string pool */
+    u32 before = w.str_len;
+    for (int i = 0; i < 100; ++i) CHECK(ub_world_set_name(&w, fresh2, "Same name"));
+    CHECK(w.str_len <= before + 10);
+    CHECK(ub_ubx_save(&w, &d1, &n1));
+    ub_world_init(&b);
+    CHECK(ub_ubx_load(&b, d1, n1) == UB_LOAD_OK && ub_world_find_child(&b, b.workspace, "Same name") >= 0);
+    free(d1);
+    ub_world_free(&b);
+    ub_world_free(&w);
+
+    /* a Roblox ModuleScript keeps its code */
+    u32 n;
+    u8 *data = load_file("tests/data/rbx/modulescript.rbxm", &n);
+    CHECK(data != NULL);
+    if (data) {
+        ub_world_init(&w);
+        ub_import_stats st;
+        CHECK(ub_rbxl_load(&w, data, n, &st) == UB_LOAD_OK && st.scripts == 1);
+        i32 ms = ub_world_find_child(&w, w.workspace, "ModuleScript");
+        CHECK(ms >= 0 && strcmp(ub_world_source(&w, ms), "local module = {}\n\nreturn module\n") == 0);
+        ub_world_free(&w);
+        free(data);
+    }
+}
+
 void test_world(void)
 {
+    test_mutation();
     test_raycast();
     test_special_rotations();
     test_ubx();

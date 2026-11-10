@@ -1,9 +1,17 @@
 /* Uniblox - minimal platform layer for host (Linux) unit tests.
  * Single-threaded; files always fail; memory comes from libc. */
+#define _POSIX_C_SOURCE 199309L
 #include <stdlib.h>
+#include <time.h>
 #include "platform/platform.h"
 
-u64 plat_time_us(void) { return 0; }
+/* A real clock: the script time limit is measured with it. */
+u64 plat_time_us(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (u64)t.tv_sec * 1000000u + (u64)t.tv_nsec / 1000u;
+}
 
 void plat_local_time(ub_datetime *out)
 {

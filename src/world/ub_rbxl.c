@@ -153,6 +153,7 @@ static f32 roblox_float(u32 v)
 typedef enum {
     K_OTHER, K_WORKSPACE, K_LIGHTING, K_FOLDER, K_MODEL,
     K_PART, K_WEDGE, K_CORNER, K_TRUSS, K_SPAWN, K_SEAT, K_MESH, K_NEGATE, K_TERRAIN,
+    K_SCRIPT, K_LOCALSCRIPT, K_MODULESCRIPT,
     K_JOINT,             /* Weld, Snap, Motor6D...: Part0 + Part1 */
     K_WELD_CONSTRAINT,   /* WeldConstraint: Part0Internal + Part1Internal */
 } kind;
@@ -183,6 +184,9 @@ typedef struct {
     bool parented;
     i32 part0, part1;    /* joints: referents of the joined parts, -1 = none */
     u8 joint_on;         /* joints: Enabled */
+    u32 source;          /* scripts: offset of their code in the name pool, 0xFFFFFFFF = none */
+    u8 disabled;         /* scripts */
+    u8 run_context;      /* scripts: 0 legacy, 1 server, 2 client */
 } rec;
 
 typedef struct {
@@ -219,9 +223,17 @@ static i32 map_get(const importer *im, i32 ref)
     return -1;
 }
 
+static u32 add_text(importer *im, const u8 *s, u32 n, bool keep_nul);
+
 static u32 add_name(importer *im, const u8 *s, u32 n)
 {
     if (n > 200) n = 200;
+    return add_text(im, s, n, false);
+}
+
+/* Appends text to the name pool (NULs become '?' unless kept). */
+static u32 add_text(importer *im, const u8 *s, u32 n, bool keep_nul)
+{
     if (im->names_len + n + 1 > im->names_cap) {
         u32 nc = im->names_cap ? im->names_cap * 2 : 65536;
         while (nc < im->names_len + n + 1) nc *= 2;
@@ -235,7 +247,7 @@ static u32 add_name(importer *im, const u8 *s, u32 n)
         im->names_cap = nc;
     }
     u32 off = im->names_len;
-    for (u32 i = 0; i < n; ++i) im->names[off + i] = s[i] ? (char)s[i] : '?';
+    for (u32 i = 0; i < n; ++i) im->names[off + i] = s[i] || keep_nul ? (char)s[i] : '?';
     im->names[off + n] = 0;
     im->names_len += n + 1;
     return off;
@@ -254,6 +266,7 @@ static kind classify(const char *n)
         { "Weld", K_JOINT }, { "ManualWeld", K_JOINT }, { "Snap", K_JOINT }, { "Glue", K_JOINT },
         { "ManualGlue", K_JOINT }, { "Motor", K_JOINT }, { "Motor6D", K_JOINT }, { "VelocityMotor", K_JOINT },
         { "WeldConstraint", K_WELD_CONSTRAINT },
+        { "Script", K_SCRIPT }, { "LocalScript", K_LOCALSCRIPT }, { "ModuleScript", K_MODULESCRIPT },
     };
     for (int i = 0; i < UB_ARRAY_COUNT(table); ++i) {
         const char *a = n, *b = table[i].name;
@@ -337,6 +350,7 @@ static ub_load_result chunk_inst(importer *im, rd *r)
         e->can_collide = 1;
         e->part0 = e->part1 = -1;
         e->joint_on = 1;
+        e->source = 0xFFFFFFFFu;
         if (map_get(im, acc) >= 0) {
             plat_free(refs);
             return UB_LOAD_CORRUPT; /* duplicate referent */
@@ -370,6 +384,30 @@ static ub_load_result chunk_prop(importer *im, rd *r)
         return UB_LOAD_OK;
     }
     bool joint = c->k == K_JOINT || c->k == K_WELD_CONSTRAINT, ws = c->k == K_WORKSPACE;
+    bool script = c->k == K_SCRIPT || c->k == K_LOCALSCRIPT || c->k == K_MODULESCRIPT;
+    if (script) {
+        if (type == 0x01 && name_is(pname, pl, "Source")) {
+            for (u32 i = 0; i < n; ++i) {
+                u32 sl;
+                const u8 *src = rd_str(r, &sl);
+                if (!src) return UB_LOAD_CORRUPT;
+                recs[i].source = add_text(im, src, sl, false);
+                if (recs[i].source == 0xFFFFFFFFu) return UB_LOAD_NO_MEMORY;
+            }
+        } else if (type == 0x02 && name_is(pname, pl, "Disabled")) {
+            if (!need(r, n)) return UB_LOAD_CORRUPT;
+            for (u32 i = 0; i < n; ++i) recs[i].disabled = r->p[r->pos + i] != 0;
+            r->pos += n;
+        } else if (type == 0x12 && name_is(pname, pl, "RunContext")) {
+            u32 *tmp = (u32 *)plat_alloc(sizeof(u32) * (n + 1));
+            if (!tmp) return UB_LOAD_NO_MEMORY;
+            bool okr = rd_interleaved32(r, n, tmp);
+            for (u32 i = 0; okr && i < n; ++i) recs[i].run_context = (u8)(tmp[i] <= 2 ? tmp[i] : 0);
+            plat_free(tmp);
+            if (!okr) return UB_LOAD_CORRUPT;
+        }
+        return UB_LOAD_OK;
+    }
     if (!part && !light && !joint && !ws) return UB_LOAD_OK;
 
     /* scratch for interleaved arrays: up to three values per instance */
@@ -619,6 +657,14 @@ static ub_load_result build_world(importer *im, ub_world *w, ub_import_stats *st
                 else st->parts++;
             } else {
                 wi = ub_world_add(w, wparent, wc, c->name, name);
+            }
+            if (wi >= 0 && (c->k == K_SCRIPT || c->k == K_LOCALSCRIPT || c->k == K_MODULESCRIPT)) {
+                if (e->source != 0xFFFFFFFFu && !ub_world_set_source(w, wi, im->names + e->source)) wi = -1;
+                else if (wi >= 0) {
+                    if (e->disabled) w->inst[wi].flags |= UB_INST_DISABLED;
+                    if (c->k == K_LOCALSCRIPT || e->run_context == 2) w->inst[wi].flags |= UB_INST_CLIENT;
+                    st->scripts++;
+                }
             }
             if (c->k == K_TERRAIN) st->terrain++;
             if (wi < 0) {

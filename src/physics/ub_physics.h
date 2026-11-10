@@ -50,15 +50,20 @@ typedef struct {
     u8 awake, fallen, has_target;
     f32 sleep_time;
     i32 sleep_next, sleep_head;   /* the group it went to sleep with */
+    u32 woke_step;        /* step it last woke: contacts that come back then are not new touches */
 } ub_body;
 
-enum { UB_SHAPE_COLLIDES = 1 };
+enum {
+    UB_SHAPE_COLLIDES = 1,  /* solid */
+    UB_SHAPE_SENSOR = 2,    /* not solid, but reports touches (CanCollide off, watched by a script) */
+};
 
 typedef struct {
     i32 body;
     i32 part;             /* world part index, -1 for none (the character) */
     u8 shape;             /* ub_shape (UB_SHAPE_BALL = sphere) */
-    u8 flags;             /* UB_SHAPE_COLLIDES */
+    u8 flags;             /* UB_SHAPE_* */
+    u8 in_dyn;            /* listed in the moving shapes */
     vec3 size;
     f32 radius;           /* spheres */
     f32 bound;            /* radius of a sphere around the shape */
@@ -71,6 +76,12 @@ typedef struct {
 } ub_pshape;
 
 typedef struct ub_manifold ub_manifold;
+
+/* Two parts that started touching (world part indices; -1 = no part, i.e.
+ * the character). */
+typedef struct {
+    i32 a, b;
+} ub_touch;
 typedef struct ub_bvh_node ub_bvh_node;
 
 typedef struct {
@@ -89,6 +100,8 @@ typedef struct {
 
     ub_body *bodies;
     i32 body_count, body_cap;
+    i32 *free_body;       /* emptied one-shape bodies, reused for new parts */
+    i32 free_body_count, free_body_ready, free_body_cap; /* [0, ready) usable; the rest after the next step */
     ub_pshape *shapes;
     i32 shape_count, shape_cap;
     i32 *part_shape;      /* world part -> shape, -1 if not simulated */
@@ -112,6 +125,12 @@ typedef struct {
     i32 *scratch;         /* per-body scratch (islands) */
     f32 *scratch_f;
     i32 scratch_cap, scratch_f_cap;
+
+    /* touches that began in the last step */
+    ub_touch *touches;
+    i32 touch_count, touch_cap;
+    u64 *sensor_keys, *sensor_prev;   /* sensor pairs touching (sorted) */
+    i32 sensor_count, sensor_cap, sensor_prev_count, sensor_prev_cap;
 
     ub_phys_stats stats;
     bool all_asleep_logged;
@@ -148,6 +167,13 @@ vec3 ub_phys_point_velocity(const ub_physics *ph, i32 body, vec3 point);
 /* Nearest collidable shape along the ray (dir normalised), skipping one
  * body (-1 = none). */
 bool ub_phys_raycast(const ub_physics *ph, vec3 origin, vec3 dir, f32 max_dist, i32 ignore_body, ub_phys_hit *hit);
+
+/* After a script changes a part (or adds one): brings the simulation in
+ * line with it. `alive`: in the Workspace and not destroyed. `sensor`:
+ * report its touches even if it is not solid. Moving an anchored part makes
+ * it kinematic, so it pushes what it moves into. */
+void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor);
+void ub_phys_set_gravity(ub_physics *ph, f32 gravity);
 
 /* The body a part belongs to (0 = static), or -1 if it is not simulated. */
 i32 ub_phys_part_body(const ub_physics *ph, i32 part);

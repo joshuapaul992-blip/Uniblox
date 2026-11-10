@@ -67,7 +67,9 @@ stop_game() {
 
 # Run 1: exercise input, then quit (which saves uniblox.cfg).
 start_game
-xdotool keydown w; sleep 0.4; xdotool keyup w           # move
+xdotool keydown w; sleep 1.3                            # walk into the scripted door...
+import -window root "${SHOT%.png}-door.png"              # (open: see-through)
+sleep 0.3; xdotool keyup w                              # ...and through it
 xdotool keydown space; sleep 0.1; xdotool keyup space   # jump
 sleep 0.8
 xdotool key --delay 0 Return h i Return                 # chat text, all in one burst
@@ -133,6 +135,12 @@ expect "$RUN2" "saved places/castle-generated.ubx" "F7 saved the place as .ubx"
 expect "$LOG" "loaded place \"places/castle-generated.ubx\"" "place= in the settings opened the saved .ubx"
 expect "$LOG" "shutdown complete" "third run shut down cleanly"
 expect "$CFG" "place=places/castle-generated.ubx" "place= kept when settings are rewritten"
+expect "$RUN1" "script(s) running" "the demo's scripts started"
+expect "$RUN1" "script: Welcome, Player1" "a script greeted the player (PlayerAdded)"
+expect "$RUN1" "script: Player1 opened the door" "walking into the door opened it (Touched)"
+if grep -E "script: .*(attempt to|is not a valid|was stopped|error)" "$RUN1" "$RUN2" "$LOG"; then
+    echo "  FAIL  a script failed"; fail=1
+else echo "  ok    no script errors"; fi
 expect "$RUN1" "jump 1" "space bar jumped"
 expect "$RUN1" "typed: hi" "typed text received"
 expect "$RUN1" "click 1 at" "left click received"
@@ -156,6 +164,6 @@ expect "$CFG" "zoom=14" "mouse wheel zoomed in 3 notches (22 -> 14)"
 if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
 else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
 grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$RUN1" | sed 's/^/  /' || true
-echo "Screenshots: $SHOT, ${SHOT%.png}-fullscreen.png"
+echo "Screenshots: $SHOT, ${SHOT%.png}-door.png, ${SHOT%.png}-fullscreen.png"
 echo "Logs:       $RUN1, $RUN2, $LOG"
 exit $fail

@@ -115,6 +115,62 @@ spawn point.
 The demo place has a tower of loose blocks, a pyramid of crates, three
 balls in the house, a welded cart and a spinning block to try it on.
 
+## Scripting
+
+Places run their own Lua scripts, written the way Roblox scripts are.
+Scripts in a place you import from Roblox run too.
+
+```lua
+local door = script.Parent
+door.Touched:Connect(function(hit)
+	if hit.Parent:FindFirstChildOfClass("Humanoid") then
+		door.Transparency = 0.7
+		door.CanCollide = false
+		task.wait(3)
+		door.Transparency = 0
+		door.CanCollide = true
+	end
+end)
+```
+
+- **Language:** Lua 5.1, plus the Luau additions scripts use most:
+  `+= -= *= /= %= ^= ..=`, `continue`, `typeof`, `table.find`/`clear`/`pack`,
+  `string.split`, `math.clamp`/`sign`/`round`, and `pcall` that can wait.
+- **Scripts that run:** every `Script` in the Workspace or
+  ServerScriptService that isn't disabled. ModuleScripts load with
+  `require`. LocalScripts don't run yet.
+- **The API:** instances with their properties, methods and events
+  (`Touched`, `Changed`, `ChildAdded`, `GetPropertyChangedSignal`...),
+  `Instance.new`, `Clone`, `Destroy`, attributes, `game:GetService`,
+  `Players` and the player's character with its `Humanoid` (health, walk
+  speed, jump power, `Died`), `RunService` events, `TweenService`, `Debris`,
+  `workspace:Raycast`, `Lighting`. The types are `Vector3`, `CFrame`,
+  `Color3`, `BrickColor`, `Enum`, `TweenInfo`, `Ray` and `RaycastParams`.
+  Scheduling uses `wait`, `task.wait`/`spawn`/`defer`/`delay`/`cancel`,
+  `spawn` and `delay`. Positions use Roblox's axes, so coordinates copied
+  from Studio mean the same thing.
+- **Things Uniblox doesn't do yet don't crash scripts.** Properties it
+  doesn't simulate are kept and read back. Services that need the internet
+  (HTTP, marketplace, teleport) raise an error, as they do when they're
+  offline in Roblox. DataStores keep their data until you quit.
+- **Hostile scripts can't hurt the game.** There are no files, no OS
+  access, no `loadstring`, no bytecode and no debug library, and
+  metatables are locked. A script that runs for 250 ms without waiting is
+  stopped, even if it catches the error with `pcall`. All scripts share
+  64 MB of memory, and the one that uses it up is stopped. String patterns
+  and `string.rep` have work limits. Scripts may make up to 100,000
+  instances; destroyed and forgotten ones are reused, so games that keep
+  making and destroying parts don't grow.
+- **Your character** is a Model named `Player1` in the Workspace, with a
+  `HumanoidRootPart` and a `Humanoid`. When its health reaches 0 it falls
+  over and comes back at the spawn point 3 seconds later.
+
+The demo place's door, spinning block, glowing lava strip and green button
+(which rains balls) are scripts. Type `fast`, `slow`, `night` or `day` in
+the chat line to try one more. Parts with a `Transparency` between 0 and 1
+are drawn see-through, with a dither pattern that works in both renderers
+and in 256 colours.
+
 ## Building (Linux)
 
 Install the 32-bit mingw-w64 cross compiler (Debian/Ubuntu):
@@ -156,8 +212,9 @@ fallback.
 
 - **Unit tests** for the OS-independent code (strings, UTF-8, paths, maths,
   WAV loading, audio mixer, palette, the renderer, the C runtime, the LZ4
-  and Zstandard decoders, `.ubx` files, the Roblox importer, physics and
-  the character), compiled natively with AddressSanitizer and UBSan:
+  and Zstandard decoders, `.ubx` files, the Roblox importer, physics, the
+  character, the C library under Lua, and scripts), compiled natively with
+  AddressSanitizer and UBSan:
 
   ```bash
   make test
@@ -181,6 +238,18 @@ fallback.
   ceilings, pushing a crate, standing on a loose slab and riding a moving
   platform.
 
+  The script tests run whole games without a window. The character walks
+  into a scripted door, which opens and lets it through, then closes and
+  blocks it again. The API test (`tests/data/scripts/api.lua`) makes over
+  100 checks. Then 28 hostile scripts run one after another, including
+  busy loops (also inside `pcall`, coroutines and events), memory, table,
+  pattern and `string.rep` bombs, sandbox escapes, and destroying the
+  services and the character. Each must be stopped or fail within 3
+  seconds, and the game, its door and an innocent script must carry on.
+  Another test makes and destroys 300,000 instances and checks that the
+  world and physics stay small. A last one plays the demo place: the door,
+  the button, the lava and the chat commands.
+
 - **Wine smoke test.** This drives the real `.exe` with keyboard and mouse
   events under Xvfb, then checks the log and settings file. It needs
   `wine` (32-bit), `xvfb-run`, `xdotool` and `imagemagick`, plus 32-bit
@@ -194,9 +263,10 @@ fallback.
   tools/wine_smoke.sh winxp opengl
   ```
 
-  It also checks that the demo's loose parts settle and fall asleep, opens
-  a Roblox place from the command line, saves it with F7, and opens the
-  result through `place=`.
+  It also checks that the demo's loose parts settle and fall asleep, walks
+  into the scripted door and checks the script opened it, checks that no
+  script failed, opens a Roblox place from the command line, saves it with
+  F7, and opens the result through `place=`.
 
   The first argument is the Windows version Wine pretends to be: `nt351`,
   `nt40`, `win2k` or `winxp`. The second picks the renderer. Wine is
@@ -211,7 +281,7 @@ fallback.
 | File | What it is |
 |---|---|
 | `uniblox.log` | Log of the current run (the previous run's is `uniblox.old.log`). Send this when reporting a problem |
-| `uniblox.cfg` | Settings saved on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `sw_height`, `colors`, camera, mute and `place` |
+| `uniblox.cfg` | Settings saved on exit, with comments: `renderer` (auto/opengl/software), `quality` (0-2), `gl_shaders`, `fps_cap`, `vsync`, `fullscreen`, window size, `sw_height`, `colors`, camera, mute, `scripts` (1 runs the place's scripts, 0 doesn't) and `place` |
 | `places/` | Places saved with F7 |
 | `sounds/jump.wav`, `sounds/land.wav`, `sounds/click.wav` | Optional. Replace the built-in sounds; any PCM 8/16-bit mono/stereo WAV works |
 
@@ -228,7 +298,7 @@ can't write the log or settings.
 | Mouse wheel | Zoom (NT 4.0 and later, or NT 3.51 with a wheel driver) |
 | Space | Jump (hold to keep jumping) |
 | Left click | Beep, panned left/right and pitched by where you click |
-| Enter or `/` | Type a message (Enter sends, Esc cancels) |
+| Enter or `/` | Type a message (Enter sends, Esc cancels); scripts hear it as `Player.Chatted` |
 | F11 or Alt+Enter | Fullscreen on/off |
 | F5 | 10-second benchmark with the frame cap off; the result goes on screen and into `uniblox.log` |
 | F6 | OpenGL: graphics quality high, medium (no anti-aliasing), low (no shadows). Software: render resolution 240/360/480/720/full |
@@ -239,9 +309,11 @@ can't write the log or settings.
 | M | Mute / unmute |
 | Esc | Quit |
 
-The text overlay shows the place's name, the result of the last load or
-save, and what physics is doing: loose parts, how many are awake,
-contacts, and the time physics took that frame.
+The text overlay shows the place's name and the result of the last load
+or save. It also shows what physics is doing (moving parts, how many are
+awake, contacts, and the time physics took that frame). For scripts, it
+shows how many are running and waiting, their memory and time, and the
+last lines they printed, with errors in red. Below that is your health.
 
 ## License
 

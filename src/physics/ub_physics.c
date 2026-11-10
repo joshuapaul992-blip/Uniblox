@@ -50,6 +50,7 @@ struct ub_manifold {
      * two sliding directions and a twist about the normal. (Friction at
      * every corner couples the corners through the bodies' spin and makes
      * tall stacks under strong gravity wobble apart.) */
+    u8 touching;               /* really touching (not just a speculative contact) */
     vec3 ra, rb;               /* patch centre from each centre of mass */
     f32 radius;                /* patch size, for the twist limit */
     f32 jt1, jt2, jtw;         /* accumulated friction impulses */
@@ -274,9 +275,23 @@ static i32 new_body(ub_physics *ph, ub_body_type type)
 
 static bool dyn_add(ub_physics *ph, i32 shape)
 {
+    if (ph->shapes[shape].in_dyn) return true;
     if (!grow((void **)&ph->dyn, &ph->dyn_cap, ph->dyn_count + 1, sizeof(i32))) return false;
     ph->dyn[ph->dyn_count++] = shape;
+    ph->shapes[shape].in_dyn = 1;
     return true;
+}
+
+static void dyn_remove(ub_physics *ph, i32 shape)
+{
+    if (!ph->shapes[shape].in_dyn) return;
+    for (i32 i = 0; i < ph->dyn_count; ++i)
+        if (ph->dyn[i] == shape) {
+            memmove(ph->dyn + i, ph->dyn + i + 1, sizeof(i32) * (size_t)(ph->dyn_count - i - 1));
+            ph->dyn_count--;
+            break;
+        }
+    ph->shapes[shape].in_dyn = 0;
 }
 
 bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int kinematic_count)
@@ -476,6 +491,7 @@ done:
 
 void ub_phys_free(ub_physics *ph)
 {
+    plat_free(ph->free_body);
     plat_free(ph->bodies);
     plat_free(ph->shapes);
     plat_free(ph->part_shape);
@@ -488,6 +504,9 @@ void ub_phys_free(ub_physics *ph)
     plat_free(ph->man_prev);
     plat_free(ph->scratch);
     plat_free(ph->scratch_f);
+    plat_free(ph->touches);
+    plat_free(ph->sensor_keys);
+    plat_free(ph->sensor_prev);
     memset(ph, 0, sizeof *ph);
 }
 
@@ -538,6 +557,224 @@ void ub_phys_set_position(ub_physics *ph, i32 body, vec3 pos)
     for (i32 k = 0; k < b->shape_count; ++k) shape_update(ph, &ph->shapes[b->first_shape + k]);
 }
 
+/* ----------------------------------------------------- run-time changes */
+
+void ub_phys_set_gravity(ub_physics *ph, f32 gravity)
+{
+    ph->gravity = v3(0, -gravity, 0);
+    ph->up = gravity >= 0 ? v3(0, 1, 0) : v3(0, -1, 0);
+    for (i32 i = 1; i < ph->body_count; ++i) ub_phys_wake(ph, i);
+}
+
+static void shape_from_part(ub_pshape *s, const ub_part *p)
+{
+    s->shape = p->shape < UB_SHAPE_COUNT ? p->shape : UB_SHAPE_BOX;
+    s->size = p->size;
+    s->radius = 0.5f * UB_MIN(p->size.x, UB_MIN(p->size.y, p->size.z));
+    s->bound = 0.5f * v3_length(p->size);
+    f32 dens;
+    ub_material_physics(p->material, &dens, &s->friction, &s->restitution);
+}
+
+/* Mass, centre of mass and inertia from the body's shapes where they are
+ * now. Keeps the body's orientation; moves its origin to the new centre. */
+static void body_set_mass(ub_physics *ph, ub_body *b)
+{
+    f32 mass = 0;
+    vec3 com = v3(0, 0, 0);
+    for (i32 k = 0; k < b->shape_count; ++k) {
+        const ub_pshape *s = &ph->shapes[b->first_shape + k];
+        if (s->part < 0) continue;
+        f32 vol, dens, fr, re;
+        vec3 c;
+        mat3 in;
+        ub_shape_mass((ub_shape)s->shape, s->size, &vol, &c, &in);
+        ub_material_physics(ph->world->parts[s->part].material, &dens, &fr, &re);
+        f32 m = UB_MAX(vol * dens, 1e-4f);
+        mass += m;
+        com = v3_madd(com, v3_add(s->wpos, mat3_apply(&s->wrot, c)), m);
+    }
+    if (mass <= 0) return;
+    com = v3_scale(com, 1.0f / mass);
+    mat3 I = mat3_zero();
+    for (i32 k = 0; k < b->shape_count; ++k) {
+        ub_pshape *s = &ph->shapes[b->first_shape + k];
+        if (s->part < 0) continue;
+        f32 vol, dens, fr, re;
+        vec3 c;
+        mat3 in;
+        ub_shape_mass((ub_shape)s->shape, s->size, &vol, &c, &in);
+        ub_material_physics(ph->world->parts[s->part].material, &dens, &fr, &re);
+        f32 m = UB_MAX(vol * dens, 1e-4f);
+        mat3 il = mat3_scale(&in, dens);
+        mat3 ib = mat3_rotate_tensor(&s->lrot, &il);
+        vec3 d = mat3_apply_t(&b->rot, v3_sub(v3_add(s->wpos, mat3_apply(&s->wrot, c)), com));
+        f32 dd = v3_dot(d, d);
+        ib.x = v3_add(ib.x, v3(m * (dd - d.x * d.x), -m * d.y * d.x, -m * d.z * d.x));
+        ib.y = v3_add(ib.y, v3(-m * d.x * d.y, m * (dd - d.y * d.y), -m * d.z * d.y));
+        ib.z = v3_add(ib.z, v3(-m * d.x * d.z, -m * d.y * d.z, m * (dd - d.z * d.z)));
+        I = mat3_add(&I, &ib);
+        s->lpos = mat3_apply_t(&b->rot, v3_sub(s->wpos, com));
+    }
+    f32 floor_i = mass * 0.01f;
+    I.x.x += floor_i;
+    I.y.y += floor_i;
+    I.z.z += floor_i;
+    b->pos = b->prev_pos = com;
+    b->mass = mass;
+    b->inv_mass = 1.0f / mass;
+    b->inv_inertia_local = mat3_inverse(&I);
+    update_inertia(b);
+}
+
+static bool close3(vec3 a, vec3 b) { return v3_length2(v3_sub(a, b)) < 1e-8f; }
+static bool close_rot(const mat3 *a, const mat3 *b)
+{
+    return close3(a->x, b->x) && close3(a->y, b->y) && close3(a->z, b->z);
+}
+
+static void set_flags(ub_physics *ph, i32 si, u8 flags)
+{
+    ph->shapes[si].flags = flags;
+    if (flags & (UB_SHAPE_COLLIDES | UB_SHAPE_SENSOR)) dyn_add(ph, si);
+    else dyn_remove(ph, si);
+}
+
+void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
+{
+    ub_world *w = ph->world;
+    if (part < 0 || part >= w->part_count) return;
+    if (part >= ph->part_count) { /* new parts since the physics was built */
+        i32 *np = (i32 *)plat_alloc(sizeof(i32) * (size_t)(w->part_count + 1));
+        if (!np) return;
+        for (i32 i = 0; i < w->part_count; ++i) np[i] = i < ph->part_count ? ph->part_shape[i] : -1;
+        plat_free(ph->part_shape);
+        ph->part_shape = np;
+        ph->part_count = w->part_count;
+    }
+    const ub_part *p = &w->parts[part];
+    alive = alive && !(p->flags & UB_PART_REMOVED);
+    bool collide = alive && (p->flags & UB_PART_CAN_COLLIDE);
+    bool touch = alive && sensor && !collide;
+    bool anchored = (p->flags & UB_PART_ANCHORED) != 0;
+    u8 want = (u8)((collide ? UB_SHAPE_COLLIDES : 0) | (touch ? UB_SHAPE_SENSOR : 0));
+    mat3 prot = quat_to_mat3(quat_from_mat3(&p->rot));
+    i32 si = ph->part_shape[part];
+    if (si >= 0) {
+        ub_pshape *s = &ph->shapes[si];
+        bool same_geom = s->shape == p->shape && close3(s->size, p->size);
+        if (s->body == 0) {
+            if (alive && anchored && !touch && same_geom && close3(s->wpos, p->pos) && close_rot(&s->wrot, &prot)) {
+                s->flags = want; /* just solid or not: stays in the static tree */
+                shape_from_part(s, p);
+                return;
+            }
+            s->flags = 0; /* leaves the static tree for good */
+            s->part = -1;
+            ph->part_shape[part] = -1;
+            si = -1;
+        } else {
+            i32 bi = s->body;
+            ub_body *b = &ph->bodies[bi];
+            if (!alive) {
+                set_flags(ph, si, 0);
+                s->part = -1;
+                ph->part_shape[part] = -1;
+                bool any = false;
+                for (i32 k = 0; k < b->shape_count; ++k) any |= ph->shapes[b->first_shape + k].part >= 0;
+                if (!any) {
+                    /* nothing left in it: what it slept with wakes (which
+                     * also unlinks it from that group), and a one-shape
+                     * body is reused after the next step */
+                    ub_phys_wake(ph, bi);
+                    b->fallen = 1;
+                    b->awake = 0;
+                    b->sleep_next = b->sleep_head = -1;
+                    if (b->shape_count == 1 && b->type != UB_BODY_CHARACTER &&
+                        grow((void **)&ph->free_body, &ph->free_body_cap, ph->free_body_count + 1, sizeof(i32)))
+                        ph->free_body[ph->free_body_count++] = bi;
+                }
+                return;
+            }
+            shape_from_part(s, p);
+            set_flags(ph, si, want);
+            if (anchored && b->type == UB_BODY_DYNAMIC) {
+                b->type = UB_BODY_KINEMATIC;
+                b->v = b->w = v3(0, 0, 0);
+                b->inv_mass = 0;
+                b->inv_inertia_local = mat3_zero();
+                b->has_target = 0;
+                update_inertia(b);
+            } else if (!anchored && b->type == UB_BODY_KINEMATIC) {
+                b->type = UB_BODY_DYNAMIC;
+                b->has_target = 0;
+                body_set_mass(ph, b);
+                b->awake = 0;
+                ub_phys_wake(ph, s->body);
+            } else if (!same_geom && b->type == UB_BODY_DYNAMIC) {
+                body_set_mass(ph, b);
+            }
+            /* moved by the script? the body follows */
+            vec3 cur_pos = v3_add(b->pos, mat3_apply(&b->rot, s->lpos));
+            mat3 cur_rot = mat3_mul(&b->rot, &s->lrot);
+            if (!close3(cur_pos, p->pos) || !close_rot(&cur_rot, &prot)) {
+                mat3 lt = mat3_transpose(&s->lrot);
+                mat3 brot = mat3_mul(&prot, &lt);
+                vec3 bpos = v3_sub(p->pos, mat3_apply(&brot, s->lpos));
+                if (b->type == UB_BODY_KINEMATIC && v3_length(v3_sub(bpos, b->pos)) < 20.0f) {
+                    ub_phys_set_target(ph, s->body, bpos, &brot); /* glides, pushing things */
+                } else {
+                    b->pos = b->prev_pos = bpos;
+                    b->q = b->prev_q = quat_from_mat3(&brot);
+                    b->rot = quat_to_mat3(b->q);
+                    update_inertia(b);
+                    if (b->type == UB_BODY_DYNAMIC) ub_phys_wake(ph, s->body);
+                }
+            }
+            for (i32 k = 0; k < b->shape_count; ++k) shape_update(ph, &ph->shapes[b->first_shape + k]);
+            return;
+        }
+    }
+    if (!alive || (anchored && !collide && !touch)) return; /* nothing to simulate: only drawn */
+    /* a body of its own: an emptied one if there is one (keeps its shape slot) */
+    i32 bi, shape_slot;
+    if (ph->free_body_ready > 0) {
+        bi = ph->free_body[0];
+        ph->free_body[0] = ph->free_body[--ph->free_body_ready];
+        ph->free_body[ph->free_body_ready] = ph->free_body[--ph->free_body_count];
+        shape_slot = ph->bodies[bi].first_shape;
+        ub_body *rb = &ph->bodies[bi];
+        memset(rb, 0, sizeof *rb);
+        rb->type = (u8)(anchored ? UB_BODY_KINEMATIC : UB_BODY_DYNAMIC);
+        rb->awake = 1;
+        rb->sleep_next = rb->sleep_head = -1;
+    } else {
+        bi = new_body(ph, anchored ? UB_BODY_KINEMATIC : UB_BODY_DYNAMIC);
+        if (bi < 0 || !grow((void **)&ph->shapes, &ph->shape_cap, ph->shape_count + 1, sizeof(ub_pshape))) return;
+        shape_slot = ph->shape_count++;
+    }
+    ub_body *b = &ph->bodies[bi];
+    b->q = b->prev_q = b->target_q = quat_from_mat3(&prot);
+    b->rot = quat_to_mat3(b->q);
+    b->pos = b->prev_pos = b->target_pos = p->pos;
+    b->first_shape = shape_slot;
+    b->shape_count = 1;
+    b->woke_step = ph->stats.steps;
+    ub_pshape *s = &ph->shapes[shape_slot];
+    memset(s, 0, sizeof *s);
+    s->body = bi;
+    s->part = part;
+    shape_from_part(s, p);
+    s->lpos = v3(0, 0, 0);
+    s->lrot = mat3_identity();
+    ph->part_shape[part] = shape_slot;
+    shape_update(ph, s);
+    if (b->type == UB_BODY_DYNAMIC) body_set_mass(ph, b);
+    else update_inertia(b);
+    shape_update(ph, s);
+    set_flags(ph, ph->part_shape[part], want);
+}
+
 void ub_phys_set_target(ub_physics *ph, i32 body, vec3 pos, const mat3 *rot)
 {
     ub_body *b = &ph->bodies[body];
@@ -557,6 +794,7 @@ void ub_phys_wake(ub_physics *ph, i32 body)
         ub_body *x = &ph->bodies[i];
         i32 next = x->sleep_next;
         x->awake = 1;
+        x->woke_step = ph->stats.steps;
         x->sleep_time = 0;
         x->sleep_next = x->sleep_head = -1;
         i = next;
@@ -592,6 +830,9 @@ static bool add_pair(ub_physics *ph, i32 a, i32 b)
 static bool pair_wanted(const ub_physics *ph, const ub_pshape *a, const ub_pshape *b)
 {
     if (a->body == b->body) return false;
+    if (!((a->flags | b->flags) & UB_SHAPE_COLLIDES)) return false;   /* two sensors */
+    if (!(a->flags & (UB_SHAPE_COLLIDES | UB_SHAPE_SENSOR)) || !(b->flags & (UB_SHAPE_COLLIDES | UB_SHAPE_SENSOR)))
+        return false;
     const ub_body *ba = &ph->bodies[a->body], *bb = &ph->bodies[b->body];
     if (ba->fallen || bb->fallen) return false;
     bool da = ba->type == UB_BODY_DYNAMIC || ba->type == UB_BODY_CHARACTER;
@@ -639,7 +880,9 @@ static void broadphase(ub_physics *ph)
                     for (i32 k = 0; k < n->count; ++k) {
                         i32 sid = ph->static_ids[n->left + k];
                         const ub_pshape *s = &ph->shapes[sid];
-                        if (box_overlap(a->lo, a->hi, s->lo, s->hi)) add_pair(ph, sid, d[i]);
+                        if ((s->flags & UB_SHAPE_COLLIDES) && (a->flags & UB_SHAPE_COLLIDES) &&
+                            box_overlap(a->lo, a->hi, s->lo, s->hi))
+                            add_pair(ph, sid, d[i]);
                     }
                 } else if (sp + 2 <= 64) {
                     stack[sp++] = n->left;
@@ -664,7 +907,16 @@ static void narrowphase(ub_physics *ph)
     ph->man_cap = tc;
     ph->man_count = 0;
     if (!grow((void **)&ph->man, &ph->man_cap, ph->pair_count + 1, sizeof(ub_manifold))) return;
-    i32 old = 0;
+    /* sensor pairs: this step's list becomes last step's */
+    u64 *tk = ph->sensor_prev;
+    i32 tkc = ph->sensor_prev_cap;
+    ph->sensor_prev = ph->sensor_keys;
+    ph->sensor_prev_cap = ph->sensor_cap;
+    ph->sensor_prev_count = ph->sensor_count;
+    ph->sensor_keys = tk;
+    ph->sensor_cap = tkc;
+    ph->sensor_count = 0;
+    i32 old = 0, old_sensor = 0;
     for (i32 i = 0; i < ph->pair_count; ++i) {
         u64 key = ph->pairs[i];
         if (i > 0 && key == ph->pairs[i - 1]) continue; /* duplicate */
@@ -678,8 +930,21 @@ static void narrowphase(ub_physics *ph)
         f32 margin = MARGIN + (v3_length(rel) + v3_length(ba->w) * A->bound + v3_length(bb->w) * B->bound) * UB_PHYS_DT;
         vec3 n;
         ub_cpoint pts[UB_MAX_CONTACTS];
-        int count = ub_collide(&ca, &cb, margin, &n, pts);
+        bool sensor = !(A->flags & UB_SHAPE_COLLIDES) || !(B->flags & UB_SHAPE_COLLIDES);
+        int count = ub_collide(&ca, &cb, sensor ? 0.0f : margin, &n, pts);
         if (count == 0) continue;
+        if (sensor) { /* only report the touch, never push */
+            if (!grow((void **)&ph->sensor_keys, &ph->sensor_cap, ph->sensor_count + 1, sizeof(u64))) continue;
+            ph->sensor_keys[ph->sensor_count++] = key;
+            while (old_sensor < ph->sensor_prev_count && ph->sensor_prev[old_sensor] < key) ++old_sensor;
+            bool was = old_sensor < ph->sensor_prev_count && ph->sensor_prev[old_sensor] == key;
+            if (!was && grow((void **)&ph->touches, &ph->touch_cap, ph->touch_count + 1, sizeof(ub_touch))) {
+                ph->touches[ph->touch_count].a = A->part;
+                ph->touches[ph->touch_count].b = B->part;
+                ph->touch_count++;
+            }
+            continue;
+        }
 
         /* a sleeper touched by something awake wakes up */
         bool touching = false;
@@ -702,6 +967,18 @@ static void narrowphase(ub_physics *ph)
         m->count = count;
         while (old < ph->man_prev_count && ph->man_prev[old].key < key) ++old;
         const ub_manifold *pm = old < ph->man_prev_count && ph->man_prev[old].key == key ? &ph->man_prev[old] : NULL;
+        /* a new touch: really touching now, and not last step (contacts
+         * that come back because something just woke are not new) */
+        m->touching = 0;
+        for (int k = 0; k < count; ++k) m->touching |= pts[k].sep < 0.02f;
+        bool was_touching = pm && pm->touching;
+        bool just_woke = ba->woke_step == ph->stats.steps || bb->woke_step == ph->stats.steps;
+        if (m->touching && !was_touching && !just_woke &&
+            grow((void **)&ph->touches, &ph->touch_cap, ph->touch_count + 1, sizeof(ub_touch))) {
+            ph->touches[ph->touch_count].a = A->part;
+            ph->touches[ph->touch_count].b = B->part;
+            ph->touch_count++;
+        }
         if (pm && v3_dot(pm->n, n) < 0.9f) pm = NULL;
         m->jt1 = m->jt2 = m->jtw = m->jr1 = m->jr2 = 0;
         if (pm) {
@@ -1061,6 +1338,8 @@ static void write_back(ub_physics *ph, ub_body *b)
 void ub_phys_step(ub_physics *ph)
 {
     const f32 dt = UB_PHYS_DT, h = dt / (f32)SUBSTEPS;
+    ph->touch_count = 0;
+    ph->free_body_ready = ph->free_body_count; /* emptied before this step: no contacts refer to them after it */
     for (i32 i = 1; i < ph->body_count; ++i) {
         ub_body *b = &ph->bodies[i];
         if (b->fallen) continue;
@@ -1130,8 +1409,10 @@ void ub_phys_step(ub_physics *ph)
     /* drop fallen bodies' shapes from the moving list */
     if (fallen != ph->stats.fallen) {
         i32 k = 0;
-        for (i32 i = 0; i < ph->dyn_count; ++i)
+        for (i32 i = 0; i < ph->dyn_count; ++i) {
             if (!ph->bodies[ph->shapes[ph->dyn[i]].body].fallen) ph->dyn[k++] = ph->dyn[i];
+            else ph->shapes[ph->dyn[i]].in_dyn = 0;
+        }
         if (fallen > ph->stats.fallen) ub_info("physics: %d loose part group(s) fell out of the world", fallen - ph->stats.fallen);
         ph->dyn_count = k;
     }
@@ -1158,6 +1439,7 @@ void ub_phys_step(ub_physics *ph)
 static bool test_ray(const ub_physics *ph, i32 sid, vec3 o, vec3 dir, f32 *best, ub_phys_hit *hit)
 {
     const ub_pshape *s = &ph->shapes[sid];
+    if (!(s->flags & UB_SHAPE_COLLIDES)) return false;
     ub_cshape c;
     cshape(s, &c);
     f32 t;

@@ -44,6 +44,7 @@ typedef char GLchar;
 #define GL_FRONT_AND_BACK 0x0408
 #define GL_CCW 0x0901
 #define GL_CULL_FACE 0x0B44
+#define GL_POLYGON_STIPPLE 0x0B42
 #define GL_LIGHTING 0x0B50
 #define GL_LIGHT_MODEL_AMBIENT 0x0B53
 #define GL_COLOR_MATERIAL 0x0B57
@@ -138,6 +139,7 @@ typedef char GLchar;
     X(void, glFrontFace, (GLenum), NULL) \
     X(void, glBlendFunc, (GLenum, GLenum), NULL) \
     X(void, glPolygonOffset, (GLfloat, GLfloat), NULL) \
+    X(void, glPolygonStipple, (const GLubyte *), NULL) \
     X(void, glHint, (GLenum, GLenum), NULL) \
     X(void, glShadeModel, (GLenum), NULL) \
     X(void, glPixelStorei, (GLenum, GLint), NULL) \
