@@ -125,6 +125,159 @@ static TString *str_checkname (LexState *ls) {
 }
 
 
+/*
+** {======================================================================
+** UNIBLOX: Luau's type annotations. Roblox checks them before the game
+** runs and its VM ignores them, so here they are parsed and dropped:
+**   local x: T, function f<T>(a: T, ...: U): R, for i: number = ...,
+**   type Name<T> = T, export type Name = ..., expr :: T
+** =======================================================================
+*/
+
+static void skip_type (LexState *ls);
+
+static int token_is_name (LexState *ls, const char *s) {
+  return ls->t.token == TK_NAME && strcmp(getstr(ls->t.seminfo.ts), s) == 0;
+}
+
+/* `...' closes a type pack list; `>=' closes a generic list and leaves `=' */
+static void close_list (LexState *ls, int close) {
+  if (close == '>' && ls->t.token == TK_GE) {
+    ls->t.token = '=';
+    return;
+  }
+  checknext(ls, close);
+}
+
+/* skips tokens up to the matching `close' (generic parameter lists, typeof(...)) */
+static void skip_balanced (LexState *ls, int open, int close) {
+  int depth = 0;
+  do {
+    if (ls->t.token == open) depth++;
+    else if (ls->t.token == close) depth--;
+    else if (close == '>' && ls->t.token == TK_GE && depth == 1) {
+      ls->t.token = '=';
+      return;
+    }
+    else if (ls->t.token == TK_EOS) error_expected(ls, close);
+    luaX_next(ls);
+  } while (depth > 0);
+}
+
+/* Type, Type... | name: Type (function parameters) | ...Type, up to `close' */
+static void skip_type_list (LexState *ls, int close) {
+  while (ls->t.token != close && !(close == '>' && ls->t.token == TK_GE)) {
+    if (ls->t.token == TK_DOTS) {  /* ...T */
+      luaX_next(ls);
+      if (ls->t.token != close && ls->t.token != ',') skip_type(ls);
+    }
+    else {
+      if (ls->t.token == TK_NAME) {  /* a named parameter: name: Type */
+        luaX_lookahead(ls);
+        if (ls->lookahead.token == ':') { luaX_next(ls); luaX_next(ls); }
+      }
+      skip_type(ls);
+      if (ls->t.token == TK_DOTS) luaX_next(ls);  /* T... (a type pack) */
+    }
+    if (!testnext(ls, ',')) break;
+  }
+  close_list(ls, close);
+}
+
+static void skip_simple_type (LexState *ls) {
+  switch (ls->t.token) {
+    case TK_NIL: case TK_TRUE: case TK_FALSE: case TK_STRING: {  /* singleton types */
+      luaX_next(ls);
+      return;
+    }
+    case TK_DOTS: {  /* ...T */
+      luaX_next(ls);
+      skip_type(ls);
+      return;
+    }
+    case '{': {  /* table type */
+      luaX_next(ls);
+      while (ls->t.token != '}') {
+        if (ls->t.token == '[') {  /* [KeyType]: ValueType */
+          luaX_next(ls);
+          skip_type(ls);
+          checknext(ls, ']');
+          checknext(ls, ':');
+          skip_type(ls);
+        }
+        else {
+          if (ls->t.token == TK_NAME) {
+            luaX_lookahead(ls);
+            if (ls->lookahead.token == ':') { luaX_next(ls); luaX_next(ls); }  /* name: Type */
+          }
+          skip_type(ls);  /* (or {T}, an array) */
+        }
+        if (!testnext(ls, ',') && !testnext(ls, ';')) break;
+      }
+      checknext(ls, '}');
+      return;
+    }
+    case '<':  /* <T>(...) -> R, a generic function type */
+      skip_balanced(ls, '<', '>');
+      /* fall through */
+    case '(': {  /* (T) or (A, B) -> R */
+      checknext(ls, '(');
+      skip_type_list(ls, ')');
+      if (testnext(ls, TK_ARROW)) skip_type(ls);
+      return;
+    }
+    case TK_NAME: {
+      if (token_is_name(ls, "typeof")) {
+        luaX_lookahead(ls);
+        if (ls->lookahead.token == '(') {
+          luaX_next(ls);
+          skip_balanced(ls, '(', ')');
+          return;
+        }
+      }
+      luaX_next(ls);
+      while (testnext(ls, '.')) str_checkname(ls);  /* Module.Type */
+      if (ls->t.token == '<') {  /* Type<A, B> */
+        luaX_next(ls);
+        skip_type_list(ls, '>');
+      }
+      return;
+    }
+    default: luaX_syntaxerror(ls, "type expected");
+  }
+}
+
+static void skip_type (LexState *ls) {
+  if (ls->t.token == '|' || ls->t.token == '&') luaX_next(ls);  /* a leading | or & */
+  skip_simple_type(ls);
+  if (ls->t.token == TK_DOTS) luaX_next(ls);  /* T... (a generic type pack) */
+  for (;;) {
+    if (ls->t.token == '?') luaX_next(ls);  /* optional */
+    else if (ls->t.token == '|' || ls->t.token == '&') {  /* union, intersection */
+      luaX_next(ls);
+      skip_simple_type(ls);
+    }
+    else break;
+  }
+}
+
+/* `: Type' after a name, if there is one */
+static void skip_annotation (LexState *ls) {
+  if (testnext(ls, ':')) skip_type(ls);
+}
+
+/* type Name<T...> = Type */
+static void typestat (LexState *ls) {
+  luaX_next(ls);  /* skip `type' */
+  str_checkname(ls);
+  if (ls->t.token == '<') skip_balanced(ls, '<', '>');
+  checknext(ls, '=');
+  skip_type(ls);
+}
+
+/* }====================================================================== */
+
+
 static void init_exp (expdesc *e, expkind k, int i) {
   e->f = e->t = NO_JUMP;
   e->k = k;
@@ -555,10 +708,12 @@ static void parlist (LexState *ls) {
       switch (ls->t.token) {
         case TK_NAME: {  /* param -> NAME */
           new_localvar(ls, str_checkname(ls), nparams++);
+          skip_annotation(ls);  /* UNIBLOX */
           break;
         }
         case TK_DOTS: {  /* param -> `...' */
           luaX_next(ls);
+          skip_annotation(ls);  /* UNIBLOX: ...: Type */
 #if defined(LUA_COMPAT_VARARG)
           /* use `arg' as default name */
           new_localvarliteral(ls, "arg", nparams++);
@@ -582,6 +737,7 @@ static void body (LexState *ls, expdesc *e, int needself, int line) {
   FuncState new_fs;
   open_func(ls, &new_fs);
   new_fs.f->linedefined = line;
+  if (ls->t.token == '<') skip_balanced(ls, '<', '>');  /* UNIBLOX: generic parameters */
   checknext(ls, '(');
   if (needself) {
     new_localvarliteral(ls, "self", 0);
@@ -589,6 +745,7 @@ static void body (LexState *ls, expdesc *e, int needself, int line) {
   }
   parlist(ls);
   checknext(ls, ')');
+  skip_annotation(ls);  /* UNIBLOX: the return type */
   chunk(ls);
   new_fs.f->lastlinedefined = ls->linenumber;
   check_match(ls, TK_END, TK_FUNCTION, line);
@@ -728,6 +885,41 @@ static void primaryexp (LexState *ls, expdesc *v) {
 }
 
 
+/* UNIBLOX: if c then a {elseif c then b} else z, as an expression. Every
+** branch leaves its value in one register reserved up front. */
+static void ifexp (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  int escapes = NO_JUMP;
+  int reg = fs->freereg;
+  expdesc target;
+  luaK_reserveregs(fs, 1);
+  init_exp(&target, VLOCAL, reg);  /* storevar to a register: the value lands there */
+  luaX_next(ls);  /* skip IF */
+  for (;;) {
+    expdesc c, e;
+    int flist;
+    expr(ls, &c);
+    if (c.k == VNIL) c.k = VFALSE;  /* `falses' are all equal here */
+    luaK_goiftrue(fs, &c);
+    flist = c.f;
+    checknext(ls, TK_THEN);
+    expr(ls, &e);
+    luaK_storevar(fs, &target, &e);
+    fs->freereg = reg + 1;
+    luaK_concat(fs, &escapes, luaK_jump(fs));
+    luaK_patchtohere(fs, flist);
+    if (testnext(ls, TK_ELSEIF)) continue;
+    checknext(ls, TK_ELSE);
+    expr(ls, &e);
+    luaK_storevar(fs, &target, &e);
+    fs->freereg = reg + 1;
+    break;
+  }
+  luaK_patchtohere(fs, escapes);
+  init_exp(v, VNONRELOC, reg);
+}
+
+
 static void simpleexp (LexState *ls, expdesc *v) {
   /* simpleexp -> NUMBER | STRING | NIL | true | false | ... |
                   constructor | FUNCTION body | primaryexp */
@@ -768,6 +960,10 @@ static void simpleexp (LexState *ls, expdesc *v) {
     case TK_FUNCTION: {
       luaX_next(ls);
       body(ls, v, 0, ls->linenumber);
+      return;
+    }
+    case TK_IF: {  /* UNIBLOX: Luau's if-then-else expression */
+      ifexp(ls, v);
       return;
     }
     default: {
@@ -840,6 +1036,10 @@ static BinOpr subexpr (LexState *ls, expdesc *v, unsigned int limit) {
     luaK_prefix(ls->fs, uop, v);
   }
   else simpleexp(ls, v);
+  while (ls->t.token == TK_DBCOLON) {  /* UNIBLOX: expr :: Type */
+    luaX_next(ls);
+    skip_type(ls);
+  }
   /* expand while operators have priorities higher than `limit' */
   op = getbinopr(ls->t.token);
   while (op != OPR_NOBINOPR && priority[op].left > limit) {
@@ -1126,8 +1326,10 @@ static void forlist (LexState *ls, TString *indexname) {
   new_localvarliteral(ls, "(for control)", nvars++);
   /* create declared variables */
   new_localvar(ls, indexname, nvars++);
-  while (testnext(ls, ','))
+  while (testnext(ls, ',')) {
     new_localvar(ls, str_checkname(ls), nvars++);
+    skip_annotation(ls);  /* UNIBLOX */
+  }
   checknext(ls, TK_IN);
   line = ls->linenumber;
   adjust_assign(ls, 3, explist1(ls, &e), &e);
@@ -1144,6 +1346,7 @@ static void forstat (LexState *ls, int line) {
   enterblock(fs, &bl, 1);  /* scope for loop and control variables */
   luaX_next(ls);  /* skip `for' */
   varname = str_checkname(ls);  /* first variable name */
+  skip_annotation(ls);  /* UNIBLOX: for i: number = ... */
   switch (ls->t.token) {
     case '=': fornum(ls, varname, line); break;
     case ',': case TK_IN: forlist(ls, varname); break;
@@ -1210,6 +1413,7 @@ static void localstat (LexState *ls) {
   expdesc e;
   do {
     new_localvar(ls, str_checkname(ls), nvars++);
+    skip_annotation(ls);  /* UNIBLOX */
   } while (testnext(ls, ','));
   if (testnext(ls, '='))
     nexps = explist1(ls, &e);
@@ -1379,6 +1583,22 @@ static int statement (LexState *ls) {
       /* UNIBLOX: `continue' is a statement when nothing that could make it
       ** a name in an expression follows (as in Luau); otherwise a name */
       TString *ts = ls->t.seminfo.ts;
+      /* UNIBLOX: `type Name = ...' and `export type Name = ...' */
+      if (token_is_name(ls, "type") || token_is_name(ls, "export")) {
+        int is_export = token_is_name(ls, "export");
+        luaX_lookahead(ls);
+        if (ls->lookahead.token == TK_NAME) {
+          if (!is_export) {
+            typestat(ls);
+            return 0;
+          }
+          if (strcmp(getstr(ls->lookahead.seminfo.ts), "type") == 0) {
+            luaX_next(ls);  /* skip `export' */
+            typestat(ls);
+            return 0;
+          }
+        }
+      }
       if (ts->tsv.len == 8 && strcmp(getstr(ts), "continue") == 0) {
         int next;
         luaX_lookahead(ls);

@@ -25,3 +25,12 @@ Every change is marked `UNIBLOX` in the source.
     strings (`(""):rep(1e9)` would otherwise loop a billion times).
 - `llex.c`, `lparser.c`: the compound assignments of Roblox's Luau (`+=`
   `-=` `*=` `/=` `%=` `^=` `..=`) and `continue` in loops.
+- `llex.c`, `lparser.c` (milestone 8B): the rest of Luau's 2022 syntax.
+  Type annotations are parsed and dropped, as Roblox's VM ignores them:
+  `local x: T`, typed parameters, `...: T`, return types, generic `<T>`
+  on functions, `for i: number = ...`, `type Name<T> = ...`,
+  `export type`, and `expr :: T` casts (new tokens `::` and `->`). Also
+  if-then-else expressions, `0b` binary literals, `_` digit separators,
+  and the `\x`, `\z` and `\u{...}` string escapes.
+- `lvm.c` (OP_TFORLOOP): generalized iteration, `for k, v in t do` over a
+  table that cannot be called, walks it like `next`.
