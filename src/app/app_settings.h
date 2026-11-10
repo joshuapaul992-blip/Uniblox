@@ -46,6 +46,7 @@ typedef struct {
     int mode_count;
     bool modes_listed;
     bool opengl;              /* which renderer is running */
+    bool fast;                /* the fast software renderer (it has quality levels too) */
 } ub_menu;
 
 /* Declares the menu (between ui_begin and ui_end); changes `s` and

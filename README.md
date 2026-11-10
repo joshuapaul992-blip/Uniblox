@@ -19,11 +19,17 @@ recommended). The CPU only needs to be an x86 Pentium.
   version without shadows.
 - **Fast software** (no graphics card needed; made for NT 3.51 and 4.0,
   where there is no OpenGL worth having: a VESA driver such as WINVBE has
-  no 3D at all, and NT 4.0's Direct3D draws in software too). It draws the
-  same picture as the plain software renderer, about twice as fast (see
-  [NT 3.51 and 4.0 on a modern PC](#nt-351-and-40-on-a-modern-pc)).
+  no 3D at all, and NT 4.0's Direct3D draws in software too). It has three
+  quality levels (F6, or Settings > Display > *Graphics quality*):
+  - **Low:** the plain software renderer's picture, about twice as fast.
+  - **Medium:** light in colour (bluish from the sky, warmer from the sun),
+    smooth round parts with a highlight, finer meshes for round shapes up
+    close, textures that don't shimmer far away, fog towards the horizon
+    and the sun in the sky. Still faster than the plain renderer.
+  - **High** (the default): and soft shadows from the sun.
+  See [NT 3.51 and 4.0 on a modern PC](#nt-351-and-40-on-a-modern-pc).
   It renders at a lower resolution (480 lines by default), stretches to the
-  window and supports 256-colour desktops.
+  window and supports 256-colour desktops (shadows included, fog not).
 - **Software** (the plain one): draws each part as it comes, on one
   processor. Kept as the reference, and to compare with.
 
@@ -113,6 +119,22 @@ uncached. At 2560×1421 a whole frame took about 150 ms to send, against
   4.3 ms with the fast one (7.0 ms on a single thread); the game went from
   70 to 106 fps. `uniblox.exe -benchmark` runs the F5 benchmark and quits,
   and `tools/wine_bench.sh nt40 software fast` compares renderers.
+- **The fast renderer's medium and high quality** (milestone 9C) are
+  made to cost little per pixel:
+  - **Colour light:** comes from per-face colour tables.
+  - **Round parts:** step through a 64-colour ramp; that's one add per pixel.
+  - **Distant textures:** each far-away version of a texture is stored at
+    full size, so the pixel loop doesn't change.
+  - **Shadows:** a 512×512 shadow map covers 128 studs around the camera's
+    focus. Every part nearby casts, seen or not. Each face keeps how much
+    of its light is the sun's in the low bits of its depth. After a row of
+    tiles is drawn, one pass works out each pixel's place from its depth,
+    softens shadow edges over four texels, and adds fog. The fog comes from
+    a table, with no division.
+
+  Same scene as above (960×540, Wine, 4 processors), 3D scene per frame:
+  plain renderer 6.4 ms, fast low 3.1 ms, medium 4.8 ms, high 8.4 ms.
+  On a slow machine, pick medium or low with F6.
 - **The GUI is drawn only when it changes.** Any change in the world (a
   script turning a part, physics) used to draw every GUI layer again. Now a
   layer is drawn again only if its layout or one of its properties changed.
@@ -633,6 +655,18 @@ fallback.
   the door's label. The door's label is also drawn by the software
   renderer over the real scene, to check it sits in front of the wall.
 
+  For milestone 9C, the renderer tests draw a floor, a box over it and a
+  ball at each fast quality level, and check five things:
+  - medium shades the ball in over twice as many colours as low;
+  - far-away floor is nearer the horizon's colour (fog);
+  - the floor under the box is darker at high only, and the sunlit floor
+    isn't;
+  - the picture is the same with 1 or 4 threads' worth of rows, and
+    shadows also come out in 256 colours;
+  - the sun shows in the sky.
+
+  Low quality must still draw exactly what the plain renderer does.
+
   For milestone 9B, a camera test checks the wheel's steps, easing and
   limits. Zooming in goes into first person (the camera at the eyes, the
   body not drawn, the mouse locked and turning the camera without a
@@ -756,7 +790,7 @@ can't write the log or settings.
 | Tab | Show or hide the player list |
 | F11 or Alt+Enter | Fullscreen on/off |
 | F5 | 10-second benchmark with the frame cap off; the result goes on screen and into `uniblox.log` |
-| F6 | OpenGL: graphics quality high, medium (no anti-aliasing), low (no shadows). Software: render resolution 240/360/480/720/full |
+| F6 | OpenGL: graphics quality high, medium (no anti-aliasing), low (no shadows). Fast software: quality high (shadows), medium, low. Plain software: render resolution 240/360/480/720/full |
 | F7 | Save the current place as `places/<name>.ubx` |
 | F8 | Software renderer: switch between 32-bit colour and 8-bit palette |
 | F9 | Frame rate cap: 60, 120, 144, 240, unlimited |

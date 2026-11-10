@@ -34,6 +34,10 @@ typedef struct {
 extern const ub_material_info ub_materials[UB_MAT_COUNT];
 
 void ub_textures_init(void);
+/* The texture averaged over 2^k x 2^k squares (k = 0..UB_TEX_MIPS-1), still
+ * 64*64 (each square's texels the same), for surfaces far away. */
+#define UB_TEX_MIPS 6
+const u8 *ub_texture_mip(ub_material m, int k);
 
 /* 64*64 texels, row-major, values 0..31. NULL for UB_MAT_PLASTIC. */
 const u8 *ub_texture(ub_material m);

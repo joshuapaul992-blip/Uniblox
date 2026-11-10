@@ -125,8 +125,9 @@ import -window root "${SHOT%.png}-help.png"
 xdotool key r; sleep 0.3; xdotool key Escape; sleep 0.3 # reset? no
 xdotool key s; sleep 0.5                                # Settings
 import -window root "${SHOT%.png}-settings.png"
-# Frame rate cap > (240): the 7th row with software, the 5th with OpenGL (no resolution, colours, sending rows)
-FPS_ROW_Y=$([ "$RENDERER" = opengl ] && echo 275 || echo 321)
+# Frame rate cap > (240): the 7th row with software, the 5th with OpenGL (no resolution, colours, sending rows),
+# the 8th with the fast renderer (graphics quality too); rows are 23 pixels apart
+FPS_ROW_Y=$(case "$RENDERER" in opengl) echo 275;; fast) echo 344;; *) echo 321;; esac)
 xdotool mousemove $((X + 742)) $((Y + FPS_ROW_Y)); sleep 0.3; xdotool click 1; sleep 0.5
 xdotool key Escape; sleep 0.3; xdotool key Escape; sleep 0.5                         # back to the game menu, resume
 xdotool key F11; sleep 1.5                              # fullscreen
@@ -201,7 +202,7 @@ elif [ "$RENDERER" = fast ]; then
     expect "$RUN1" "CPU: .*; [0-9]* processor" "processors counted"
     expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"
     expect "$CFG" "colors=32" "colour choice saved"
-    expect "$RUN1" "software render height" "F6 changed the render resolution"
+    expect "$RUN1" "quality: medium" "F6 changed the fast renderer's quality"
 else
     expect "$RUN1" "renderer: software" "software renderer started"
     expect "$RUN1" "switched to 8-bit palette" "F8 switched to 8-bit rendering"

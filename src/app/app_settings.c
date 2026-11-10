@@ -110,7 +110,9 @@ int settings_write(const ub_settings *s, char *buf, int cap)
                   "renderer=%s\r\n"
                   "# render_threads (fast renderer): threads that draw, 0 = one per processor\r\n"
                   "render_threads=%d\r\n"
-                  "# quality (OpenGL): 0 = low, 1 = medium (shadows), 2 = high (shadows + anti-aliasing)\r\n"
+                  "# quality: OpenGL: 0 = low, 1 = medium (shadows), 2 = high (shadows + anti-aliasing);\r\n"
+                  "# the fast software renderer: 0 = low (as milestone 9A), 1 = medium (coloured and smooth light,\r\n"
+                  "# fog, the sun, finer textures far away), 2 = high (and the sun's shadows)\r\n"
                   "quality=%d\r\n"
                   "# gl_shaders: 1 = full effects, 0 = basic OpenGL 1.1 (for problem drivers)\r\n"
                   "gl_shaders=%d\r\n"
@@ -190,12 +192,13 @@ static int display_page(ub_menu *m, ub_settings *s)
     } else {
         ui_stepper("Fullscreen size", "The desktop's (NT 3.51)");
     }
-    if (m->opengl) {
+    if (m->opengl || m->fast) {
         if ((d = ui_stepper("Graphics quality", ub_render_quality_name((ub_quality)s->quality))) != 0) {
             s->quality = step_index(UB_QUALITY_COUNT, s->quality, d);
             f |= SET_QUALITY;
         }
-    } else {
+    }
+    if (!m->opengl) {
         int i = 0;
         while (i < 4 && k_sw_heights[i] != p->sw_height) ++i;
         if (p->sw_height) ub_fmt(txt, sizeof txt, "%d lines", p->sw_height);

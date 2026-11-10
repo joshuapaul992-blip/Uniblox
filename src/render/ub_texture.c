@@ -13,6 +13,9 @@ const ub_material_info ub_materials[UB_MAT_COUNT] = {
 };
 
 static u8 g_tex[UB_MAT_COUNT][UB_TEX_SIZE * UB_TEX_SIZE];
+/* smaller versions for far away (the fast renderer), each texel the average
+ * of a 2^k square, kept at full size so the same lookup reads them */
+static u8 g_mip[UB_MAT_COUNT][UB_TEX_MIPS][UB_TEX_SIZE * UB_TEX_SIZE];
 
 /* ------------------------------------------------------------ noise */
 
@@ -149,6 +152,26 @@ void ub_textures_init(void)
             for (int x = 0; x < UB_TEX_SIZE; ++x)
                 g_tex[m][y * UB_TEX_SIZE + x] =
                     (u8)clamp31(k_gen[m]((f32)x + 0.5f, (f32)y + 0.5f, 1.0f, x, y) + 0.5f);
+    for (int m = 1; m < UB_MAT_COUNT; ++m)
+        for (int k = 1; k < UB_TEX_MIPS; ++k) {
+            int b = 1 << k;
+            for (int by = 0; by < UB_TEX_SIZE; by += b)
+                for (int bx = 0; bx < UB_TEX_SIZE; bx += b) {
+                    int sum = 0;
+                    for (int y = by; y < by + b; ++y)
+                        for (int x = bx; x < bx + b; ++x) sum += g_tex[m][y * UB_TEX_SIZE + x];
+                    u8 avg = (u8)((sum + b * b / 2) / (b * b));
+                    for (int y = by; y < by + b; ++y)
+                        for (int x = bx; x < bx + b; ++x) g_mip[m][k][y * UB_TEX_SIZE + x] = avg;
+                }
+        }
+}
+
+const u8 *ub_texture_mip(ub_material m, int k)
+{
+    if (m == UB_MAT_PLASTIC || (unsigned)m >= UB_MAT_COUNT) return NULL;
+    if (k <= 0) return g_tex[m];
+    return g_mip[m][k < UB_TEX_MIPS ? k : UB_TEX_MIPS - 1];
 }
 
 const u8 *ub_texture(ub_material m)

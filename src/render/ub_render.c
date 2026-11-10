@@ -129,6 +129,7 @@ void ub_render_set_quality(ub_quality q)
 {
     F.quality = (ub_quality)UB_CLAMP((int)q, 0, UB_QUALITY_COUNT - 1);
     if (F.ready && F.backend == UB_BACKEND_OPENGL) gl_set_quality(F.quality);
+    sw_set_quality((int)F.quality);
 }
 
 ub_quality ub_render_quality(void)

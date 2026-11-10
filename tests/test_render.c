@@ -145,10 +145,12 @@ static int count_uncovered(const ub_framebuffer *fb)
 }
 
 static void test_fast_render(void);
+static void test_fast_quality(void);
 
 void test_render(void)
 {
     test_fast_render();
+    test_fast_quality();
     CHECK(sw_init());
     ub_render_env env = flat_env();
 
@@ -157,6 +159,7 @@ void test_render(void)
     for (int run = 0; run < 4; ++run) {
         int pass = run & 1;
         sw_set_fast(run >= 2, run == 3 ? 3 : 0);
+        sw_set_quality(0); /* (the fast renderer's low quality draws as the plain one does) */
         ub_framebuffer fb = make_fb(pass ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32);
         printf("  %s%s\n", pass ? "8-bit" : "32-bit", run >= 2 ? ", fast" : "");
 
@@ -326,6 +329,7 @@ static void test_fast_render(void)
     ub_render_stats st_plain, st_fast;
     for (int run = 0; run < 3; ++run) {
         sw_set_fast(run > 0, run == 2 ? 4 : 1);
+        sw_set_quality(0);
         ub_framebuffer fb = make_fb(UB_PIXEL_XRGB32);
         sw_begin(&fb, &cam, &env);
         for (int i = n - 1; i >= 0; --i) sw_part(&parts[i]); /* farthest last: the plain renderer draws them all */
@@ -348,6 +352,114 @@ static void test_fast_render(void)
     }
     (void)st_fast;
     sw_set_fast(false, 0);
+    sw_shutdown();
+}
+
+/* The fast renderer's medium and high quality (milestone 9C): smooth
+ * curves, fog, the sun in the sky, and the sun's shadows; the same picture
+ * with any number of threads; 256 colours too. */
+static int lum_at(const ub_framebuffer *fb, int x, int y)
+{
+    u32 c = fb->format == UB_PIXEL_INDEX8 ? ub_palette[g_px8[y * W + x]] : g_px32[y * W + x];
+    return (int)((c >> 16) & 255) * 3 + (int)((c >> 8) & 255) * 6 + (int)(c & 255);
+}
+
+static void quality_scene(ub_framebuffer *fb, const ub_camera *cam, const ub_render_env *env, ub_render_stats *st)
+{
+    ub_part_draw floor = part(UB_SHAPE_BOX, v3(0, -0.5f, 0), v3(100, 1, 100), 0x909090, UB_MAT_PLASTIC);
+    ub_part_draw box = part(UB_SHAPE_BOX, v3(0, 4, 0), v3(4, 4, 4), 0xC04030, UB_MAT_PLASTIC);
+    ub_part_draw ball = part(UB_SHAPE_BALL, v3(-5, 2, 2), v3(4, 4, 4), 0x3060D0, UB_MAT_PLASTIC);
+    sw_begin(fb, cam, env);
+    sw_part(&floor);
+    sw_part(&box);
+    sw_part(&ball);
+    sw_end(st);
+}
+
+static int distinct_colours(int x0, int y0, int x1, int y1)
+{
+    static u32 seen[4096];
+    int n = 0;
+    for (int y = y0; y < y1; ++y)
+        for (int x = x0; x < x1; ++x) {
+            u32 c = g_px32[y * W + x];
+            int k = 0;
+            while (k < n && seen[k] != c) ++k;
+            if (k == n && n < 4096) seen[n++] = c;
+        }
+    return n;
+}
+
+static void test_fast_quality(void)
+{
+    CHECK(sw_init());
+    ub_render_env env = ub_render_default_env();
+    ub_camera cam = cam_at(v3(0, 12, -20), 0, -0.5f, 70);
+    cam.focus = v3(0, 0, 0);
+    ub_framebuffer fb = make_fb(UB_PIXEL_XRGB32);
+    sw_set_fast(true, 1);
+    /* where things are on the screen */
+    vec3 sun = v3_normalize(env.sun_dir);
+    f32 t = 4.0f / sun.y; /* the box's middle, down the sun's rays to the floor */
+    vec3 shade = v3_sub(v3(0, 0, 0), v3_scale(v3(sun.x, 0, sun.z), t));
+    f32 sx, sy, lx, ly, fx, fy, bx, by, nx, ny;
+    CHECK(ub_render_project(&cam, W, H, shade, &sx, &sy));
+    CHECK(ub_render_project(&cam, W, H, v3(-9, 0, -6), &lx, &ly));
+    CHECK(ub_render_project(&cam, W, H, v3(6, 0, 45), &fx, &fy));
+    CHECK(ub_render_project(&cam, W, H, v3(6, 0, -6), &nx, &ny));
+    CHECK(ub_render_project(&cam, W, H, v3(-5, 2, 2), &bx, &by));
+    static u32 q[3][W * H];
+    ub_render_stats st;
+    for (int k = 0; k < 3; ++k) {
+        sw_set_quality(k);
+        quality_scene(&fb, &cam, &env, &st);
+        memcpy(q[k], g_px32, sizeof q[k]);
+    }
+    /* smooth: the ball shades through many colours, not a face's few */
+    memcpy(g_px32, q[0], sizeof g_px32);
+    int flat = distinct_colours((int)bx - 8, (int)by - 8, (int)bx + 8, (int)by + 8);
+    memcpy(g_px32, q[1], sizeof g_px32);
+    int smooth = distinct_colours((int)bx - 8, (int)by - 8, (int)bx + 8, (int)by + 8);
+    printf("  fast, medium: the ball in %d colours (low: %d)\n", smooth, flat);
+    CHECK(smooth > flat * 2 && smooth > 20);
+    /* fog: far away nearer the horizon's colour than up close */
+    u32 far = q[1][(int)fy * W + (int)fx], near = q[1][(int)ny * W + (int)nx], hz = env.sky_horizon;
+    int dfar = abs((int)((far >> 8) & 255) - (int)((hz >> 8) & 255)), dnear = abs((int)((near >> 8) & 255) - (int)((hz >> 8) & 255));
+    u32 far0 = q[0][(int)fy * W + (int)fx];
+    int dfar0 = abs((int)((far0 >> 8) & 255) - (int)((hz >> 8) & 255));
+    CHECK(dfar < dfar0 && dfar < dnear);
+    /* shadows: under the box (high), not elsewhere, and not at medium */
+    memcpy(g_px32, q[2], sizeof g_px32);
+    int shaded = lum_at(&fb, (int)sx, (int)sy), lit = lum_at(&fb, (int)lx, (int)ly);
+    memcpy(g_px32, q[1], sizeof g_px32);
+    int shaded1 = lum_at(&fb, (int)sx, (int)sy), lit1 = lum_at(&fb, (int)lx, (int)ly);
+    printf("  fast, high: the floor %d in the box's shadow, %d in the sun (medium: %d, %d)\n", shaded, lit, shaded1, lit1);
+    CHECK(shaded * 10 < lit * 8 && shaded1 * 10 > lit1 * 9 && abs(lit - lit1) * 20 < lit1);
+    /* the same with four threads' worth of rows */
+    sw_set_fast(true, 4);
+    quality_scene(&fb, &cam, &env, &st);
+    CHECK(memcmp(q[2], g_px32, sizeof q[2]) == 0);
+    /* 256 colours: shadows too */
+    fb = make_fb(UB_PIXEL_INDEX8);
+    fb.palette = ub_render_palette();
+    quality_scene(&fb, &cam, &env, &st);
+    shaded = lum_at(&fb, (int)sx, (int)sy);
+    lit = lum_at(&fb, (int)lx, (int)ly);
+    CHECK(shaded * 10 < lit * 8);
+    /* the sun in the sky (medium up): looking at it, the middle is bright */
+    fb = make_fb(UB_PIXEL_XRGB32);
+    ub_camera up = cam_at(v3(0, 2, 0), ub_atan2f(sun.x, sun.z), ub_atan2f(sun.y, sqrtf(sun.x * sun.x + sun.z * sun.z)), 70);
+    sw_set_quality(1);
+    sw_begin(&fb, &up, &env);
+    sw_end(NULL);
+    int mid = lum_at(&fb, W / 2, H / 2), off = lum_at(&fb, W / 2, 10);
+    sw_set_quality(0);
+    sw_begin(&fb, &up, &env);
+    sw_end(NULL);
+    int mid0 = lum_at(&fb, W / 2, H / 2);
+    CHECK(mid > mid0 + 200 && mid > off);
+    sw_set_fast(false, 0);
+    sw_set_quality(0);
     sw_shutdown();
 }
 
