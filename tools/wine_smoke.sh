@@ -47,6 +47,9 @@ start_game() {
     wine "$EXE" & GAME_PID=$!
     WIN=$(timeout 60 xdotool search --sync --name '^Uniblox$' | head -1)
     xdotool windowfocus --sync "$WIN" 2>/dev/null || true
+    # the window exists before the renderer is ready (OpenGL setup can take
+    # seconds under load); input sent earlier would pile up into one frame
+    for _ in $(seq 120); do grep -q "demo ready" build/win32/uniblox.log 2>/dev/null && break; sleep 0.5; done
     sleep 1
 }
 

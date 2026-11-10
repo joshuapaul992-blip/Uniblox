@@ -64,6 +64,7 @@ typedef struct {
     bool fullscreen;
     u32 fps_cap;            /* 0 = unlimited */
     u32 present_us;         /* time to show the previous frame */
+    char present_detail[80];/* software backend: where present_us went */
     u32 sleep_us;           /* time the frame limiter waited last frame */
 } ub_frame;
 

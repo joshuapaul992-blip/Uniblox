@@ -175,6 +175,37 @@ tests/          host unit tests (make test)
   wait and a short spin at the end. It never waits when running below the
   cap. Measured under Wine at exactly 120.0, 144.0 and 59.9 fps for caps of
   120, 144 and 60. Vsync is off by default so the cap governs.
+- **Real NT 3.51 report (video):**
+  - An `opengl32.dll` built for newer Windows, sitting next to the `.exe`,
+    made the loader show "Entry Point Not Found: GetDiskFreeSpaceExW". The
+    game now loads OpenGL with `SetErrorMode` (no dialog), logs why a copy
+    was rejected, and falls back to the system's `opengl32.dll`, then to
+    the software renderer.
+  - A second run (2560x1421, Sandy Bridge CPU) rendered in 8-14 ms but
+    presented in 153 ms. The breakdown said only ~7 ms because NT 3.51's
+    GDI runs in CSRSS and queues calls; the cost landed at the next flush.
+    Present timing now calls GdiFlush after each step, and the 32-bit path
+    renders through a DIB section (shared memory, NT 3.5+, looked up at run
+    time), so frames are no longer shipped to CSRSS with StretchDIBits.
+    Jumping also accepts a press that began and ended between two frames,
+    which matters at low frame rates.
+  - The tester's display driver is WINVBE (VBE frame buffer). On NT 3.x
+    it doesn't enable write combining (NT 4.0+ only), so every byte
+    written to the screen is an uncached PCIe write: about 95 MB/s
+    measured, or 150 ms for a 2560x1421x32 frame. No user-mode change gets
+    past that; fewer bytes per frame does (smaller window, or a 16-bit
+    desktop).
+  - WINVBE's own OpenGL for NT 3.x is Mesa 7.8.2 in software and doesn't
+    mark its pixel formats generic. Auto mode now recognises software
+    OpenGL by its renderer name (software / llvmpipe / softpipe / swrast /
+    GDI Generic) and uses Uniblox's renderer instead; `renderer=opengl`
+    still forces it.
+  - The software renderer took 2.7 ms per frame, but presenting at
+    1920x1080 took 90 ms, so the game ran at 10-12 fps. Presenting now
+    uses a 32-bit `BI_BITFIELDS` DIB when the system accepts one (no
+    per-pixel colour conversion; falls back to 24-bit), and stretches
+    straight onto the window when there's no text (F3). The overlay and
+    the benchmark log show where present time goes (copy / stretch / blit).
 - **Bugs found while testing:**
   - The wedge's slope normal pointed inward, because the slope passes
     through the shape's centre, so the old "away from the centre"

@@ -29,6 +29,17 @@ static pfn_wglDeleteContext p_wglDeleteContext;
 static pfn_wglGetProcAddress p_wglGetProcAddress;
 static pfn_SwapBuffers p_SwapBuffers;
 
+/* Case-insensitive substring test (ASCII). */
+static bool contains_ci(const char *hay, const char *needle)
+{
+    for (; *hay; ++hay) {
+        const char *h = hay, *n = needle;
+        while (*h && *n && ((*h | 32) == (*n | 32))) { ++h; ++n; }
+        if (!*n) return true;
+    }
+    return false;
+}
+
 void *plat_gl_proc(const char *name)
 {
     if (!g_gl_dll) return NULL;
@@ -40,26 +51,60 @@ void *plat_gl_proc(const char *name)
     return p;
 }
 
-bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver)
+/* Load an opengl32.dll and its wgl entry points; false (and unloaded) if
+ * it cannot be loaded or is missing any of them. */
+static bool load_gl_library(const char *path)
 {
-    *software_driver = false;
-    g_gl_dll = LoadLibraryA("OPENGL32.DLL");
+    g_gl_dll = LoadLibraryA(path);
     if (!g_gl_dll) {
-        ub_info("gl: opengl32.dll not found");
+        DWORD err = GetLastError();
+        ub_warn("gl: could not load %s (error %u%s)", path, (u32)err,
+                err == 127 ? ": it needs a newer version of Windows" :
+                err == 126 ? ": not found" : "");
         return false;
     }
     p_wglCreateContext = (pfn_wglCreateContext)(void *)GetProcAddress(g_gl_dll, "wglCreateContext");
     p_wglMakeCurrent = (pfn_wglMakeCurrent)(void *)GetProcAddress(g_gl_dll, "wglMakeCurrent");
     p_wglDeleteContext = (pfn_wglDeleteContext)(void *)GetProcAddress(g_gl_dll, "wglDeleteContext");
     p_wglGetProcAddress = (pfn_wglGetProcAddress)(void *)GetProcAddress(g_gl_dll, "wglGetProcAddress");
+    if (!p_wglCreateContext || !p_wglMakeCurrent || !p_wglDeleteContext || !p_wglGetProcAddress) {
+        ub_warn("gl: %s is not a usable OpenGL library", path);
+        FreeLibrary(g_gl_dll);
+        g_gl_dll = NULL;
+        return false;
+    }
+    return true;
+}
+
+bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver)
+{
+    *software_driver = false;
+    /* Windows looks for DLLs in the program's folder first, so an
+     * opengl32.dll copied there is tried before the system's. One built
+     * for a newer Windows makes the loader pop up "Entry Point Not Found";
+     * SetErrorMode suppresses that dialog, and we then try the system's
+     * own copy by full path. */
+    UINT old_mode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX);
+    bool loaded = load_gl_library("OPENGL32.DLL");
+    if (!loaded) {
+        char path[MAX_PATH];
+        UINT n = GetSystemDirectoryA(path, MAX_PATH - 16);
+        if (n > 0 && n < MAX_PATH - 16) {
+            ub_fmt(path + n, MAX_PATH - (int)n, "\\OPENGL32.DLL");
+            loaded = load_gl_library(path);
+            if (loaded) ub_info("gl: using %s", path);
+        }
+    }
+    SetErrorMode(old_mode);
+    if (!loaded) return false;
+
     HMODULE gdi = GetModuleHandleA("GDI32.DLL");
     pfn_ChoosePixelFormat p_Choose = gdi ? (pfn_ChoosePixelFormat)(void *)GetProcAddress(gdi, "ChoosePixelFormat") : NULL;
     pfn_SetPixelFormat p_Set = gdi ? (pfn_SetPixelFormat)(void *)GetProcAddress(gdi, "SetPixelFormat") : NULL;
     pfn_DescribePixelFormat p_Describe = gdi ? (pfn_DescribePixelFormat)(void *)GetProcAddress(gdi, "DescribePixelFormat") : NULL;
     p_SwapBuffers = gdi ? (pfn_SwapBuffers)(void *)GetProcAddress(gdi, "SwapBuffers") : NULL;
-    if (!p_wglCreateContext || !p_wglMakeCurrent || !p_wglDeleteContext || !p_wglGetProcAddress ||
-        !p_Choose || !p_Set || !p_Describe || !p_SwapBuffers) {
-        ub_warn("gl: OpenGL entry points missing");
+    if (!p_Choose || !p_Set || !p_Describe || !p_SwapBuffers) {
+        ub_warn("gl: this Windows has no OpenGL pixel-format functions");
         win32_gl_shutdown();
         return false;
     }
@@ -94,10 +139,26 @@ bool win32_gl_init(HWND hwnd, bool vsync, bool *software_driver)
         win32_gl_shutdown();
         return false;
     }
+    /* Software OpenGL that does not flag its pixel formats as generic:
+     * WINVBE's ICD ("WINVBE software (Mesa 7.8.2, x87)") and Mesa's
+     * llvmpipe / softpipe / swrast. Uniblox's own renderer is faster than
+     * these for this kind of scene, so auto mode prefers it. */
+    typedef const unsigned char *(WINAPI *pfn_glGetString)(unsigned int);
+    pfn_glGetString get_string = (pfn_glGetString)(void *)GetProcAddress(g_gl_dll, "glGetString");
+    if (get_string) {
+        const char *ren = (const char *)get_string(0x1F01 /* GL_RENDERER */);
+        const char *ven = (const char *)get_string(0x1F00 /* GL_VENDOR */);
+        if (!ren) ren = "";
+        if (!ven) ven = "";
+        ub_info("gl: %s / %s", ven, ren);
+        if (contains_ci(ren, "software") || contains_ci(ren, "llvmpipe") || contains_ci(ren, "softpipe") ||
+            contains_ci(ren, "swrast") || contains_ci(ren, "GDI Generic"))
+            *software_driver = true;
+    }
     pfn_wglSwapIntervalEXT swap_interval = (pfn_wglSwapIntervalEXT)plat_gl_proc("wglSwapIntervalEXT");
     if (swap_interval) swap_interval(vsync ? 1 : 0);
     ub_info("gl: context created (%d-bit colour, %d-bit depth%s%s)", got.cColorBits, got.cDepthBits,
-            *software_driver ? ", Microsoft software driver" : "", swap_interval ? "" : ", no vsync control");
+            *software_driver ? ", software rasteriser" : "", swap_interval ? "" : ", no vsync control");
     return true;
 }
 

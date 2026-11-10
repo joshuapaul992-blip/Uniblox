@@ -475,8 +475,8 @@ static void choose_backend(const ub_display_prefs *prefs, ub_system_info *sys, i
     bool generic = false;
     if (win32_gl_init(g_hwnd, prefs->vsync, &generic)) {
         if (generic && prefs->backend == UB_BACKEND_PREF_AUTO) {
-            ub_info("display: only Microsoft's unaccelerated OpenGL is available; "
-                    "the software renderer is faster");
+            ub_info("display: the only OpenGL here renders in software; Uniblox's own "
+                    "software renderer is faster (set renderer=opengl to use it anyway)");
             win32_gl_shutdown();
         } else {
             g_frame.backend = UB_BACKEND_OPENGL;
