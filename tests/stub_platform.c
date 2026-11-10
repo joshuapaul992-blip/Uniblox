@@ -41,6 +41,15 @@ void plat_set_pixel_format(ub_pixel_format f) { (void)f; }
 void plat_set_sw_resolution(int height) { (void)height; }
 void plat_set_fullscreen(bool on) { (void)on; }
 void plat_set_fps_cap(u32 fps) { (void)fps; }
+void plat_set_present_changed_only(bool on) { (void)on; }
+int plat_display_modes(ub_display_mode *out, int max)
+{
+    static const ub_display_mode modes[] = { { 640, 480 }, { 800, 600 }, { 1280, 720 }, { 1920, 1080 } };
+    int n = 0;
+    for (; n < 4 && n < max; ++n) out[n] = modes[n];
+    return n;
+}
+void plat_set_fullscreen_mode(int w, int h) { (void)w; (void)h; }
 void *plat_gl_proc(const char *name) { (void)name; return NULL; }
 bool plat_font_atlas(int px, ub_font_atlas *out) { (void)px; (void)out; return false; }
 bool plat_command_line_arg(char *out, int cap) { (void)out; (void)cap; return false; }

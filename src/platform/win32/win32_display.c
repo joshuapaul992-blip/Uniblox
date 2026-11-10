@@ -26,6 +26,7 @@
  * (keeping the 20 static system colours), realise it, and blit with
  * DIB_PAL_COLORS so pixels map straight to palette slots. */
 #include "platform/win32/win32_internal.h"
+#include "render/ub_present.h"
 #include "core/ub_log.h"
 #include "core/ub_string.h"
 #include "core/ub_utf.h"
@@ -64,6 +65,29 @@ static HBITMAP g_membmp, g_oldbmp;
 static int g_mem_w, g_mem_h;
 static HFONT g_font;
 static int g_font_px;
+
+/* sending only what changed: a window-sized DIB section keeps what the
+ * screen shows; changed tiles are stretched into it, text redrawn over
+ * them, and only those rectangles blitted */
+static bool g_changed_only = true;
+static ub_damage g_dmg;
+static HDC g_wsecdc;
+static HBITMAP g_wsecbmp, g_wsecold;
+static u32 *g_wsecbits;
+static int g_wsec_w, g_wsec_h;
+static int g_use_wsec = -1;
+static ub_text_item g_prev_text[UB_TEXT_QUEUE_MAX];
+static RECT g_prev_rect[UB_TEXT_QUEUE_MAX];
+static int g_prev_text_count;
+
+void plat_set_present_changed_only(bool on)
+{
+    if (on != g_changed_only) ub_info("display: send %s", on ? "only what changed" : "whole frames");
+    g_changed_only = on;
+    ub_damage_invalidate(&g_dmg);
+}
+
+void win32_sw_invalidate(void) { ub_damage_invalidate(&g_dmg); }
 
 void plat_set_pixel_format(ub_pixel_format f)
 {
@@ -297,15 +321,43 @@ static void ensure_backbuffer(HDC wdc, int w, int h)
     g_mem_h = h;
 }
 
+static HFONT make_font(int px, const WCHAR *face)
+{
+    /* ANTIALIASED_QUALITY (4) is ignored where unsupported */
+    return CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                       CLIP_DEFAULT_PRECIS, 4, DEFAULT_PITCH | FF_SWISS, face);
+}
+
+HFONT win32_ui_font(int px)
+{
+    static int tahoma = -1; /* -1 unknown, 0 missing, 1 installed */
+    if (tahoma != 0) {
+        HFONT f = make_font(px, L"Tahoma");
+        if (tahoma == 1) return f;
+        /* ask GDI which face it really chose: without Tahoma, NT picks
+         * whatever it maps the name to (on NT 3.51 often a bitmap font) */
+        HDC dc = CreateCompatibleDC(NULL);
+        HFONT old = (HFONT)SelectObject(dc, f);
+        WCHAR face[40];
+        int n = GetTextFaceW(dc, 40, face);
+        SelectObject(dc, old);
+        DeleteDC(dc);
+        const WCHAR *want = L"Tahoma";
+        int i = 0;
+        while (i < n && want[i] && face[i] == want[i]) ++i;
+        tahoma = !want[i] && (i == n || face[i] == 0);
+        ub_info("display: UI font %s", tahoma ? "Tahoma" : "Arial (no Tahoma here)");
+        if (tahoma) return f;
+        DeleteObject(f);
+    }
+    return make_font(px, L"Arial");
+}
+
 static void ensure_font(int px)
 {
     if (g_font && px == g_font_px) return;
     if (g_font) DeleteObject(g_font);
-    /* Tahoma where available (NT 4.0+); GDI substitutes a similar font on
-     * NT 3.51. ANTIALIASED_QUALITY (4) is ignored where unsupported. */
-    g_font = CreateFontW(-px, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 4, DEFAULT_PITCH | FF_SWISS,
-                         L"Tahoma");
+    g_font = win32_ui_font(px);
     g_font_px = px;
 }
 
@@ -337,23 +389,170 @@ static void stretch_frame(HDC dc, int w, int h)
                   SRCCOPY);
 }
 
+static void draw_text_item(HDC dc, const ub_text_item *t)
+{
+    u16 wide[UB_TEXT_ITEM_LEN];
+    int n = ub_utf8_to_utf16(t->text, wide, UB_TEXT_ITEM_LEN);
+    if (!(t->color & 0x01000000u)) { /* UB_TEXT_FLAT: no shadow */
+        SetTextColor(dc, RGB(0, 0, 0));
+        TextOutW(dc, t->x + 1, t->y + 1, (LPCWSTR)wide, n);   /* drop shadow */
+    }
+    SetTextColor(dc, RGB((t->color >> 16) & 255, (t->color >> 8) & 255, t->color & 255));
+    TextOutW(dc, t->x, t->y, (LPCWSTR)wide, n);
+}
+
 static void draw_text_queue(HDC dc, const ub_frame *frame)
 {
     ensure_font(frame->text_px > 6 ? frame->text_px : 13);
     HFONT old = g_font ? (HFONT)SelectObject(dc, g_font) : NULL;
     SetBkMode(dc, TRANSPARENT);
-    for (int i = 0; i < frame->text_count; ++i) {
-        const ub_text_item *t = &frame->text[i];
-        u16 wide[UB_TEXT_ITEM_LEN];
-        int n = ub_utf8_to_utf16(t->text, wide, UB_TEXT_ITEM_LEN);
-        if (!(t->color & 0x01000000u)) { /* UB_TEXT_FLAT: no shadow */
-            SetTextColor(dc, RGB(0, 0, 0));
-            TextOutW(dc, t->x + 1, t->y + 1, (LPCWSTR)wide, n);   /* drop shadow */
-        }
-        SetTextColor(dc, RGB((t->color >> 16) & 255, (t->color >> 8) & 255, t->color & 255));
-        TextOutW(dc, t->x, t->y, (LPCWSTR)wide, n);
-    }
+    for (int i = 0; i < frame->text_count; ++i) draw_text_item(dc, &frame->text[i]);
     if (old) SelectObject(dc, old);
+}
+
+/* ------------------------------------------------- sending what changed */
+
+static void free_wsec(void)
+{
+    if (g_wsecdc) {
+        SelectObject(g_wsecdc, g_wsecold);
+        DeleteDC(g_wsecdc);
+        g_wsecdc = NULL;
+    }
+    if (g_wsecbmp) DeleteObject(g_wsecbmp);
+    g_wsecbmp = NULL;
+    g_wsecbits = NULL;
+    g_wsec_w = g_wsec_h = 0;
+}
+
+static bool ensure_wsec(HDC wdc, int w, int h)
+{
+    if (g_use_wsec == 0 || !p_CreateDIBSection) return false;
+    if (g_wsecbmp && g_wsec_w == w && g_wsec_h == h) return true;
+    free_wsec();
+    struct { BITMAPINFOHEADER h; DWORD masks[3]; } bi;
+    memcpy(&bi, &g_bmi32, sizeof bi);
+    bi.h.biWidth = w;
+    bi.h.biHeight = h; /* bottom-up, as NT 3.51 surely takes */
+    void *bits = NULL;
+    g_wsecbmp = p_CreateDIBSection(wdc, (BITMAPINFO *)&bi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!g_wsecbmp || !bits) {
+        if (g_wsecbmp) DeleteObject(g_wsecbmp);
+        g_wsecbmp = NULL;
+        g_use_wsec = 0;
+        ub_info("display: no window-sized DIB section; sending whole frames");
+        return false;
+    }
+    g_wsecbits = (u32 *)bits;
+    g_wsecdc = CreateCompatibleDC(wdc);
+    g_wsecold = (HBITMAP)SelectObject(g_wsecdc, g_wsecbmp);
+    g_wsec_w = w;
+    g_wsec_h = h;
+    g_prev_text_count = 0;
+    ub_damage_invalidate(&g_dmg);
+    if (g_use_wsec < 0) ub_info("display: sending only what changed (%dx%d window image)", w, h);
+    g_use_wsec = 1;
+    return true;
+}
+
+static RECT text_rect(HDC dc, const ub_text_item *t)
+{
+    u16 wide[UB_TEXT_ITEM_LEN];
+    int n = ub_utf8_to_utf16(t->text, wide, UB_TEXT_ITEM_LEN);
+    SIZE sz;
+    sz.cx = sz.cy = 0;
+    GetTextExtentPointW(dc, (LPCWSTR)wide, n, &sz);
+    RECT r;
+    r.left = t->x - 1;
+    r.top = t->y - 1;
+    r.right = t->x + sz.cx + 3; /* (shadow, italic overhang) */
+    r.bottom = t->y + sz.cy + 3;
+    return r;
+}
+
+static bool same_text(const ub_text_item *a, const ub_text_item *b)
+{
+    if (a->x != b->x || a->y != b->y || a->color != b->color) return false;
+    for (int i = 0; i < UB_TEXT_ITEM_LEN; ++i) {
+        if (a->text[i] != b->text[i]) return false;
+        if (!a->text[i]) return true;
+    }
+    return true;
+}
+
+static void mark_rect(RECT r) { ub_damage_mark_window(&g_dmg, r.left, r.top, r.right - r.left, r.bottom - r.top); }
+
+/* Returns false if this path cannot be used (then the caller sends whole frames). */
+static bool present_changed(HDC wdc, ub_frame *frame, int w, int h)
+{
+    if (!g_changed_only || g_fb.format != UB_PIXEL_XRGB32 || !ensure_wsec(wdc, w, h)) return false;
+    if (ub_damage_resize(&g_dmg, g_fb.width, g_fb.height, w, h)) g_prev_text_count = 0;
+    if (!g_dmg.prev) return false;
+    u64 t0 = plat_time_us();
+    gdi_flush(); /* GDI must be done with the section before we write it */
+    ub_damage_update(&g_dmg, g_fb.pixels, g_fb.pitch);
+    /* text that appeared, moved, changed or went: redraw under it */
+    ensure_font(frame->text_px > 6 ? frame->text_px : 13);
+    HFONT oldf = g_font ? (HFONT)SelectObject(g_wsecdc, g_font) : NULL;
+    SetBkMode(g_wsecdc, TRANSPARENT);
+    RECT now_rect[UB_TEXT_QUEUE_MAX];
+    int n = frame->text_count, most = n > g_prev_text_count ? n : g_prev_text_count;
+    for (int i = 0; i < n; ++i) now_rect[i] = text_rect(g_wsecdc, &frame->text[i]);
+    for (int i = 0; i < most; ++i) {
+        bool both = i < n && i < g_prev_text_count;
+        if (both && same_text(&frame->text[i], &g_prev_text[i])) continue;
+        if (i < n) mark_rect(now_rect[i]);
+        if (i < g_prev_text_count) mark_rect(g_prev_rect[i]);
+    }
+    ub_prect rects[512];
+    int nr = ub_damage_rects(&g_dmg, rects, 512);
+    int px = 0;
+    for (int i = 0; i < nr; ++i) px += rects[i].w * rects[i].h;
+    bool full = nr == 512 || (i64)px * 10 > (i64)w * h * 7; /* most of it: one big blit */
+    if (full) {
+        rects[0].x = rects[0].y = 0;
+        rects[0].w = w;
+        rects[0].h = h;
+        nr = 1;
+        px = w * h;
+    }
+    u32 *bottom = g_wsecbits + (size_t)(h - 1) * w;
+    for (int i = 0; i < nr; ++i) ub_present_stretch(g_fb.pixels, g_fb.width, g_fb.height, g_fb.pitch, bottom, w, h, -w, rects[i]);
+    u64 t1 = plat_time_us();
+    /* text over the redrawn rectangles only */
+    for (int i = 0; i < nr && n; ++i) {
+        RECT rr;
+        rr.left = rects[i].x;
+        rr.top = rects[i].y;
+        rr.right = rects[i].x + rects[i].w;
+        rr.bottom = rects[i].y + rects[i].h;
+        int saved = SaveDC(g_wsecdc);
+        IntersectClipRect(g_wsecdc, rr.left, rr.top, rr.right, rr.bottom);
+        for (int k = 0; k < n; ++k) {
+            RECT t = now_rect[k];
+            if (t.right <= rr.left || t.left >= rr.right || t.bottom <= rr.top || t.top >= rr.bottom) continue;
+            draw_text_item(g_wsecdc, &frame->text[k]);
+        }
+        RestoreDC(g_wsecdc, saved);
+    }
+    if (oldf) SelectObject(g_wsecdc, oldf);
+    gdi_flush();
+    u64 t2 = plat_time_us();
+    for (int i = 0; i < nr; ++i)
+        BitBlt(wdc, rects[i].x, rects[i].y, rects[i].w, rects[i].h, g_wsecdc, rects[i].x, rects[i].y, SRCCOPY);
+    gdi_flush();
+    u64 t3 = plat_time_us();
+    for (int i = 0; i < n; ++i) {
+        g_prev_text[i] = frame->text[i];
+        g_prev_rect[i] = now_rect[i];
+    }
+    g_prev_text_count = n;
+    u32 st = (u32)(t1 - t0) / 100u, tx = (u32)(t2 - t1) / 100u, b = (u32)(t3 - t2) / 100u;
+    u32 pct = (u32)((i64)px * 100 / ((i64)w * h));
+    ub_fmt(frame->present_detail, sizeof frame->present_detail,
+           "changed %u%% (%d rects): stretch %u.%u + text %u.%u + blit %u.%u ms, %dx%d -> %dx%d", pct, nr,
+           st / 10, st % 10, tx / 10, tx % 10, b / 10, b % 10, g_fb.width, g_fb.height, w, h);
+    return true;
 }
 
 void win32_sw_present(HDC wdc, ub_frame *frame)
@@ -368,6 +567,7 @@ void win32_sw_present(HDC wdc, ub_frame *frame)
     }
     bool one_to_one = g_fb.width == w && g_fb.height == h;
     const char *path;
+    if (present_changed(wdc, frame, w, h)) return;
 
     if (g_fb.format == UB_PIXEL_XRGB32 && ensure_section(wdc)) {
         gdi_flush(); /* GDI must be done with the section before we write it */
@@ -463,6 +663,8 @@ void win32_sw_shutdown(void)
     if (g_font) DeleteObject(g_font);
     g_font = NULL;
     free_section();
+    free_wsec();
+    ub_damage_free(&g_dmg);
     if (g_hpal) DeleteObject(g_hpal);
     g_hpal = NULL;
     free_buffers();

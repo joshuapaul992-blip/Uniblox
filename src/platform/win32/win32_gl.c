@@ -193,9 +193,7 @@ bool plat_font_atlas(int px_height, ub_font_atlas *out)
     memset(out, 0, sizeof *out);
     HDC screen = GetDC(NULL);
     HDC dc = CreateCompatibleDC(screen);
-    HFONT font = CreateFontW(-px_height, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                             OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, 4 /* antialiased */,
-                             DEFAULT_PITCH | FF_SWISS, L"Tahoma");
+    HFONT font = win32_ui_font(px_height);
     HFONT old_font = (HFONT)SelectObject(dc, font);
     TEXTMETRICW tm;
     GetTextMetricsW(dc, &tm);

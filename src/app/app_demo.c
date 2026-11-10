@@ -8,7 +8,7 @@
  *   - F8 switches 32-bit / 8-bit palette rendering (software renderer)
  *   - F9 cycles the frame rate cap: 60, 120, 144, 240, unlimited
  *   - F3 hides the text overlay; M mutes; Enter or '/' opens a chat line;
- *     left click beeps (panned/pitched by position); Esc quits
+ *     left click beeps (panned/pitched by position); Esc opens the menu (Q quits from it)
  *   - F7 saves the place as places/<name>.ubx
  *   - settings are saved to uniblox.cfg
  *
@@ -19,6 +19,7 @@
  * scripts. */
 #include "app/app.h"
 #include "app/app_play.h"
+#include "app/app_settings.h"
 #include "audio/ub_mixer.h"
 #include "core/ub_log.h"
 #include "core/ub_math.h"
@@ -29,6 +30,7 @@
 #include "game/ub_game.h"
 #include "render/ub_render.h"
 #include "script/ub_script.h"
+#include "ui/ub_ui.h"
 #include "world/ub_rbxl.h"
 #include "world/ub_world.h"
 #include "crt/ub_crt.h"
@@ -48,29 +50,32 @@ static ub_world g_world;              /* a place being built or loaded; then the
 static ub_game g_game;                /* the running place */
 static bool g_game_on;
 #define GW (&g_game.world)
-static bool g_run_scripts = true;     /* scripts= in the config */
+static ub_settings g_set;             /* everything in uniblox.cfg (the menu changes it) */
+static ub_menu g_menu;
+static bool g_menu_open;
+#define g_run_scripts g_set.scripts
 static ub_play_view g_view;           /* camera, controls, the character's figure, the static set */
 static vec3 g_bench_center;
 static bool g_demo_world;
 static ub_import_stats g_import;
 static bool g_imported;
 static char g_place_arg[260];         /* place from the command line or config */
-static char g_cfg_place[260];         /* place= from the config, written back on exit */
+#define g_cfg_place g_set.place
 static char g_status[160];            /* last load/save message for the overlay */
 
 #define g_yaw g_view.yaw
 #define g_pitch g_view.pitch
 #define g_zoom g_view.zoom
 static f32 g_time;
-static bool g_muted;
-static int g_colors_cfg;              /* 0 = automatic, 8 or 32 = chosen with F8 */
-static ub_display_prefs g_prefs;      /* renderer, window, fps cap (from the config) */
-static int g_quality = UB_QUALITY_HIGH;
+#define g_muted g_set.muted
+#define g_colors_cfg g_set.colors
+#define g_prefs g_set.prefs
+#define g_quality g_set.quality
 static int g_win_w, g_win_h;          /* last windowed size, saved on exit */
 static char g_renderer_desc[160];
-static bool g_gl_shaders = true;
+#define g_gl_shaders g_set.gl_shaders
 static u32 g_fps_log_us;
-static bool g_hide_overlay;
+#define g_hide_overlay g_set.hide_overlay
 static char g_typed[TYPED_MAX + 1];
 static bool g_typing;
 static char g_last_message[TYPED_MAX + 1];
@@ -134,6 +139,23 @@ static void base_name(const char *path, char *out, int cap)
 
 /* Load a .ubx or Roblox .rbxl/.rbxm place. user_path: chosen by the user
  * (command line), so any path is allowed; otherwise a checked game path. */
+static char g_loaded_path[260];   /* the place last loaded ("" = the demo) */
+static bool g_loaded_user;
+
+static bool load_place(const char *path, bool user_path);
+
+/* The menu's "Load the place again": a fresh start of the same place. */
+static void reload_place(void)
+{
+    ub_info("loading the place again");
+    char path[260];
+    ub_fmt(path, sizeof path, "%s", g_loaded_path);
+    if (!path[0] || !load_place(path, g_loaded_user)) {
+        build_demo_world();
+        world_changed();
+    }
+}
+
 static bool load_place(const char *path, bool user_path)
 {
     void *data;
@@ -163,6 +185,8 @@ static bool load_place(const char *path, bool user_path)
     ub_world_free(&g_world); /* (empty: the game took the last one) */
     g_world = w;
     g_demo_world = false;
+    ub_fmt(g_loaded_path, sizeof g_loaded_path, "%s", path);
+    g_loaded_user = user_path;
     g_imported = roblox;
     u32 ms = (u32)((plat_time_us() - t0) / 1000u);
     if (roblox) {
@@ -284,21 +308,7 @@ static void load_sound(ub_sound *s, const char *path, void (*synth)(ub_sound *))
 
 /* ------------------------------------------------------------ config */
 
-static i32 parse_int(const char *s)
-{
-    i32 sign = 1, v = 0;
-    if (*s == '-') { sign = -1; ++s; }
-    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
-    return v * sign;
-}
 
-static bool key_is(const char *line, const char *key, const char **value)
-{
-    while (*key && *line == *key) { ++line; ++key; }
-    if (*key || *line != '=') return false;
-    *value = line + 1;
-    return true;
-}
 
 #define DEG(r) ub_roundf((r) * (180.0f / UB_PI))
 #define RAD(d) ((f32)(d) * (UB_PI / 180.0f))
@@ -306,84 +316,39 @@ static bool key_is(const char *line, const char *key, const char **value)
 static const int k_sw_heights[] = { 240, 360, 480, 720, 0 };   /* 0 = window height */
 static const u32 k_fps_caps[] = { 60, 120, 144, 240, 0 };      /* 0 = unlimited */
 
-static bool str_is(const char *a, const char *b)
+
+static void apply_volume(void) { ub_mixer_set_master_volume(g_muted ? 0.0f : (f32)g_set.volume / 100.0f); }
+
+static void apply_controls(void)
 {
-    while (*a && *a == *b) { ++a; ++b; }
-    return *a == *b;
+    g_view.look_scale = (f32)g_set.mouse_pct / 100.0f;
+    g_view.invert_y = g_set.invert_y;
+    g_view.fov_deg = (f32)g_set.fov;
 }
 
 static void load_config(void)
 {
     char *text;
     u32 size;
-    if (!plat_file_read_all(CONFIG_PATH, 8192, (void **)&text, &size)) return;
-    char *line = text;
-    while (*line) {
-        char *end = line;
-        while (*end && *end != '\n' && *end != '\r') ++end;
-        char saved = *end;
-        *end = 0;
-        const char *v;
-        if (key_is(line, "zoom", &v)) g_zoom = ub_clampf((f32)parse_int(v), ZOOM_MIN, ZOOM_MAX);
-        else if (key_is(line, "yaw_deg", &v)) g_yaw = RAD(parse_int(v));
-        else if (key_is(line, "pitch_deg", &v)) g_pitch = ub_clampf(RAD(parse_int(v)), PITCH_MIN, PITCH_MAX);
-        else if (key_is(line, "muted", &v)) g_muted = parse_int(v) != 0;
-        else if (key_is(line, "colors", &v)) {
-            i32 c = parse_int(v);
-            g_colors_cfg = (c == 8 || c == 32) ? c : 0;
-        }
-        else if (key_is(line, "renderer", &v))
-            g_prefs.backend = str_is(v, "opengl") ? UB_BACKEND_PREF_OPENGL
-                            : str_is(v, "software") ? UB_BACKEND_PREF_SOFTWARE : UB_BACKEND_PREF_AUTO;
-        else if (key_is(line, "fullscreen", &v)) g_prefs.fullscreen = parse_int(v) != 0;
-        else if (key_is(line, "window_w", &v)) g_prefs.window_w = parse_int(v);
-        else if (key_is(line, "window_h", &v)) g_prefs.window_h = parse_int(v);
-        else if (key_is(line, "fps_cap", &v)) g_prefs.fps_cap = (u32)UB_CLAMP(parse_int(v), 0, 1000);
-        else if (key_is(line, "vsync", &v)) g_prefs.vsync = parse_int(v) != 0;
-        else if (key_is(line, "sw_height", &v)) g_prefs.sw_height = UB_CLAMP(parse_int(v), 0, 4320);
-        else if (key_is(line, "quality", &v)) g_quality = UB_CLAMP(parse_int(v), 0, UB_QUALITY_COUNT - 1);
-        else if (key_is(line, "gl_shaders", &v)) g_gl_shaders = parse_int(v) != 0;
-        else if (key_is(line, "scripts", &v)) g_run_scripts = parse_int(v) != 0;
-        else if (key_is(line, "place", &v)) {
-            ub_fmt(g_cfg_place, sizeof g_cfg_place, "%s", v);
-            if (!g_place_arg[0] && v[0]) ub_fmt(g_place_arg, sizeof g_place_arg, "@%s", v);
-        }
-        *end = saved;
-        line = end;
-        while (*line == '\n' || *line == '\r') ++line;
-    }
+    if (!plat_file_read_all(CONFIG_PATH, 16384, (void **)&text, &size)) return;
+    settings_parse(&g_set, text);
     plat_free(text);
+    g_zoom = ub_clampf((f32)g_set.zoom, ZOOM_MIN, ZOOM_MAX);
+    g_yaw = RAD(g_set.yaw_deg);
+    g_pitch = ub_clampf(RAD(g_set.pitch_deg), PITCH_MIN, PITCH_MAX);
+    if (!g_place_arg[0] && g_set.place[0]) ub_fmt(g_place_arg, sizeof g_place_arg, "@%s", g_set.place);
     ub_info("loaded %s", CONFIG_PATH);
 }
 
 static void save_config(void)
 {
-    static const char *const renderer[] = { "auto", "opengl", "software" };
-    char text[1792];
-    int n = ub_fmt(text, sizeof text,
-                   "# Uniblox settings (written on exit)\r\n"
-                   "# renderer: auto (OpenGL if available), opengl or software\r\n"
-                   "renderer=%s\r\n"
-                   "# quality (OpenGL): 0 = low, 1 = medium (shadows), 2 = high (shadows + anti-aliasing)\r\n"
-                   "quality=%d\r\n"
-                   "# gl_shaders: 1 = full effects, 0 = basic OpenGL 1.1 (for problem drivers)\r\n"
-                   "gl_shaders=%d\r\n"
-                   "# fps_cap: frame rate limit, 0 = unlimited\r\n"
-                   "fps_cap=%u\r\nvsync=%d\r\n"
-                   "fullscreen=%d\r\nwindow_w=%d\r\nwindow_h=%d\r\n"
-                   "# sw_height (software renderer): render height, 0 = window height\r\n"
-                   "sw_height=%d\r\n"
-                   "# colors (software renderer): 0 = automatic, 8 = 256-colour palette, 32 = full colour\r\n"
-                   "colors=%d\r\n"
-                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\nmuted=%d\r\n"
-                   "# scripts: 1 = run the place's scripts, 0 = do not\r\n"
-                   "scripts=%d\r\n"
-                   "# place: place file to open at start, relative to this folder (.ubx, .rbxl or .rbxm),\r\n"
-                   "# e.g. places/castle.ubx. Empty = the built-in demo. A file named on the command line wins\r\n"
-                   "place=%s\r\n",
-                   renderer[g_prefs.backend], g_quality, g_gl_shaders, g_prefs.fps_cap, g_prefs.vsync,
-                   g_prefs.fullscreen, g_win_w, g_win_h, g_prefs.sw_height, g_colors_cfg,
-                   (i32)g_zoom, DEG(ub_wrap_angle(g_yaw)), DEG(g_pitch), g_muted, g_run_scripts, g_cfg_place);
+    g_set.zoom = (i32)g_zoom;
+    g_set.yaw_deg = DEG(ub_wrap_angle(g_yaw));
+    g_set.pitch_deg = DEG(g_pitch);
+    g_set.prefs.window_w = g_win_w;
+    g_set.prefs.window_h = g_win_h;
+    char text[3072];
+    int n = settings_write(&g_set, text, sizeof text);
     if (plat_file_write_all(CONFIG_PATH, text, (u32)n)) ub_info("saved %s", CONFIG_PATH);
     else ub_warn("could not save %s", CONFIG_PATH);
 }
@@ -403,7 +368,9 @@ const ub_app_info *app_info(void)
 void app_preinit(ub_display_prefs *prefs)
 {
     play_view_init(&g_view);
+    settings_defaults(&g_set);
     g_prefs = *prefs; /* platform defaults: 120 fps cap, software height 480 */
+    g_prefs.fs_width = g_prefs.fs_height = 0;
     plat_command_line_arg(g_place_arg, sizeof g_place_arg); /* "uniblox.exe castle.rbxl" */
     load_config();
     *prefs = g_prefs;
@@ -443,7 +410,9 @@ bool app_init(const ub_system_info *sys, const ub_frame *frame)
     load_sound(&g_snd_jump, "sounds/jump.wav", synth_jump);
     load_sound(&g_snd_land, "sounds/land.wav", synth_land);
     load_sound(&g_snd_click, "sounds/click.wav", synth_click);
-    ub_mixer_set_master_volume(g_muted ? 0.0f : 0.8f);
+    apply_volume();
+    apply_controls();
+    plat_set_present_changed_only(g_set.changed_only);
     ub_info("demo ready");
     return true;
 }
@@ -466,16 +435,19 @@ void app_shutdown(void)
 
 /* Chat-style text entry: Enter or '/' opens it, Enter sends, Escape
  * cancels. While it is open, keys type text instead of moving. Works on
- * the ordered character stream so fast typing is never reordered. */
-static void handle_typing(const ub_input *in)
+ * the ordered character stream so fast typing is never reordered.
+ * Returns whether it was open at any point this frame: '/', text and Esc
+ * can all arrive in one frame, and that Esc only cancels the text. */
+static bool handle_typing(const ub_input *in)
 {
+    bool used = g_typing;
     for (const char *p = in->text; *p;) {
         const char *start = p;
         u32 c = ub_utf8_decode(&p);
         int len = (int)ub_strlen(g_typed);
         if (!g_typing) {
             if (c == '\r' || c == '/') {
-                g_typing = true;
+                g_typing = used = true;
                 g_typed[0] = 0; /* the '/' that opened it is not part of the text */
             }
             continue; /* anything else is a gameplay key */
@@ -503,12 +475,43 @@ static void handle_typing(const ub_input *in)
             }
         }
     }
+    return used;
 }
 
 static const char *mode_name(const ub_frame *frame)
 {
     if (frame->backend == UB_BACKEND_OPENGL) return ub_render_quality_name(ub_render_quality());
     return frame->fb && frame->fb->format == UB_PIXEL_INDEX8 ? "8-bit" : "32-bit";
+}
+
+/* what the menu changed, applied now */
+static void apply_menu(int f, ub_frame *frame)
+{
+    if (f & SET_FPS) plat_set_fps_cap(g_prefs.fps_cap);
+    if (f & SET_FULLSCREEN) plat_set_fullscreen(g_prefs.fullscreen);
+    if (f & SET_FSMODE) plat_set_fullscreen_mode(g_prefs.fs_width, g_prefs.fs_height);
+    if (f & SET_QUALITY) ub_render_set_quality((ub_quality)g_quality);
+    if (f & SET_SWRES) plat_set_sw_resolution(g_prefs.sw_height);
+    if (f & SET_COLORS)
+        plat_set_pixel_format(g_colors_cfg == 8 || (g_colors_cfg == 0 && g_sys.palette_display) ? UB_PIXEL_INDEX8 : UB_PIXEL_XRGB32);
+    if (f & SET_PRESENT) plat_set_present_changed_only(g_set.changed_only);
+    if (f & SET_SOUND) apply_volume();
+    if (f & SET_CONTROLS) apply_controls();
+    if (f & SET_RESTART_NEEDED) ub_fmt(g_status, sizeof g_status, "Some changes take effect when Uniblox starts again");
+    if (f & 0xFFFF) save_config(); /* changes are kept at once */
+    if (f & MENU_RESUME) {
+        g_menu_open = false;
+        ub_info("menu closed");
+    }
+    if (f & MENU_RELOAD) {
+        g_menu_open = false;
+        reload_place();
+    }
+    if (f & MENU_QUIT) {
+        ub_info("quitting from the menu");
+        plat_request_quit();
+    }
+    (void)frame;
 }
 
 static void start_benchmark(ub_frame *frame)
@@ -567,9 +570,9 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     }
 
     /* --- text entry first: while it is open, keys do not move us --- */
-    bool was_typing = g_typing;
-    if (!g_bench) handle_typing(in);
-    bool play_keys = !was_typing && !g_typing && !g_bench;
+    bool typed = !g_bench && handle_typing(in);
+    bool menu_was_open = g_menu_open;
+    bool play_keys = !typed && !g_typing && !g_bench && !g_menu_open;
 
     /* --- function keys --- */
     if (play_keys && in->key_pressed[UB_KEY_F3]) g_hide_overlay = !g_hide_overlay;
@@ -612,7 +615,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     /* --- camera controls and movement --- */
     vec3 move;
     bool jump;
-    play_view_input(&g_view, in, dt, play_keys, !g_bench, &move, &jump);
+    play_view_input(&g_view, in, dt, play_keys, !g_bench && !g_menu_open, &move, &jump);
 
     /* --- the game: scripts, physics in fixed steps, the character --- */
     ub_game_update(&g_game, dt, move, jump);
@@ -633,7 +636,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     /* --- other input --- */
     if (play_keys && in->key_pressed['M']) {
         g_muted = !g_muted;
-        ub_mixer_set_master_volume(g_muted ? 0.0f : 0.8f);
+        apply_volume();
         ub_debug("mute %s", g_muted ? "on" : "off");
     }
     if (!g_bench && in->mouse_pressed[UB_MOUSE_LEFT]) {
@@ -644,9 +647,12 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         g_clicks++;
         ub_debug("click %u at %d,%d", g_clicks, in->mouse_x, in->mouse_y);
     }
-    if (play_keys && in->key_pressed[UB_KEY_ESCAPE]) {
-        ub_info("escape pressed, quitting");
-        plat_request_quit();
+    if (play_keys && in->key_pressed[UB_KEY_ESCAPE] && !g_menu_open) {
+        g_menu_open = true; /* the menu (it reads Esc itself from the next frame) */
+        g_menu.page = 0;
+        g_menu.opengl = frame->backend == UB_BACKEND_OPENGL;
+        ub_info("menu opened");
+        play_keys = false;
     }
 
     /* --- camera --- */
@@ -689,7 +695,7 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         ub_debug("fps %u.%u at %dx%d, cap %u, slept %u us last frame", g_fps_x10 / 10, g_fps_x10 % 10,
                  frame->width, frame->height, frame->fps_cap, frame->sleep_us);
     }
-    if (!g_hide_overlay || g_bench) {
+    if ((!g_hide_overlay || g_bench) && !g_menu_open) {
         int lh = ub_render_line_height(), x = lh / 2, y = lh / 3;
         char line[192];
 #define LINE(...) do { ub_fmt(line, sizeof line, __VA_ARGS__); ub_render_text(x, y, line, 0xFFFFFF); y += lh; } while (0)
@@ -742,10 +748,18 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
             else if (g_last_message[0]) LINE("Last message: %s", g_last_message);
             else if (g_demo_world) LINE("Chat (Enter): fast, slow, night, day");
             LINE("WASD move, Space jump, right mouse look, wheel zoom, F11 fullscreen");
-            LINE("F5 benchmark, F6 %s, F7 save place, F8 colours, F9 fps cap, F3 hide text, Esc quit",
+            LINE("F5 benchmark, F6 %s, F7 save place, F8 colours, F9 fps cap, F3 hide text, Esc menu",
                  frame->backend == UB_BACKEND_OPENGL ? "quality" : "resolution");
         }
 #undef LINE
+    }
+    if (g_menu_open) {
+        ub_input mi = *in;
+        if (!menu_was_open) mi.key_pressed[UB_KEY_ESCAPE] = false; /* (this Esc opened it) */
+        ui_begin(&mi, frame->width, frame->height, dt);
+        int f = settings_menu(&g_menu, &g_set, &mi);
+        ui_end();
+        apply_menu(f, frame);
     }
     ub_render_end(&g_stats);
 

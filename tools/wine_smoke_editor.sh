@@ -68,7 +68,7 @@ xdotool windowfocus --sync "$WIN" 2>/dev/null || true
 for _ in $(seq 120); do grep -q "demo ready" build/win32/uniblox.log 2>/dev/null && break; sleep 0.5; done
 sleep 2
 import -window root "$SHOT-game.png"
-xdotool key Escape
+xdotool key Escape; sleep 0.5; xdotool key q   # the menu, then Quit
 for _ in $(seq 50); do kill -0 "$G" 2>/dev/null || break; sleep 0.2; done
 kill $G 2>/dev/null || true
 wineserver -k 2>/dev/null || true
