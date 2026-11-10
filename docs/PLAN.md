@@ -56,7 +56,8 @@ src/platform/   OS interface; win32/ backend (later posix/ for the server)
 src/render/     software and OpenGL renderers: meshes, procedural textures, palette
 src/world/      object tree, welds, place files (.ubx) and the Roblox importer
 src/physics/    convex hull + sphere collision, soft-step solver, sleeping islands, character
-src/script/     sandboxed Lua 5.1 + Uniblox API
+src/game/       a running place: world + physics + character + scripts; the demo place
+src/script/     sandboxed Lua 5.1 + Roblox-style API, on its own small C library
 src/net/        loopback + UDP transports, reliability, replication
 src/ui/         immediate-mode GUI (HUD and editor)
 src/app/        client / server / editor front ends
@@ -74,7 +75,7 @@ tests/          host unit tests (make test)
 | 2.5 | High-quality OpenGL renderer | Native 1080p/1440p, resizable and fullscreen, shadows, specular, anti-aliasing; 120 fps cap by default | **Built.** Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real GPU |
 | 3 | World model + place files | Save/load round-trips byte for byte | **Built.** `.ubx` round-trips byte for byte; real Roblox `.rbxl`/`.rbxm` files import. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
 | 4 | Physics + character | Walk, jump, collide; a box stack comes to rest | **Built.** Towers of 20 parts come to rest and sleep; the character walks, jumps, steps up, collides and pushes. Passes unit tests and the Wine smoke test with both renderers. Needs a run on a real install |
-| 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | |
+| 5 | Lua scripting | A touch-activated door works; hostile scripts are contained | **Built.** The door opens when walked into (unit test and Wine smoke test), and 28 hostile scripts are stopped or fail while the game carries on. Needs a run on a real install |
 | 6 | In-game editor | Build an obstacle course without writing code | |
 | 7 | Renderer polish + settings menu | In-game settings UI; more effects | Hardware OpenGL path moved forward into milestone 2.5 |
 | 8 | Loopback networking | Single-player runs entirely through replication | |
@@ -317,7 +318,89 @@ tests/          host unit tests (make test)
     warm-start several new ones. Both are fixed, though neither caused the
     stack trouble.
 
+## Milestone 5 notes
+
+- **Lua 5.1.5** (`src/script/lua`, MIT) is built on Uniblox's own small C
+  library (`src/script/ub_libc.c`, headers in `src/script/libc`). It has
+  x87 maths, an exact `strtod`, `printf`-style formatting that matches
+  glibc digit for digit, and `setjmp`. It's tested against glibc. Changes
+  to Lua are marked `UNIBLOX` and listed in `src/script/lua/UNIBLOX.md`:
+  work limits in patterns and `string.rep`, Luau's compound assignments and
+  `continue`.
+- **The game layer** (`src/game/ub_game.c`) runs a place: physics, the
+  character (with a Model, HumanoidRootPart and Humanoid for scripts),
+  health, death and respawn, and the scripts. It doesn't touch the screen
+  or the OS, so the tests run whole games. The app draws what it holds.
+  Parts are drawn from a static set until something moves or changes
+  them, then every frame.
+- **Scripts** (`src/script/ub_script.c`): one Lua state. Each script gets
+  its own globals: copies of the library tables, `script`, and the shared
+  `_G`/`shared`. Everything else is read from a locked base table. Every
+  script runs as a coroutine; `wait`, `task.*` and event `Wait` park it in
+  a scheduler. Waits are woken in game time, which only moves with physics
+  steps. Events fire handlers on new threads. All calls into Lua from the
+  game are protected (`lua_cpcall`), so a script error never reaches C.
+- **The API** (`ub_sapi_inst.c`, `ub_sapi_types.c`): instances are cached
+  userdata, one per instance, so `==` and table keys work. Properties map
+  onto the world, converting between Roblox's axes and Uniblox's (z
+  flipped, rotations as S·R·S, the same turns for cylinders and wedges as
+  the importer). Unknown properties go into a per-instance table. Services
+  that aren't world instances (RunService, TweenService, Debris...) are
+  virtual instances with negative indices.
+- **pcall can wait**, as in Luau. Lua 5.1 can't yield across `pcall`, so
+  `pcall` and `xpcall` run the function as a coroutine and pass its yields
+  up. A wait inside one wakes the thread that called `pcall` (and
+  `coroutine.running` returns that thread), and the resume flows back
+  down.
+- **Containment:**
+  - *Time:* a count hook checks the clock every 10,000 instructions. Past
+    250 ms, the hook switches to fire on every instruction, so `pcall`
+    can't catch the error and carry on. The script is then stopped (its
+    threads and connections dropped), even if the error was caught.
+  - *Memory:* the allocator holds all scripts to 64 MB. The script that
+    hits the limit is stopped the same way. After any out-of-memory error a
+    full collection runs, since Lua 5.1 has no emergency collector.
+  - *C-side work:* pattern matching has step and depth limits,
+    `string.rep` and string building are capped at 16 MB, and `find` with
+    plain text has a work limit.
+  - *Sandbox:* no `load`, `loadstring`, `dofile`, `getfenv`/`setfenv`,
+    `string.dump`, `debug`, `io` or OS functions beyond `os.time`/`clock`.
+    Bytecode is refused. The string metatable and the API's metatables are
+    locked.
+  - *Instances:* scripts may add up to 100,000 live instances. Destroy
+    disconnects an instance's events (as in Roblox), so handlers that refer
+    to it don't keep it alive.
+- **Slot reuse:** the world never used to delete anything, so a game that
+  made and destroyed parts grew for ever. Now an instance's slot (and its
+  part's) is reused once it's destroyed, or was never parented, and no
+  script holds it. That's found through the instance userdata's `__gc`,
+  queued and handled at safe points. Physics reuses emptied one-shape
+  bodies and their shape slots after a step has passed, and wakes
+  whatever slept with them first. The string pool shares repeated names.
+  300,000 parts made and destroyed grow the world by about 600 slots.
+- **See-through parts** use a 4x4 ordered-dither screen door: dithered
+  spans in the software renderer and `glPolygonStipple` in OpenGL. No
+  sorting is needed, and it works in 8-bit colour. It covers imported
+  places' windows too.
+- **Bugs found on the way:**
+  - A running coroutine isn't a GC root in Lua 5.1. The scheduler was
+    popping a thread before resuming it.
+  - A weak-keyed table mapping pcall coroutines to their callers kept dead
+    threads alive. There are no ephemerons in 5.1, so it needs weak values
+    too.
+  - `TweenInfo.new` read its arguments after pushing its result.
+  - Tween goals read a Color3's components with a relative stack index
+    after pushing. The Wine smoke test caught this through the demo's lava
+    script.
+
 ## Open items
+
+- Milestone 5 on a real install: walk into the demo's door, step on the
+  green button, and send the `script:` lines from `uniblox.log`. Then try
+  a Roblox place with scripts.
+- Not done yet: LocalScripts and GUI (no screen GUI exists yet), animations
+  (`LoadAnimation` returns a track that does nothing), `Humanoid:MoveTo`,
+  sounds from scripts, constraints, and `CollectionService` tags.
 
 - Milestone 4 on a real install: knock over the demo's tower and crates,
   and check that they settle. The overlay's physics time should stay well
@@ -336,8 +419,8 @@ tests/          host unit tests (make test)
 - Corner wedges are an approximation; their slope direction hasn't been
   checked against an image of the real shape.
 - Not imported yet: mesh and union geometry (needs local mesh files),
-  terrain, textures and decals, and see-through rendering (parts are
-  either drawn opaque or hidden).
+  terrain, textures and decals. (See-through parts are drawn since
+  milestone 5.)
 - Milestone 2 speed on a Pentium-class machine: run F5 in 86Box or PCem
   and send the `benchmark:` line from `uniblox.log`. On a modern CPU under
   Wine a frame takes about 1.1 ms to render and 0.9 ms to display; that

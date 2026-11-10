@@ -1935,6 +1935,7 @@ static stween g_tweens[MAX_TWEENS];
 
 static int value_kind(lua_State *L, int i, f32 *out)
 {
+    if (i < 0) i = lua_gettop(L) + i + 1; /* it pushes below */
     if (lua_type(L, i) == LUA_TNUMBER) {
         out[0] = (f32)lua_tonumber(L, i);
         return 0;

@@ -54,6 +54,7 @@ void ub_script_end_frame(f32 dt);
 void ub_script_touched(i32 inst_a, i32 inst_b);
 void ub_script_died(void);
 void ub_script_respawned(void);
+void ub_script_chatted(const char *message);   /* the player said something */
 /* Does some script listen to this part's Touched? (Then it reports
  * touches even when not solid.) */
 bool ub_script_watches_touch(i32 inst);

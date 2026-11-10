@@ -256,6 +256,12 @@ local ok, err = pcall(function()
 	wait(0.25)
 	check(done and near(tp.Transparency, 1, 0.01) and vnear(tp.Position, Vector3.new(10, 20, 0), 0.01), "tween end")
 
+	local cp = Instance.new("Part")
+	cp.Color = Color3.new(0, 0, 0)
+	game:GetService("TweenService"):Create(cp, TweenInfo.new(0.1), { Color = Color3.new(1, 1, 1) }):Play()
+	wait(0.2)
+	check(near(cp.Color.R, 1, 0.01) and near(cp.Color.B, 1, 0.01), "Color3 tween")
+
 	-- Debris
 	local junk = Instance.new("Part", workspace)
 	game:GetService("Debris"):AddItem(junk, 0.05)

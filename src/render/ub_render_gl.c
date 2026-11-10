@@ -116,6 +116,9 @@ static struct {
     batch statics[UB_MAT_COUNT];          /* static parts (CPU copy when there are no VBOs) */
     GLuint static_vbo[UB_MAT_COUNT];
     int static_verts[UB_MAT_COUNT];
+    ub_part_draw *see_statics;            /* see-through static parts: drawn with the dynamic ones */
+    int see_static_count;
+    GLubyte stipple[16][128];             /* screen-door patterns per see-through level */
     int width, height;
 } G;
 
@@ -509,9 +512,24 @@ static void free_statics(void);
 
 /* ---------------------------------------------------------------- init */
 
+static void make_stipples(void)
+{
+    for (int level = 0; level < 16; ++level)
+        for (int y = 0; y < 32; ++y)
+            for (int b = 0; b < 4; ++b) {
+                GLubyte bits = 0;
+                for (int i = 0; i < 8; ++i) { /* most significant bit = leftmost pixel */
+                    int x = b * 8 + i;
+                    if (ub_see_through_pattern[y & 3][x & 3] >= level) bits |= (GLubyte)(0x80 >> i);
+                }
+                G.stipple[level][y * 4 + b] = bits;
+            }
+}
+
 bool gl_init(char *desc, int desc_len, bool fixed_function)
 {
     memset(&G, 0, sizeof G);
+    make_stipples();
     if (!ub_gl_load()) {
         ub_fmt(desc, desc_len, "OpenGL 1.1 functions missing");
         return false;
@@ -717,6 +735,9 @@ static void bind_pointers(const gvert *base, bool full)
 
 static void free_statics(void)
 {
+    plat_free(G.see_statics);
+    G.see_statics = NULL;
+    G.see_static_count = 0;
     for (int m = 0; m < UB_MAT_COUNT; ++m) {
         if (G.static_vbo[m]) ubgl.glDeleteBuffers(1, &G.static_vbo[m]);
         G.static_vbo[m] = 0;
@@ -731,7 +752,13 @@ void gl_set_static(const ub_part_draw *parts, int count)
 {
     if (!G.ready) return;
     free_statics();
-    for (int i = 0; i < count; ++i) emit_part(&parts[i], G.statics);
+    int see = 0;
+    for (int i = 0; i < count; ++i) see += ub_draw_see_level(parts[i].flags) != 0;
+    if (see) G.see_statics = (ub_part_draw *)plat_alloc(sizeof(ub_part_draw) * (size_t)see);
+    for (int i = 0; i < count; ++i) {
+        if (!ub_draw_see_level(parts[i].flags)) emit_part(&parts[i], G.statics);
+        else if (G.see_statics) G.see_statics[G.see_static_count++] = parts[i];
+    }
     u32 bytes = 0;
     for (int m = 0; m < UB_MAT_COUNT; ++m) {
         G.static_verts[m] = G.statics[m].count;
@@ -751,10 +778,11 @@ void gl_set_static(const ub_part_draw *parts, int count)
             ubgl.has_vbo ? " in vertex buffers" : " in system memory");
 }
 
-/* Draw one material: static geometry, then this frame's dynamic parts. */
-static void draw_material(int m, bool full)
+/* Draw one material: static geometry (with_statics), then this frame's
+ * dynamic parts. */
+static void draw_material_ex(int m, bool full, bool with_statics)
 {
-    if (G.static_verts[m]) {
+    if (with_statics && G.static_verts[m]) {
         if (G.static_vbo[m]) {
             ubgl.glBindBuffer(GL_ARRAY_BUFFER, G.static_vbo[m]);
             bind_pointers((const gvert *)0, full);
@@ -767,6 +795,28 @@ static void draw_material(int m, bool full)
     if (G.batches[m].count) {
         bind_pointers(G.batches[m].v, full);
         ubgl.glDrawArrays(GL_TRIANGLES, 0, G.batches[m].count);
+    }
+}
+
+static void draw_material(int m, bool full) { draw_material_ex(m, full, true); }
+
+/* Every material with its surface settings (the lit pass). */
+static void draw_materials(bool with_statics)
+{
+    for (int m = 0; m < UB_MAT_COUNT; ++m) {
+        if (!G.batches[m].count && !(with_statics && G.static_verts[m])) continue;
+        const ub_material_info *mi = &ub_materials[m];
+        ubgl.glBindTexture(GL_TEXTURE_2D, G.tex[m]);
+        if (G.shaders) {
+            ubgl.glUniform1f(G.lit.spec, mi->specular);
+            ubgl.glUniform1f(G.lit.shine, mi->shininess);
+            ubgl.glUniform1f(G.lit.texmix, m == UB_MAT_PLASTIC ? 0.0f : 1.0f);
+        } else {
+            f32 s[4] = { mi->specular, mi->specular, mi->specular, 1 };
+            ubgl.glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, s);
+            ubgl.glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, mi->shininess > 128 ? 128 : mi->shininess);
+        }
+        draw_material_ex(m, true, with_statics);
     }
 }
 
@@ -923,9 +973,10 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
     ubgl.glEnable(GL_CULL_FACE);
     ubgl.glCullFace(GL_BACK);
 
-    /* geometry */
+    /* geometry (see-through parts come last, below) */
     for (int m = 0; m < UB_MAT_COUNT; ++m) G.batches[m].count = 0;
-    for (int i = 0; i < count; ++i) emit_part(&parts[i], G.batches);
+    for (int i = 0; i < count; ++i)
+        if (!ub_draw_see_level(parts[i].flags)) emit_part(&parts[i], G.batches);
     u32 tris = 0;
     for (int m = 0; m < UB_MAT_COUNT; ++m) tris += (u32)(G.batches[m].count + G.static_verts[m]) / 3;
     stats->parts = (u32)count;
@@ -1005,21 +1056,31 @@ void gl_draw_scene(int width, int height, const ub_camera *cam, const ub_render_
     }
 
     set_client_state(true);
-    for (int m = 0; m < UB_MAT_COUNT; ++m) {
-        if (!G.batches[m].count && !G.static_verts[m]) continue;
-        const ub_material_info *mi = &ub_materials[m];
-        ubgl.glBindTexture(GL_TEXTURE_2D, G.tex[m]);
-        if (G.shaders) {
-            ubgl.glUniform1f(G.lit.spec, mi->specular);
-            ubgl.glUniform1f(G.lit.shine, mi->shininess);
-            ubgl.glUniform1f(G.lit.texmix, m == UB_MAT_PLASTIC ? 0.0f : 1.0f);
-        } else {
-            f32 s[4] = { mi->specular, mi->specular, mi->specular, 1 };
-            ubgl.glMaterialfv(GL_FRONT_AND_BACK, GL_SPECULAR, s);
-            ubgl.glMaterialf(GL_FRONT_AND_BACK, GL_SHININESS, mi->shininess > 128 ? 128 : mi->shininess);
-        }
-        draw_material(m, true);
+    draw_materials(true);
+    /* see-through parts: one pass per level, with that level's screen-door
+     * stipple (the same pattern as the software renderer) */
+    bool any_see = G.see_static_count > 0;
+    for (int i = 0; i < count && !any_see; ++i) any_see = ub_draw_see_level(parts[i].flags) != 0;
+    for (int level = 1; level < 16 && any_see; ++level) {
+        bool here = false;
+        for (int m = 0; m < UB_MAT_COUNT; ++m) G.batches[m].count = 0;
+        for (int i = 0; i < count; ++i)
+            if (ub_draw_see_level(parts[i].flags) == level) {
+                emit_part(&parts[i], G.batches);
+                here = true;
+            }
+        for (int i = 0; i < G.see_static_count; ++i)
+            if (ub_draw_see_level(G.see_statics[i].flags) == level) {
+                emit_part(&G.see_statics[i], G.batches);
+                here = true;
+            }
+        if (!here) continue;
+        ubgl.glEnable(GL_POLYGON_STIPPLE);
+        ubgl.glPolygonStipple(G.stipple[level]);
+        draw_materials(false);
+        for (int m = 0; m < UB_MAT_COUNT; ++m) stats->triangles += (u32)G.batches[m].count / 3;
     }
+    if (any_see) ubgl.glDisable(GL_POLYGON_STIPPLE);
     ubgl.glDisableClientState(GL_COLOR_ARRAY);
     ubgl.glDisableClientState(GL_NORMAL_ARRAY);
     ubgl.glDisableClientState(GL_TEXTURE_COORD_ARRAY);

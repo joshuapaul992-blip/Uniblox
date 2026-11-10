@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <time.h>
 
+#include <math.h>
+#include "game/ub_demo_place.h"
 #include "game/ub_game.h"
 #include "render/ub_texture.h"
 #include "script/ub_script.h"
@@ -86,10 +88,9 @@ static const char k_door[] =
 static ub_game g_g;
 
 /* Walks towards +z for `seconds`; returns the farthest z reached. */
-static f32 walk(ub_game *g, f32 seconds, f32 *door_transparency_seen)
+static f32 walk_watching(ub_game *g, f32 seconds, f32 *door_transparency_seen, i32 door)
 {
     f32 best = -1e9f;
-    i32 door = ub_world_find_child(&g->world, ub_world_workspace(&g->world), "Door");
     for (int i = 0; i < (int)(seconds * 60); ++i) {
         ub_game_update(g, 1.0f / 60.0f, v3(0, 0, 1), false);
         if (g->feet.z > best) best = g->feet.z;
@@ -99,6 +100,12 @@ static f32 walk(ub_game *g, f32 seconds, f32 *door_transparency_seen)
         }
     }
     return best;
+}
+
+static f32 walk(ub_game *g, f32 seconds, f32 *door_transparency_seen)
+{
+    return walk_watching(g, seconds, door_transparency_seen,
+                         ub_world_find_child(&g->world, ub_world_workspace(&g->world), "Door"));
 }
 
 static void test_door(void)
@@ -332,6 +339,61 @@ static void test_reuse(void)
     ub_game_stop(&g_g);
 }
 
+static void frames(int n, vec3 move)
+{
+    for (int i = 0; i < n; ++i) ub_game_update(&g_g, 1.0f / 60.0f, move, false);
+}
+
+/* The built-in demo place: every one of its scripts does its job. */
+static void test_demo_place(void)
+{
+    ub_world w;
+    ub_demo_place(&w);
+    CHECK(ub_game_start(&g_g, &w, true));
+    ub_script_stats st;
+    ub_script_get_stats(&st);
+    CHECK(st.scripts == 5);
+    i32 ws = ub_world_workspace(&g_g.world);
+    i32 house = ub_world_find_child(&g_g.world, ws, "House");
+    i32 door = ub_world_find_child(&g_g.world, house, "Door");
+    i32 spinner = ub_world_find_child(&g_g.world, house, "Spinner");
+    CHECK(door >= 0 && spinner >= 0);
+    /* walk from the spawn through the door into the house */
+    f32 seen = 0;
+    f32 z = walk_watching(&g_g, 2.0f, &seen, door);
+    printf("  demo place: walked to z = %.1f through the door (transparency reached %d/255)\n", (double)z, (int)seen);
+    CHECK(z > 26 && seen > 100);
+    /* the spinner turns */
+    const ub_part *sp = &g_g.world.parts[g_g.world.inst[spinner].part];
+    CHECK(fabsf(sp->rot.x.x - 1.0f) > 0.01f || fabsf(sp->rot.y.y - 1.0f) > 0.01f);
+    /* the button rains balls; Debris clears them */
+    i32 parts0 = 0, parts1 = 0;
+    for (i32 c = g_g.world.inst[ws].first_child; c >= 0; c = g_g.world.inst[c].next_sibling) parts0++;
+    ub_game_teleport(&g_g, v3(18, 0.4f, -2));
+    frames(30, v3(0, 0, 0));
+    for (i32 c = g_g.world.inst[ws].first_child; c >= 0; c = g_g.world.inst[c].next_sibling) parts1++;
+    CHECK(parts1 == parts0 + 6);
+    frames(60 * 16, v3(0, 0, 0));
+    parts1 = 0;
+    for (i32 c = g_g.world.inst[ws].first_child; c >= 0; c = g_g.world.inst[c].next_sibling) parts1++;
+    CHECK(parts1 == parts0);
+    /* the lava kills */
+    ub_game_teleport(&g_g, v3(-40, 1.3f, -25));
+    frames(20, v3(0, 0, 0));
+    CHECK(g_g.dead);
+    frames(60 * 4, v3(0, 0, 0));
+    CHECK(!g_g.dead);
+    /* chat commands */
+    ub_script_chatted("fast");
+    CHECK(g_g.walk_speed == 32);
+    ub_script_chatted("night");
+    CHECK(g_g.world.lighting.clock_time < 0.01f);
+    ub_script_get_stats(&st);
+    CHECK(st.errors == 0 && st.stopped == 0);
+    if (st.errors) print_output();
+    ub_game_stop(&g_g);
+}
+
 /* Death and respawn: a kill brick, Died and CharacterAdded. */
 static void test_death(void)
 {
@@ -367,4 +429,5 @@ void test_game(void)
     test_hostile();
     test_reuse();
     test_death();
+    test_demo_place();
 }

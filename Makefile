@@ -31,7 +31,7 @@ SCRIPT_SRCS := src/script/ub_libc.c src/script/ub_script.c src/script/ub_sapi_ty
 # Lua is third-party code: build it against our libc headers, without the
 # warnings our own code is held to.
 SCRIPT_CFLAGS := -Isrc/script/libc
-LUA_CFLAGS := -Wno-shadow -Wno-strict-prototypes -Wno-implicit-fallthrough -Wno-sign-compare \
+LUA_CFLAGS := -Wno-empty-body -Wno-shadow -Wno-strict-prototypes -Wno-implicit-fallthrough -Wno-sign-compare \
 	-Wno-cast-function-type -Wno-clobbered -Wno-address -Wno-misleading-indentation -Wno-unknown-warning-option
 
 # Engine sources shared by every build (no OS calls).
@@ -53,6 +53,7 @@ CORE_SRCS := \
 	src/physics/ub_physics.c \
 	src/physics/ub_character.c \
 	src/game/ub_game.c \
+	src/game/ub_demo_place.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \
 	src/render/ub_render.c \

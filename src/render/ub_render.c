@@ -116,6 +116,10 @@ void ub_render_begin(ub_frame *frame, const ub_camera *cam, const ub_render_env 
     frame->text_px = ub_render_line_height() - 2;
 }
 
+const u8 ub_see_through_pattern[4][4] = {
+    { 0, 8, 2, 10 }, { 12, 4, 14, 6 }, { 3, 11, 1, 9 }, { 15, 7, 13, 5 },
+};
+
 void ub_render_part(const ub_part_draw *p)
 {
     if (F.count < MAX_QUEUED_PARTS) F.parts[F.count++] = *p;

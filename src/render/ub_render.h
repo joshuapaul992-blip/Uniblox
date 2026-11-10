@@ -53,6 +53,19 @@ typedef struct {
 
 enum { UB_DRAW_GLOW = 1 }; /* lit at full brightness (neon) */
 
+/* See-through parts: flags bits 4..7 say how many sixteenths of the part's
+ * pixels are left out, in a fixed dither pattern ("screen door"). Needs no
+ * sorting and looks the same in both renderers and in 8-bit colour. */
+#define UB_DRAW_SEE_SHIFT 4
+static inline u8 ub_draw_see_through(u8 transparency) /* 0..255 -> flags bits */
+{
+    u32 level = ((u32)transparency * 16u + 127u) / 255u;
+    return (u8)((level > 15 ? 15 : level) << UB_DRAW_SEE_SHIFT);
+}
+static inline int ub_draw_see_level(u8 flags) { return (flags >> UB_DRAW_SEE_SHIFT) & 15; }
+/* the 4x4 ordered-dither pattern: a pixel is left out when k < level */
+extern const u8 ub_see_through_pattern[4][4];
+
 typedef enum {
     UB_QUALITY_LOW,      /* OpenGL: no shadows, no anti-aliasing */
     UB_QUALITY_MEDIUM,   /* OpenGL: shadows */

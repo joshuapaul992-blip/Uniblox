@@ -1529,6 +1529,18 @@ static int e_respawned(lua_State *L)
 
 void ub_script_respawned(void) { report(lua_cpcall(S.L, e_respawned, NULL)); }
 
+static int e_chatted(lua_State *L)
+{
+    lua_pushstring(L, (const char *)lua_touserdata(L, 1));
+    fire_signal(L, S.g->player, EV_CHATTED, NULL, 1);
+    return 0;
+}
+
+void ub_script_chatted(const char *message)
+{
+    if (S.L) report(lua_cpcall(S.L, e_chatted, (void *)message));
+}
+
 void ub_script_get_stats(ub_script_stats *out)
 {
     *out = S.stats;

@@ -61,6 +61,7 @@ static struct {
     u64 t0;
     grads g;
     const shading *s;      /* current face */
+    int see;               /* see-through level of the current part (0 = solid) */
     bool ready;
 } R;
 
@@ -310,6 +311,84 @@ static void span_tex8(int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
     }
 }
 
+/* See-through parts: the same spans, leaving out the pixels the dither
+ * pattern picks (neither colour nor depth is written there). */
+static void span_see32(int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
+{
+    u32 *row = R.fb->pixels + y * R.fb->pitch;
+    u32 *zrow = R.zbuf + y * R.zw;
+    const u8 *pat = ub_see_through_pattern[y & 3];
+    const int level = R.see;
+    R.st.pixels_tested += (u32)(x1 - x0);
+    if (!R.s->tex) {
+        u32 c = R.s->flat32;
+        u32 zf = (u32)(i64)(iz * ZSCALE);
+        u32 dz = (u32)clamp_fixed(R.g.diz_dx * ZSCALE);
+        for (int x = x0; x < x1; ++x, zf += dz)
+            if (pat[x & 3] >= level && zf > zrow[x]) {
+                zrow[x] = zf;
+                row[x] = c;
+            }
+        return;
+    }
+    const u8 *tex = R.s->tex;
+    const u32 *lut = R.s->lut32;
+    f32 z = 1.0f / iz, u = uz * z, v = vz * z;
+    while (x0 < x1) {
+        int len = x1 - x0 > SUBDIV ? SUBDIV : x1 - x0;
+        seg s;
+        segment(&s, len, &iz, &uz, &vz, &u, &v);
+        for (int x = x0; x < x0 + len; ++x) {
+            if (pat[x & 3] >= level && s.z > zrow[x]) {
+                zrow[x] = s.z;
+                row[x] = lut[TEXEL(tex, s)];
+            }
+            s.z += s.dz;
+            s.u += s.du;
+            s.v += s.dv;
+        }
+        x0 += len;
+    }
+}
+
+static void span_see8(int y, int x0, int x1, f32 iz, f32 uz, f32 vz)
+{
+    u8 *row = R.fb->pixels8 + y * R.fb->pitch;
+    u32 *zrow = R.zbuf + y * R.zw;
+    const u8 *pat = ub_see_through_pattern[y & 3];
+    const int level = R.see;
+    R.st.pixels_tested += (u32)(x1 - x0);
+    if (!R.s->tex) {
+        u8 even = R.s->flat8[(y & 1) << 1], odd = R.s->flat8[((y & 1) << 1) | 1];
+        u32 zf = (u32)(i64)(iz * ZSCALE);
+        u32 dz = (u32)clamp_fixed(R.g.diz_dx * ZSCALE);
+        for (int x = x0; x < x1; ++x, zf += dz)
+            if (pat[x & 3] >= level && zf > zrow[x]) {
+                zrow[x] = zf;
+                row[x] = (x & 1) ? odd : even;
+            }
+        return;
+    }
+    const u8 *tex = R.s->tex;
+    const u8 *lut_even = R.s->lut8[(y & 1) << 1], *lut_odd = R.s->lut8[((y & 1) << 1) | 1];
+    f32 z = 1.0f / iz, u = uz * z, v = vz * z;
+    while (x0 < x1) {
+        int len = x1 - x0 > SUBDIV ? SUBDIV : x1 - x0;
+        seg s;
+        segment(&s, len, &iz, &uz, &vz, &u, &v);
+        for (int x = x0; x < x0 + len; ++x) {
+            if (pat[x & 3] >= level && s.z > zrow[x]) {
+                zrow[x] = s.z;
+                row[x] = ((x & 1) ? lut_odd : lut_even)[TEXEL(tex, s)];
+            }
+            s.z += s.dz;
+            s.u += s.du;
+            s.v += s.dv;
+        }
+        x0 += len;
+    }
+}
+
 /* ------------------------------------------------------- rasterizer */
 
 /* Scan-converts a convex polygon. Pixel centres are at +0.5; a pixel is
@@ -509,6 +588,8 @@ void sw_part(const ub_part_draw *p)
 
     span_fn span = R.fb->format == UB_PIXEL_INDEX8 ? (textured ? span_tex8 : span_flat8)
                                                     : (textured ? span_tex32 : span_flat32);
+    R.see = ub_draw_see_level(p->flags);
+    if (R.see) span = R.fb->format == UB_PIXEL_INDEX8 ? span_see8 : span_see32;
 
     for (int fi = 0; fi < mesh->face_count; ++fi) {
         const ub_face *f = &mesh->faces[fi];

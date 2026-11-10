@@ -190,7 +190,8 @@ void ub_game_subtree_changed(ub_game *g, i32 inst)
         }
     }
     plat_free(stack);
-    g->statics_dirty = true;
+    /* (parts that changed are drawn live from now on; make_live marks the
+     * static set for rebuilding the first time) */
 }
 
 void ub_game_set_gravity(ub_game *g, f32 gravity)
