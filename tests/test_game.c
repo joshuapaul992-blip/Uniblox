@@ -1479,6 +1479,16 @@ static void test_session_death(void)
     sframes(10, v3(0, 0, 0));
     CHECK(sv->walk_speed == 32 && c->walk_speed == 32);
     CHECK(c->hud.chat_count == 1);
+    /* a LocalScript may teleport its character (Roblox allows it); a jump
+     * nobody announced is refused, and the client is put back */
+    ub_game_teleport(c, v3(20, 0.1f, -20));
+    sframes(20, v3(0, 0, 0));
+    CHECK(v3_length(v3_sub(sv->feet, v3(20, 0.1f, -20))) < 1.5f && sv->report.rejected == 0);
+    ub_char_teleport(&c->chr, &c->phys, v3(-20, 0.1f, 20));
+    sframes(30, v3(0, 0, 0));
+    printf("  session: a forged jump was refused %u time(s); the client is back at %.1f %.1f %.1f\n", sv->report.rejected,
+           (double)c->feet.x, (double)c->feet.y, (double)c->feet.z);
+    CHECK(sv->report.rejected >= 1 && v3_length(v3_sub(c->feet, v3(20, 0.1f, -20))) < 1.5f);
     /* the menu's reset: the server kills the character */
     ub_game_reset_character(c);
     sframes(10, v3(0, 0, 0));

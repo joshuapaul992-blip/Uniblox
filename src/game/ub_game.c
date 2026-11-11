@@ -220,6 +220,7 @@ void ub_game_teleport(ub_game *g, vec3 feet)
         g->moved = true; /* the client moves it: tell it */
         g->report.have = false;
     }
+    if (g->role == UB_ROLE_CLIENT && !g->moving_for_server) g->teleported = true; /* (a LocalScript did: say so) */
 }
 
 void ub_game_set_velocity(ub_game *g, vec3 v)
@@ -337,6 +338,10 @@ void ub_game_set_health(ub_game *g, f32 health)
         g->respawn_timer = UB_GAME_RESPAWN_TIME;
         if (g->phys_ok) g->chr.walk_speed = 0;
         ub_info("the player died");
+        if (g->role == UB_ROLE_CLIENT && g->link) { /* (a LocalScript killed it: the server decides, and respawns it) */
+            u8 m = UB_MSG_RESET;
+            g->link->send(g->link->ctx, true, &m, 1);
+        }
         if (scr(g)) ub_script_died();
     }
 }
@@ -684,11 +689,13 @@ static void client_report(ub_game *g, f32 dt)
     ub_w_u16(&b, angle16(g->pose_phase));
     ub_w_u8(&b, (u8)ub_roundf(ub_clampf(g->pose_amount, 0, 1) * 255.0f));
     ub_w_u8(&b, (u8)ub_roundf(ub_clampf(g->pose_fallen, 0, 1) * 255.0f));
+    ub_w_u8(&b, g->teleported ? 1 : 0);
     /* standing still, nothing changed: 4 a second do (the time is not compared) */
     bool same = b.len == g->report_len && !memcmp(b.p + 7, g->report_last + 7, b.len - 7) &&
                 !memcmp(b.p + 1, g->report_last + 1, 2);
     if (same && g->report_idle < 0.25f) return;
     g->report_idle = 0;
+    g->teleported = false;
     memcpy(g->report_last, b.p, b.len);
     g->report_len = b.len;
     send_buf(g, false, &b);
@@ -710,11 +717,12 @@ static void got_report(ub_game *g, ub_rbuf *r)
     nr.phase = angle_of16(ub_r_u16(r));
     nr.amount = (f32)ub_r_u8(r) / 255.0f;
     nr.fallen = (f32)ub_r_u8(r) / 255.0f;
+    bool jumped_there = (ub_r_u8(r) & 1) != 0; /* a LocalScript teleported it (Roblox allows that) */
     if (r->err || !finite3(nr.feet) || !finite3(nr.vel)) return;
     if ((i16)(u16)(nr.move_seq - g->move_seq) < 0) return; /* from before the server last moved it */
     ub_report *o = &g->report;
     if (o->have && !(nr.client_time > o->client_time)) return; /* (an old one, overtaken) */
-    if (o->have && !g->dead) { /* too fast to be walking, jumping or falling? */
+    if (o->have && !g->dead && !jumped_there) { /* too fast to be walking, jumping or falling? */
         f32 dt = ub_clampf(nr.client_time - o->client_time, 0, 1.0f);
         vec3 d = v3_sub(nr.feet, o->feet);
         f32 h = ub_sqrtf(d.x * d.x + d.z * d.z);
@@ -774,7 +782,9 @@ static void got_move(ub_game *g, ub_rbuf *r)
     if (r->err) return;
     if (flags & 1) {
         g->move_seq = seq;
+        g->moving_for_server = true;
         ub_game_teleport(g, feet);
+        g->moving_for_server = false;
     }
     if ((flags & 2) && g->phys_ok) ub_char_set_velocity(&g->chr, &g->phys, vel);
 }
