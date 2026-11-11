@@ -10,7 +10,8 @@
 ub_editor *app_editor_model(void);
 const ub_camera *app_editor_camera(void);
 bool app_editor_playing(void);
-ub_game *app_editor_game(void);
+ub_game *app_editor_game(void);   /* the play test's client game */
+ub_game *app_editor_server(void); /* and its server's (NULL when not playing) */
 const char *app_editor_status(void);
 
 #endif

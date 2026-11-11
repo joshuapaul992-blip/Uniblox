@@ -25,6 +25,7 @@
 #include "core/ub_string.h"
 #include "editor/ub_editor.h"
 #include "game/ub_game.h"
+#include "game/ub_session.h"
 #include "render/ub_mesh.h"
 #include "render/ub_render.h"
 #include "render/ub_texture.h"
@@ -89,7 +90,10 @@ static const ub_input *g_in;
 
 /* play test */
 static bool g_playing;
-static ub_game g_game;
+static ub_session *g_psess;           /* the play test: the place's server and a client, over loopback */
+static ub_game g_none;
+static ub_game *g_pg = &g_none;       /* the client's game (what the play test shows) */
+#define g_game (*g_pg)
 static ub_play_view g_view;
 
 /* dialogs */
@@ -622,10 +626,21 @@ static void play_start(void)
         status("Could not start the play test (out of memory)");
         return;
     }
-    if (!ub_game_start(&g_game, &w, true)) {
+    g_psess = ub_session_new(&w, true, NULL);
+    if (!g_psess) {
         ub_world_free(&w);
+        status("Could not start the play test (out of memory)");
         return;
     }
+    /* the client joins with the server's first ticks */
+    for (int i = 0; i < 60 && !ub_session_client(g_psess); ++i) ub_session_update(g_psess, 1.0f / 60.0f, v3(0, 0, 0), false);
+    if (!ub_session_client(g_psess)) {
+        ub_session_free(g_psess);
+        g_psess = NULL;
+        status("Could not start the play test (the client did not join)");
+        return;
+    }
+    g_pg = ub_session_client(g_psess);
     g_playing = true;
     play_view_init(&g_view);
     g_view.yaw = g_cam_yaw;
@@ -636,7 +651,9 @@ static void play_start(void)
 
 static void play_stop(void)
 {
-    ub_game_stop(&g_game);
+    ub_session_free(g_psess);
+    g_psess = NULL;
+    g_pg = &g_none;
     play_view_free(&g_view);
     g_playing = false;
     plat_set_mouse_capture(false);
@@ -1292,7 +1309,7 @@ static void play_frame(ub_frame *frame, const ub_input *in, f32 dt)
     vec3 move;
     bool jump;
     play_view_input(&g_view, &g_game, &pin, dt, !gui_keys, true, &move, &jump);
-    ub_game_update(&g_game, dt, move, jump);
+    ub_session_update(g_psess, dt, move, jump);
     g_game.jumped = false;
     g_game.landed_speed = 0;
     play_view_update(&g_view, &g_game, dt);
@@ -1321,12 +1338,21 @@ static void play_frame(ub_frame *frame, const ub_input *in, f32 dt)
     ui_label_color("Playing - WASD move, Space jump", UI_DIM);
     ui_label_color(" ", UI_DIM);
     ui_panel_end();
-    /* what scripts printed */
-    const char *out[UB_SCRIPT_OUTPUT_LINES];
-    bool err[UB_SCRIPT_OUTPUT_LINES];
-    int n = ub_script_output(out, err, 6);
-    int y = g_h - (n + 1) * (lh - 3);
-    for (int i = 0; i < n; ++i) ub_render_text(10, y + i * (lh - 3), out[i], err[i] ? UI_ERROR : 0xC8F0C8);
+    /* what scripts printed: the server's, then the client's */
+    const char *out[2][UB_SCRIPT_OUTPUT_LINES];
+    bool err[2][UB_SCRIPT_OUTPUT_LINES];
+    int n[2] = { 0, 0 };
+    for (int side = 0; side < 2; ++side) {
+        ub_game *sg = side ? &g_game : ub_session_server(g_psess);
+        if (sg && sg->scripts && ub_game_scripts(sg)) n[side] = ub_script_output(out[side], err[side], 3);
+    }
+    int y = g_h - (n[0] + n[1] + 1) * (lh - 3);
+    for (int side = 0; side < 2; ++side)
+        for (int i = 0; i < n[side]; ++i, y += lh - 3) {
+            char line[200];
+            ub_fmt(line, sizeof line, "%s%s", side ? "" : "[server] ", out[side][i]);
+            ub_render_text(10, y, line, err[side][i] ? UI_ERROR : 0xC8F0C8);
+        }
     ui_end();
     ub_render_end(NULL);
 }
@@ -1425,4 +1451,5 @@ ub_editor *app_editor_model(void) { return &E; }
 const ub_camera *app_editor_camera(void) { return &g_camera; }
 bool app_editor_playing(void) { return g_playing; }
 ub_game *app_editor_game(void) { return &g_game; }
+ub_game *app_editor_server(void) { return ub_session_server(g_psess); }
 const char *app_editor_status(void) { return g_status; }
