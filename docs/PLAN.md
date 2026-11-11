@@ -86,7 +86,7 @@ tests/          host unit tests (make test)
 | 9A | Client UI + a fast renderer for NT 3.51/4.0 | A 2021-style client UI (chat, player list with leaderstats, health, notifications, game menu); a renderer faster than the software one where there is no OpenGL (WINVBE) | **Built.** The client UI in Uniblox's own look, fed by `SetCore`, `SetCoreGuiEnabled` and `Chat:Chat`; the fast software renderer (sorted, coarse tile depth, longer perspective steps, packed texture coordinates, every processor), about twice as fast as the plain one on the demo place under Wine. Passes unit tests and the Wine smoke tests. Needs a run on a real install (NT 3.51/4.0 with WINVBE, ideally with two processors) |
 | 9B | Camera | Better zooming, first person, shift lock | **Built.** Eased zoom from 0.5 to 128 studs (wheel, I/O) with the place's limits, first person below 2 studs, shift lock (Shift), walls pulling the camera in, 80-degree pitch; CameraMode, zoom limits, mouse-lock and occlusion settings from StarterPlayer and Player, MouseBehavior, Scriptable and Fixed cameras. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 9C | A better-looking fast renderer | The NT 3.51/4.0 fast renderer looks closer to the OpenGL one | **Built.** Quality levels: medium adds coloured hemisphere and sun light, smooth (Gouraud) curved parts with highlights, level of detail, mipmaps, fog and the sun; high adds soft sun shadows (shadow map and a deferred pass). Passes unit tests and the Wine smoke tests. Needs a run on a real install |
-| 9 | Loopback networking | Single-player runs entirely through replication | |
+| 9D | Loopback networking | Single-player runs entirely through replication: an in-process server and client that share nothing but messages | **In progress.** Plan below |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
 
@@ -655,6 +655,45 @@ plain one, and the fast one at low, draw as before).
     It also adds fog, read from a table indexed by the depth's float bits.
   - In 256 colours, palette remap tables are used: 4 dither cells × 8
     shadow levels × 8 fog levels. Fog is off there.
+
+## Milestone 9D plan: loopback networking
+
+`uniblox.exe` runs an in-process **server** and a **client** that share
+nothing but messages passed through a loopback transport, so milestone 10
+only swaps that transport for UDP. Decisions: the client moves its own
+character (as Roblox's network ownership); the all-in-one mode stays for
+the editor and as the tests' reference; two PRs.
+
+**PR 1: the transport and replication**
+1. `src/net/`: a byte writer/reader (compact integers, quantised floats and
+   rotations); datagrams with sequence numbers and acknowledgements
+   carrying a reliable, ordered byte stream (resent until acknowledged, so
+   messages of any size) and unreliable messages; a loopback link with a
+   simulator (delay, jitter, loss, duplicates, reordering, a bandwidth
+   cap). No sockets yet, so no new imports.
+2. Replication from server to client: the world notes every change
+   (create, destroy, reparent, rename, properties, sources); every
+   instance's network id is its index on the server; a joining client gets
+   everything it may see (not ServerScriptService or ServerStorage, nor
+   server Scripts' code), then changes; parts' looks reliably, their
+   movement unreliably about 20 times a second and only while they move;
+   meshes and lighting too. Tested by fuzzing a server world over a lossy
+   link until the client's world equals what it may see.
+
+**PR 2: the server and the client**
+3. The script layer as a context per side: the server runs Scripts, the
+   client LocalScripts (and the ModuleScripts they require); `IsServer`,
+   `IsClient`, `LocalPlayer` per side; remotes as messages; a client's own
+   changes stay local (FilteringEnabled), except its character.
+4. The client simulates its character and sends its position, velocity,
+   state and pose; the server checks speeds, poses the rig and fires
+   Touched. Chat, ClickDetectors, ProximityPrompts, tools and resetting
+   become messages.
+5. The app runs both in one thread (the server at a fixed rate); F7 saves
+   the server's world; the editor's play test goes through loopback too;
+   the F3 text shows traffic, round trip and the simulated link. The game
+   tests run both ways with the same results; bandwidth within 2-4 KB/s per
+   client on the demo place; a smoke run over a simulated 56k link.
 
 ## Open items
 

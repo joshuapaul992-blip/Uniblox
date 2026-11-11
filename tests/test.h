@@ -31,6 +31,7 @@ void test_editor(void);
 void test_editor_app(void);
 void test_present(void);
 void test_gui(void);
+void test_net(void);
 void test_vec(void);
 void test_palette(void);
 void test_render(void);
