@@ -77,6 +77,27 @@ static void test_buffers(void)
     }
     printf("  rotations in 6 bytes: largest error %.2e\n", (double)worst);
     CHECK(worst < 1e-3f);
+    /* moving parts' rotations in 4 bytes (within 0.005), positions to 1/64 stud */
+    worst = 0;
+    f32 pworst = 0;
+    for (int i = 0; i < 2000; ++i) {
+        mat3 m = mat3_from_euler((f32)(rand() % 6283) / 1000.0f, (f32)(rand() % 6283) / 1000.0f, (f32)(rand() % 6283) / 1000.0f);
+        vec3 p = v3((f32)(rand() % 400000) / 100.0f - 2000.0f, (f32)(rand() % 40000) / 100.0f - 200.0f, (f32)(rand() % 200) / 7.0f);
+        ub_wbuf_clear(&w);
+        ub_w_rot32(&w, &m);
+        CHECK(w.len == 4);
+        ub_w_pos64(&w, p);
+        CHECK(w.len <= 4 + 9);
+        ub_rbuf_init(&r, w.p, w.len);
+        mat3 b = ub_r_rot32(&r);
+        vec3 q = ub_r_pos64(&r);
+        CHECK(!r.err && ub_r_left(&r) == 0);
+        const f32 *pa = &m.x.x, *pb = &b.x.x;
+        for (int k = 0; k < 9; ++k) worst = fmaxf(worst, fabsf(pa[k] - pb[k]));
+        pworst = fmaxf(pworst, fmaxf(fabsf(p.x - q.x), fmaxf(fabsf(p.y - q.y), fabsf(p.z - q.z))));
+    }
+    printf("  rotations in 4 bytes: largest error %.2e; positions: %.4f studs\n", (double)worst, (double)pworst);
+    CHECK(worst < 5e-3f && pworst <= 1.0f / 128.0f + 1e-4f);
     ub_wbuf_free(&w);
 }
 

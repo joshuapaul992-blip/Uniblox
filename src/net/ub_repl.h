@@ -62,7 +62,8 @@ typedef struct {
      * and reclaims at once. */
     void (*destroy)(void *ctx, i32 root);
     /* a part's fields were set: all of them (what 0), where it came to
-     * rest (1), or where it is while it moves (2); tick: the server's */
+     * rest (1), where it is while it moves (2), or only its colour and
+     * transparency (3); tick: the server's */
     void (*part)(void *ctx, i32 inst, int what, u32 tick);
 } ub_repl_hooks;
 void ub_repl_client_hooks(ub_repl_client *c, const ub_repl_hooks *h);

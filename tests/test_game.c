@@ -1539,6 +1539,12 @@ static void test_session_demo(const ub_link_sim *sim, const char *what)
            what, (unsigned)(join_bytes / 1024), (double)z, (int)seen, (double)down, (double)up, ss.rtt_ms);
     CHECK(z > 26 && seen > 100);
     if (!sim) CHECK(down < 4096); /* the plan's budget: 2-4 KB/s per client */
+    if (getenv("UB_NET_DETAIL")) {
+        static const char *const names[] = { "", "key", "create", "destroy", "parent", "name", "source", "prop", "prop_del",
+                                             "props_all", "part", "xform", "motion", "lighting", "world", "mesh", "joined", "order", "color" };
+        for (int t = 1; t <= 18; ++t)
+            if (ss.repl.bytes[t]) printf("    %s: %llu bytes, %u messages\n", names[t], (unsigned long long)ss.repl.bytes[t], ss.repl.messages[t]);
+    }
     const ub_part *sp = &c->world.parts[c->world.inst[spinner].part];
     CHECK(fabsf(sp->rot.x.x - 1.0f) > 0.01f || fabsf(sp->rot.y.y - 1.0f) > 0.01f);
     if (!sim) {

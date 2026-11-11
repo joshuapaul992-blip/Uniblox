@@ -299,3 +299,58 @@ mat3 ub_r_rot(ub_rbuf *r)
     q[big] = sum < 1.0f ? ub_sqrtf(1.0f - sum) : 0.0f;
     return ub_quat_to_mat3(q);
 }
+
+/* 4 bytes: the index in 2 bits, the three smaller parts in 10 bits each
+ * (within about 0.0015 of the real value: fine for something moving). */
+#define QSCALE10 (511.0f / 0.70710678f)
+
+void ub_w_rot32(ub_wbuf *b, const mat3 *m)
+{
+    f32 q[4];
+    ub_mat3_to_quat(m, q);
+    int big = 0;
+    for (int i = 1; i < 4; ++i)
+        if (ub_absf(q[i]) > ub_absf(q[big])) big = i;
+    f32 sign = q[big] < 0 ? -1.0f : 1.0f;
+    u32 v = (u32)big;
+    for (int i = 0, k = 0; i < 4; ++i) {
+        if (i == big) continue;
+        i32 n = ub_rint(q[i] * sign * QSCALE10) + 512;
+        v |= (u32)UB_CLAMP(n, 0, 1023) << (2 + 10 * k++);
+    }
+    ub_w_u32(b, v);
+}
+
+mat3 ub_r_rot32(ub_rbuf *r)
+{
+    u32 v = ub_r_u32(r);
+    int big = (int)(v & 3);
+    f32 q[4], sum = 0;
+    for (int i = 0, k = 0; i < 4; ++i) {
+        if (i == big) continue;
+        q[i] = (f32)((i32)((v >> (2 + 10 * k++)) & 1023) - 512) / QSCALE10;
+        sum += q[i] * q[i];
+    }
+    q[big] = sum < 1.0f ? ub_sqrtf(1.0f - sum) : 0.0f;
+    return ub_quat_to_mat3(q);
+}
+
+/* a position to 1/64 stud, each axis as a zigzag varint (3 bytes within 2048 studs) */
+void ub_w_pos64(ub_wbuf *b, vec3 p)
+{
+    const f32 *a = &p.x;
+    for (int i = 0; i < 3; ++i) {
+        f32 f = a[i] * 64.0f;
+        i32 n = f > 2.0e9f ? 2000000000 : f < -2.0e9f ? -2000000000 : ub_rint(f);
+        ub_w_vari(b, n);
+    }
+}
+
+vec3 ub_r_pos64(ub_rbuf *r)
+{
+    vec3 p;
+    p.x = (f32)ub_r_vari(r) / 64.0f;
+    p.y = (f32)ub_r_vari(r) / 64.0f;
+    p.z = (f32)ub_r_vari(r) / 64.0f;
+    return p;
+}

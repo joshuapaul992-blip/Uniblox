@@ -669,6 +669,7 @@ static f32 angle_of16(u16 v) { return (f32)(i16)v * (UB_PI / 32767.0f); }
 static void client_report(ub_game *g, f32 dt)
 {
     g->report_timer -= dt;
+    g->report_idle += dt;
     if (g->report_timer > 0 || !g->phys_ok) return;
     g->report_timer = g->report_timer < -0.05f ? 1.0f / UB_REPORT_HZ : g->report_timer + 1.0f / UB_REPORT_HZ;
     u8 buf[64];
@@ -683,6 +684,13 @@ static void client_report(ub_game *g, f32 dt)
     ub_w_u16(&b, angle16(g->pose_phase));
     ub_w_u8(&b, (u8)ub_roundf(ub_clampf(g->pose_amount, 0, 1) * 255.0f));
     ub_w_u8(&b, (u8)ub_roundf(ub_clampf(g->pose_fallen, 0, 1) * 255.0f));
+    /* standing still, nothing changed: 4 a second do (the time is not compared) */
+    bool same = b.len == g->report_len && !memcmp(b.p + 7, g->report_last + 7, b.len - 7) &&
+                !memcmp(b.p + 1, g->report_last + 1, 2);
+    if (same && g->report_idle < 0.25f) return;
+    g->report_idle = 0;
+    memcpy(g->report_last, b.p, b.len);
+    g->report_len = b.len;
     send_buf(g, false, &b);
 }
 
@@ -846,6 +854,10 @@ void ub_game_part_from_server(ub_game *g, i32 inst, int what, u32 tick)
     ub_world *w = &g->world;
     i32 pi = inst >= 0 && inst < w->count ? w->inst[inst].part : -1;
     if (pi < 0) return;
+    if (what == 3) { /* its looks */
+        ub_game_part_changed(g, pi, UB_CHANGE_LOOK);
+        return;
+    }
     if (what == 0) { /* all of it: as it is now */
         interp_drop(g, pi);
         ub_game_part_changed(g, pi, UB_CHANGE_LOOK | UB_CHANGE_PHYS);

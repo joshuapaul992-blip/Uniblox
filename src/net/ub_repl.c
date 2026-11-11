@@ -18,12 +18,13 @@ enum {
     R_PROPS_ALL,    /* net, count, (key, value)...: replaces them all */
     R_PART,         /* tick, net, the part's fields */
     R_XFORM,        /* tick, net, position, rotation (exact): where it came to rest */
-    R_MOTION,       /* (unreliable) tick, count, (net, position, rotation in 6 bytes)... */
+    R_MOTION,       /* (unreliable) tick, count, (net, position to 1/64 stud, rotation in 4 bytes)... */
     R_LIGHTING,
     R_WORLD,        /* name, gravity, fallen-parts height */
     R_MESH,         /* server id, flags, counts, vertices, triangles, pieces */
     R_JOINED,       /* the first full copy is complete */
     R_ORDER,        /* parent net, count, nets...: these children go last, in this order */
+    R_COLOR,        /* net, colour (3 bytes), transparency: a part's looks when only those changed */
 };
 
 #define MAX_CLIENTS 32
@@ -692,8 +693,8 @@ static void motion_add(ub_repl_server *s, rclient *c, i32 inst, const ub_part *p
         ub_w_u16(&c->motion, 0);
     }
     ub_w_varu(&c->motion, (u32)inst);
-    ub_w_vec3(&c->motion, p->pos);
-    ub_w_rot(&c->motion, &p->rot);
+    ub_w_pos64(&c->motion, p->pos); /* (where it comes to rest goes exactly, reliably) */
+    ub_w_rot32(&c->motion, &p->rot);
     c->motion_n++;
 }
 
@@ -707,6 +708,21 @@ static void check_part(ub_repl_server *s, rclient *c, i32 pi)
     if (!rp->has) return;
     const ub_part *p = &w->parts[pi];
     bool owned = c->owned >= 0 && ub_world_is_descendant(w, inst, c->owned);
+    if ((p->color != rp->sent.color || p->transparency != rp->sent.transparency) &&
+        same_looks(p, &(ub_part){ .size = rp->sent.size, .color = p->color, .shape = rp->sent.shape,
+                                  .material = rp->sent.material, .transparency = p->transparency,
+                                  .flags = rp->sent.flags, .mesh = rp->sent.mesh, .look = rp->sent.look })) {
+        /* only its colour or transparency (a script animating it): a small message */
+        ub_wbuf *b = begin(s, R_COLOR);
+        ub_w_varu(b, (u32)inst);
+        ub_w_u8(b, (u8)(p->color >> 16));
+        ub_w_u8(b, (u8)(p->color >> 8));
+        ub_w_u8(b, (u8)p->color);
+        ub_w_u8(b, p->transparency);
+        send_msg(s, c);
+        rp->sent.color = p->color;
+        rp->sent.transparency = p->transparency;
+    }
     if (!same_looks(p, &rp->sent)) {
         ub_wbuf *b = begin(s, R_PART);
         ub_w_varu(b, s->tick);
@@ -1246,8 +1262,8 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
         u32 tick = ub_r_varu(&r), n = ub_r_u16(&r);
         for (u32 k = 0; k < n && !r.err; ++k) {
             i32 inst = ub_repl_client_local(c, ub_r_varu(&r));
-            vec3 pos = ub_r_vec3(&r);
-            mat3 rot = ub_r_rot(&r);
+            vec3 pos = ub_r_pos64(&r);
+            mat3 rot = ub_r_rot32(&r);
             if (r.err || inst < 0 || w->inst[inst].part < 0) continue;
             i32 pi = w->inst[inst].part;
             /* only if newer than what it shows (motion is unordered) */
@@ -1259,6 +1275,17 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
         }
         w->epoch++;
         return !r.err;
+    }
+    case R_COLOR: {
+        i32 inst = ub_repl_client_local(c, ub_r_varu(&r));
+        u8 cr = ub_r_u8(&r), cg = ub_r_u8(&r), cb = ub_r_u8(&r), tr = ub_r_u8(&r);
+        if (r.err || inst < 0 || w->inst[inst].part < 0) return false;
+        ub_part *p = &w->parts[w->inst[inst].part];
+        p->color = (u32)cr << 16 | (u32)cg << 8 | cb;
+        p->transparency = tr;
+        w->epoch++;
+        if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 3, 0);
+        return true;
     }
     case R_LIGHTING: {
         ub_lighting l;

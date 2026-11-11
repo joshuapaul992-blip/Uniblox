@@ -180,7 +180,9 @@ typedef struct ub_game {
     vec3 launch;                /* server: a velocity a script gave it (send it) */
     bool launched;
     u32 state_sig;              /* server: the state last sent */
-    f32 report_timer;           /* client */
+    f32 report_timer, report_idle;  /* client */
+    u8 report_last[48];         /* client: the last report sent */
+    u32 report_len;
     ub_interp *interp;          /* client: parts blending (by part, -1 none) */
     i32 *interp_of;
     i32 interp_count, interp_cap, interp_of_cap;
