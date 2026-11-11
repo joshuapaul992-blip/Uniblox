@@ -1532,7 +1532,7 @@ static int e_start(lua_State *L)
     for (i32 i = 0; i < w->count; ++i) {
         const ub_instance *in = &w->inst[i];
         bool runs = runs_here(w, i, sss);
-        if (in->source != UB_NO_STRING && (in->flags & UB_INST_CLIENT) && !runs) S.stats.skipped_client++;
+        if (in->source != UB_NO_STRING && (in->flags & UB_INST_CLIENT) && !runs && S.g->role != UB_ROLE_SERVER) S.stats.skipped_client++;
         if (runs && is_client(w, i)) continue; /* their turn comes with the first frame */
         if (!runs || !mark_started(i)) continue;
         char name[192], chunk[200];
