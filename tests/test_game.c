@@ -799,6 +799,32 @@ static void test_camera(void)
     in = cam_in(0, 'O');
     cam_frame(&in);
     CHECK(fabsf(g_cv.zoom - 40) < 0.01f);
+    /* no wheel (NT 3.51's own drivers do not read one): drag with the middle
+     * button held, up to zoom in, down to zoom out */
+    for (int i = 0; i < 6; ++i) {
+        in = cam_in(0, 0);
+        in.mouse_down[UB_MOUSE_MIDDLE] = true;
+        in.mouse_x = 400;
+        in.mouse_y = 300 - i * 16;
+        cam_frame(&in);
+    }
+    f32 dragged = g_cv.zoom;
+    CHECK(dragged < 40 * 0.85f * 0.85f * 0.85f * 0.85f + 0.01f && dragged > 15);
+    for (int i = 0; i < 6; ++i) {
+        in = cam_in(0, 0);
+        in.mouse_down[UB_MOUSE_MIDDLE] = true;
+        in.mouse_y = 220 + i * 16;
+        cam_frame(&in);
+    }
+    CHECK(g_cv.zoom > dragged);
+    in = cam_in(0, 0);
+    cam_frame(&in);
+    in.mouse_down[UB_MOUSE_MIDDLE] = true;
+    in.mouse_y = 0; /* (a new drag starts where the button went down) */
+    f32 before = g_cv.zoom;
+    cam_frame(&in);
+    CHECK(g_cv.zoom == before);
+    g_cv.zoom = 40;
 
     /* walls: behind the player (the wall at z = 9.5..10.5 is between the
      * camera and a player standing at z = 12) the camera comes in front */

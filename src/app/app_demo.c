@@ -891,8 +891,13 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     g_fps_log_us += real_dt_us;
     if (g_fps_log_us >= 5000000) { /* a periodic line helps when reading logs from testers */
         g_fps_log_us = 0;
-        ub_debug("fps %u.%u at %dx%d, cap %u, slept %u us last frame", g_fps_x10 / 10, g_fps_x10 % 10,
-                 frame->width, frame->height, frame->fps_cap, frame->sleep_us);
+        ub_game *srv = ub_session_server(g_sess);
+        u32 game_us = g_game.phys_us + g_game.script_us + (srv ? srv->phys_us + srv->script_us : 0u);
+        ub_debug("fps %u.%u at %dx%d, cap %u, slept %u us last frame; render %u.%u ms (quality %s), present %u.%u ms, "
+                 "game %u.%u ms", g_fps_x10 / 10, g_fps_x10 % 10, frame->width, frame->height, frame->fps_cap,
+                 frame->sleep_us, g_stats.render_us / 1000u, g_stats.render_us / 100u % 10u,
+                 ub_render_quality_name((ub_quality)g_quality), frame->present_us / 1000u, frame->present_us / 100u % 10u,
+                 game_us / 1000u, game_us / 100u % 10u);
     }
     if (g_sess && !ub_session_client(g_sess) && !g_menu_open) { /* (a slow link: the first copy takes a while) */
         ub_session_stats ns;

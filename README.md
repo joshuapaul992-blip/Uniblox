@@ -444,7 +444,8 @@ same way in every renderer, and works with scripts off too. The F3 text
 
 The player's camera works as Roblox's did in 2021:
 
-- **Zoom** with the mouse wheel, or I and O, from 0.5 to 128 studs (a place
+- **Zoom** with the mouse wheel, I and O, or by dragging up and down with
+  the middle button held (for NT 3.51, whose own drivers don't read a wheel), from 0.5 to 128 studs (a place
   can set other limits in StarterPlayer). It eases to where you point it
   and starts 12.5 studs away.
 - **First person:** zoom in closer than 2 studs and the camera goes to the
@@ -857,7 +858,7 @@ can't write the log or settings.
 | W A S D, or Up/Down arrows | Move (relative to the camera) |
 | Left/Right arrows | Turn the camera |
 | Hold right mouse button | Orbit the camera (left/right and up/down) |
-| Mouse wheel, or I and O | Zoom in and out (the wheel: NT 4.0 and later, or NT 3.51 with a wheel driver); all the way in is first person |
+| Mouse wheel, I and O, or drag with the middle button held | Zoom in and out (drag up to zoom in); all the way in is first person. NT 3.51's own mouse drivers don't read a wheel at all: there the wheel works only with a wheel driver (one that sends IntelliPoint's message or scroll-bar messages), so use I/O or the middle button (pressing the wheel is one) |
 | Shift | Shift lock on/off |
 | Space | Jump (hold to keep jumping) |
 | Left click | Use the tool you hold, click a ClickDetector (and beep, panned and pitched by where you click) |

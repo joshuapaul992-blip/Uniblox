@@ -30,6 +30,7 @@
 #define SMAP_TEXEL 0.25f       /* studs a texel: the map covers 128 studs round the camera's focus */
 #define SDEPTH_SCALE 262144.0f /* shadow map depth units a stud */
 #define SDEPTH_OFFSET 4096.0f
+#define SHARE_W 2048           /* frames up to this wide share shadows between rows */
 /* how far behind the map's depth a point must be to be in shadow, by its
  * face's shadow level (faces the sun lights at a slant need a little more) */
 static const f32 k_shadow_bias[8] = { 0, 0.3f * SDEPTH_SCALE, 0.2f * SDEPTH_SCALE, 0.12f * SDEPTH_SCALE,
@@ -241,7 +242,7 @@ int sw_threads(void)
 
 static u32 lerp_rgb(u32 a, u32 b, f32 t)
 {
-    i32 k = (i32)(ub_clampf(t, 0.0f, 1.0f) * 256.0f);
+    i32 k = ub_floorf(ub_clampf(t, 0.0f, 1.0f) * 256.0f);
     u32 r = (u32)((i32)((a >> 16) & 255) + ((((i32)((b >> 16) & 255) - (i32)((a >> 16) & 255)) * k) >> 8));
     u32 g = (u32)((i32)((a >> 8) & 255) + ((((i32)((b >> 8) & 255) - (i32)((a >> 8) & 255)) * k) >> 8));
     u32 bl = (u32)((i32)(a & 255) + ((((i32)(b & 255) - (i32)(a & 255)) * k) >> 8));
@@ -1028,7 +1029,7 @@ static shading *pool_take(void)
 static const shading *select_table(u32 color, ub_material mat, const f32 *light, bool ramp)
 {
     i16 q[3];
-    for (int k = 0; k < 3; ++k) q[k] = (i16)((i32)(ub_clampf(light[k], 0.0f, 1.6f) * 64.0f) * 4);
+    for (int k = 0; k < 3; ++k) q[k] = (i16)(ub_floorf(ub_clampf(light[k], 0.0f, 1.6f) * 64.0f) * 4);
     u8 fmt = (u8)R.fb->format;
     if (ramp) mat = UB_MAT_PLASTIC;
     u32 h = (color * 2654435761u) ^ ((u32)q[0] * 40503u) ^ ((u32)q[1] * 9973u) ^ ((u32)q[2] * 70001u) ^
@@ -1151,7 +1152,7 @@ static void out_poly(const pvert *pv, int n, span_fn span, const shading *sh, in
     fp->y0 = (i16)UB_CLAMP((int)ub_floorf(y0), 0, h);
     fp->y1 = (i16)UB_CLAMP((int)ub_floorf(y1) + 2, 0, h);
     f64 zn = (f64)izmax * ZSCALE;
-    fp->znear = zn >= 4294967295.0 ? 0xFFFFFFFFu : (u32)zn;
+    fp->znear = zn >= 4294967295.0 ? 0xFFFFFFFFu : zn > 0 ? ub_rintu(zn) : 0;
     /* Little change in depth across it: step the perspective divide further
      * (at a 3% change, 64 pixels stray under a tenth of a texel per texel) */
     f32 ratio = izmax / (izmin > 1e-6f ? izmin : 1e-6f);
@@ -1236,7 +1237,7 @@ static void part_faces(const ub_part_draw *p, vec3 size, vec3 centre)
                 for (int k = 0; k < 3; ++k) tint[k] = (f32)ub_rint((lum > 0.02f ? rgb[k] / lum : 1.0f) * 16.0f) / 16.0f;
                 sh = select_table(p->color, mat, tint, true);
                 f32 spec = ub_materials[mat].specular;
-                int shine = (int)ub_materials[mat].shininess;
+                int shine = ub_rint(ub_materials[mat].shininess);
                 for (int i = 0; i < f->count; ++i) {
                     vec3 vn = mesh->vnormals[f->v[i]];
                     vec3 nws = v3_normalize(mat3_apply(&p->rot, v3_normalize(v3(vn.x / size.x, vn.y / size.y, vn.z / size.z))));
@@ -1542,7 +1543,7 @@ static u32 shadow_at(int x, f32 zv, u32 lvl, f32 sx_base, f32 sy_base, f32 sd_ba
     i32 ix = ub_rint(px - 0.5f), iy = ub_rint(py - 0.5f);
     if ((u32)ix >= SMAP - 1 || (u32)iy >= SMAP - 1) return 256;
     const u32 *t = R.smap + iy * SMAP + ix;
-    u32 d = (u32)(sd_base + zz * (sd_row + sd_step * fx) + k_shadow_bias[lvl]);
+    u32 d = ub_rintu(sd_base + zz * (sd_row + sd_step * fx) + k_shadow_bias[lvl]); /* (no truncating cast: see ub_rint) */
     u32 a = t[0] > d, b = t[1] > d, c = t[SMAP] > d, e = t[SMAP + 1] > d;
     if (!(a | b | c | e)) return 256;
     i32 wx = ub_rint((px - (f32)ix) * 256.0f), wy = ub_rint((py - (f32)iy) * 256.0f);
@@ -1578,8 +1579,16 @@ static void finish_rows(int y0, int y1)
     f32 sx_base = 0, sy_base = 0, sd_base = 0;
     if (R.shadow_on) to_smap(R.cam_pos, &sx_base, &sy_base, &sd_base);
     if (idx8 && (R.shadow_on || R.fog_on)) make_remap();
+    /* a pixel's shadow also serves the one below it on the same surface:
+     * the even row's are kept for the odd row under it */
+    u32 up_z[SHARE_W];
+    u16 up_m[SHARE_W];
+    u8 up_lvl[SHARE_W];
+    bool share_rows = R.shadow_on && fb->width <= SHARE_W;
     for (int y = y0; y < y1; ++y) {
         const u32 *z = R.zbuf + y * R.zw;
+        bool below = share_rows && ((y - y0) & 1); /* (the row above is in this strip and was kept) */
+        bool keep = share_rows && !below;
         u8 even = 0, odd = 0;
         u32 sky = sky_row(y, &even, &odd);
         u32 *row32 = fb->pixels + y * fb->pitch;
@@ -1597,11 +1606,12 @@ static void finish_rows(int y0, int y1)
         for (int x = 0; x < fb->width; ++x) {
             u32 zr = z[x];
             if (!zr) { /* the sky */
+                if (keep) up_lvl[x] = 0;
                 if (sun_row && (f32)x > sunx - sunr * 5 && (f32)x < sunx + sunr * 5) {
                     f32 ddx = (f32)x + 0.5f - sunx, ddy = (f32)y + 0.5f - suny;
                     f32 d = ub_sqrtf(ddx * ddx + ddy * ddy) / sunr;
                     f32 k = d < 1 ? 1.0f : d < 5 ? (1 - (d - 1) / 4) * (1 - (d - 1) / 4) * 0.45f : 0;
-                    u32 f = (u32)(k * 256);
+                    u32 f = ub_rintu(k * 256);
                     u32 c = f ? darken_fog32(sky, 256, f > 256 ? 256 : f, sunc) : sky;
                     if (idx8) row8[x] = ub_palette_match((int)(c >> 16) & 255, (int)(c >> 8) & 255, (int)c & 255, (x & 1) | ((y & 1) << 1));
                     else row32[x] = c;
@@ -1616,6 +1626,8 @@ static void finish_rows(int y0, int y1)
             if (lvl && R.shadow_on) {
                 if (x == pair_x + 1 && lvl == pair_lvl && zr - pair_z + pair_tol <= 2 * pair_tol) {
                     m = pair_m; /* the left neighbour's, on the same surface */
+                } else if (below && up_lvl[x] == lvl && zr - up_z[x] + (zr >> 7) <= 2 * (zr >> 7)) {
+                    m = up_m[x]; /* the one above's */
                 } else {
                     m = shadow_at(x, fz.f, lvl, sx_base, sy_base, sd_base, sx_row, sy_row, sd_row, sx_step, sy_step, sd_step);
                     pair_x = x;
@@ -1624,6 +1636,13 @@ static void finish_rows(int y0, int y1)
                     pair_tol = zr >> 7;
                     pair_m = m;
                 }
+                if (keep) {
+                    up_z[x] = zr;
+                    up_m[x] = (u16)m;
+                    up_lvl[x] = (u8)lvl;
+                }
+            } else if (keep) {
+                up_lvl[x] = 0;
             }
             if (R.fog_on) {
                 u32 fi = (fz.b >> 16) - FOG_BASE;

@@ -23,6 +23,8 @@
 typedef struct {
     f32 yaw, pitch, zoom;              /* camera around the player; zoom: where the wheel put it */
     f32 zoom_now;                      /* the zoom, eased towards `zoom` */
+    int mid_y, mid_acc;                /* zooming by dragging with the middle button (no wheel, e.g. NT 3.51) */
+    bool mid_down;
     f32 cam_len;                       /* from the head to the camera, after walls pulled it in */
     f32 shoulder;                      /* 0..1: shift lock's step over the right shoulder */
     f32 fade;                          /* 0..1: how see-through the character is drawn (close up) */

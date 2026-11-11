@@ -745,6 +745,16 @@ PR 2 notes:
   copy is 23 KB. 20 moving parts cost 4.4 KB/s (was 7.7). Acknowledgements
   alone wait up to 25 ms for data to ride with; an idle character reports
   4 times a second.
+- After a tester's NT 3.51 log (high quality at 25 fps when walls filled
+  the screen, medium at the 120 cap): the shadow's depth was a C cast from
+  float, and on the x87 every such cast switches the rounding mode twice
+  (`fldcw`): once per lit pixel. It, `ub_roundf` (behind `ub_sinf` and
+  `ub_cosf`) and the GUI canvas's per-pixel casts now round without a
+  cast. A pixel's shadow also serves the one below it on the same
+  surface. The periodic log line now gives render, present and game times.
+- NT 3.51's own mouse drivers don't read a wheel: the game also takes
+  scroll-bar lines (as some wheel drivers send) and zooms by dragging with
+  the middle button; the log says whether IntelliPoint's driver runs.
 - Not yet: more than one client (milestone 10), validating clicks and
   prompts by distance on the server, ChildRemoved for reparenting seen on
   a client.

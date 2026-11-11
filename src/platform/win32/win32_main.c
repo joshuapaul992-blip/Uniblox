@@ -634,6 +634,14 @@ static LRESULT CALLBACK wnd_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_MOUSEWHEEL:
         g_input.wheel += (short)HIWORD(wp);
         return 0;
+    case WM_VSCROLL:
+        /* some wheel drivers (on systems before WM_MOUSEWHEEL) scroll the
+         * window under the pointer instead: a line is a notch */
+        if (LOWORD(wp) == SB_LINEUP) g_input.wheel += 120;
+        else if (LOWORD(wp) == SB_LINEDOWN) g_input.wheel -= 120;
+        else if (LOWORD(wp) == SB_PAGEUP) g_input.wheel += 360;
+        else if (LOWORD(wp) == SB_PAGEDOWN) g_input.wheel -= 360;
+        return 0;
     case WM_ERASEBKGND:
         return 1; /* we paint every pixel */
     case WM_PAINT: {
@@ -801,9 +809,14 @@ static int win32_main(void)
         ub_utf16_to_utf8((const u16 *)win32_base_dir(), base, sizeof base);
         ub_info("running from %s", base[0] ? base : "(current directory)");
     }
+    /* NT 3.51's own mouse drivers do not read a wheel at all; a wheel
+     * driver may still send MSWHEEL_ROLLMSG (IntelliPoint's) or scroll */
+    bool mswheel = FindWindowW(L"MouseZ", L"Magellan MSWHEEL") != NULL;
     ub_info("%s, %u MB RAM, %dx%d %d bpp screen%s, mouse wheel %s", sys.os_name,
             (u32)(sys.total_phys_bytes >> 20), sys.screen_w, sys.screen_h, sys.display_bpp,
-            dpi_aware ? " (DPI-aware)" : "", sys.has_mouse_wheel ? "reported" : "not reported");
+            dpi_aware ? " (DPI-aware)" : "",
+            sys.has_mouse_wheel ? "reported" : mswheel ? "from the IntelliPoint driver"
+                                : "not reported by the system (zoom with I and O, or drag with the middle button held)");
     ub_info("CPU: %s; %d processor%s", sys.cpu_desc, sys.cpu_count, sys.cpu_count == 1 ? "" : "s");
     g_msh_wheel_msg = RegisterWindowMessageW(L"MSWHEEL_ROLLMSG");
 

@@ -315,7 +315,7 @@ static bool pbool(const ub_world *w, i32 i, u32 k, bool def)
     return v && v->type == UB_PV_BOOL ? v->v.b : def;
 }
 
-static u32 to8(f32 c) { return (u32)(ub_clampf(c, 0, 1) * 255.0f + 0.5f); }
+static u32 to8(f32 c) { return (u32)ub_floorf(ub_clampf(c, 0, 1) * 255.0f + 0.5f); }
 
 static u32 pcolor(const ub_world *w, i32 i, u32 k, u32 def)
 {
@@ -1414,7 +1414,7 @@ static bool is_hovered(const ub_gui *g, i32 inst)
 
 static u32 shade(u32 c, f32 k)
 {
-    u32 r = (u32)(((c >> 16) & 255) * k), gg = (u32)(((c >> 8) & 255) * k), b = (u32)((c & 255) * k);
+    u32 r = (u32)ub_floorf((f32)((c >> 16) & 255) * k), gg = (u32)ub_floorf((f32)((c >> 8) & 255) * k), b = (u32)ub_floorf((f32)(c & 255) * k);
     return (UB_MIN(r, 255u) << 16) | (UB_MIN(gg, 255u) << 8) | UB_MIN(b, 255u);
 }
 
