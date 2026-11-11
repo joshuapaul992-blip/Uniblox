@@ -93,6 +93,59 @@ static const char k_door[] =
 
 static ub_game g_g;
 
+/* --- the same tests, solo or networked (milestone 9D) */
+static bool g_net;            /* the tests' games run as a server and a client over loopback */
+static ub_session *g_s;
+static ub_game *sclient(void) { return ub_session_client(g_s); }
+static ub_game *sserver(void) { return ub_session_server(g_s); }
+static void sframes(int n, vec3 move)
+{
+    for (int i = 0; i < n; ++i) ub_session_update(g_s, 1.0f / 60.0f, move, false);
+}
+/* runs until the client has joined; false if it does not within `secs` */
+static bool sjoin(f32 secs)
+{
+    for (int i = 0; i < (int)(secs * 60) && !sclient(); ++i) sframes(1, v3(0, 0, 0));
+    return sclient() != NULL;
+}
+static bool tg_start(ub_world *w, bool scripts)
+{
+    if (!g_net) return ub_game_start(&g_g, w, scripts);
+    g_s = ub_session_new(w, scripts, NULL);
+    return g_s && sjoin(2.0f);
+}
+static ub_game *tg_view(void) { return g_net ? sclient() : &g_g; }   /* what the player sees (and gives input to) */
+static ub_game *tg_auth(void) { return g_net ? sserver() : &g_g; }   /* where the server's scripts run */
+static void tg_update(ub_game *g, f32 dt, vec3 move, bool jump)
+{
+    if (g_net && g != &g_g) ub_session_update(g_s, dt, move, jump);
+    else ub_game_update(g, dt, move, jump);
+}
+static void tg_stop(void)
+{
+    if (!g_net) {
+        ub_game_stop(&g_g);
+        return;
+    }
+    ub_session_free(g_s);
+    g_s = NULL;
+}
+static ub_script_stats side_stats(ub_game *g)
+{
+    ub_script_stats st;
+    ub_game_scripts(g);
+    ub_script_get_stats(&st);
+    return st;
+}
+static void print_side_output(ub_game *g, const char *side)
+{
+    const char *lines[UB_SCRIPT_OUTPUT_LINES];
+    bool err[UB_SCRIPT_OUTPUT_LINES];
+    ub_game_scripts(g);
+    int n = ub_script_output(lines, err, UB_SCRIPT_OUTPUT_LINES);
+    for (int i = 0; i < n; ++i) printf("    %s%s: %s\n", side, err[i] ? " (error)" : "", lines[i]);
+}
+
 /* Walks towards +z for `seconds`; returns the farthest z reached. */
 static f32 walk_watching(ub_game *g, f32 seconds, f32 *door_transparency_seen, i32 door)
 {
@@ -188,17 +241,24 @@ static void test_api(void)
     ub_world_set_source(&w, mod, "local M = {}\nfunction M.double(x) return x * 2 end\nM.loaded = (M.loaded or 0) + 1\nreturn M\n");
     add_script(&w, sss, "Api", src);
     free(src);
-    CHECK(ub_game_start(&g_g, &w, true));
-    for (int i = 0; i < 600 && find_result(&g_g, "api done") < 0; ++i)
-        ub_game_update(&g_g, 1.0f / 60.0f, v3(0, 0, 0), false);
-    bool ok = find_result(&g_g, "api ok") >= 0;
-    CHECK(find_result(&g_g, "api done") >= 0);
+    CHECK(tg_start(&w, true));
+    ub_game *g = tg_view(), *a = tg_auth();
+    if (!g) {
+        tg_stop();
+        return;
+    }
+    for (int i = 0; i < 600 && find_result(g, "api done") < 0; ++i) tg_update(g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    CHECK(find_result(g, "api done") >= 0);
+    bool ok = find_result(g, "api ok") >= 0;
     CHECK(ok);
-    ub_script_stats st;
-    ub_script_get_stats(&st);
-    CHECK(st.errors == 0);
-    if (!ok || st.errors) print_output();
-    ub_game_stop(&g_g);
+    ub_script_stats st = side_stats(a), stc = side_stats(g);
+    CHECK(st.errors == 0 && stc.errors == 0);
+    if (!ok || st.errors || stc.errors) {
+        print_side_output(a, "server");
+        if (g != a) print_side_output(g, "client");
+    }
+    if (g_net) printf("  the instance API: networked as solo\n");
+    tg_stop();
 }
 
 /* Luau's library additions (bit32, utf8, DateTime, JSON...). */
@@ -890,7 +950,7 @@ static void gui_frame(ub_game *g, f32 x, f32 y, bool press, bool release, int ke
     in.mouse_released[0] = release;
     if (key) in.key_pressed[key] = in.key_down[key] = in.key_repeat[key] = true;
     play_gui_input(g, &fr, &in, NULL, false, t);
-    ub_game_update(g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    tg_update(g, 1.0f / 60.0f, v3(0, 0, 0), false);
     ub_gui_render(g->gui, &g->world, NULL);
 }
 
@@ -1066,21 +1126,29 @@ static void test_character(void)
     i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
     add_script(&w, sss, "Char", src);
     free(src);
-    CHECK(ub_game_start(&g_g, &w, true));
-    int ready = -1;
-    for (int i = 0; i < 1200 && find_result(&g_g, "char done") < 0; ++i) {
-        if (ready < 0 && find_result(&g_g, "char ready") >= 0) ready = i;
-        int k = ready >= 0 ? i - ready : -1;
-        gui_frame(&g_g, 400, 400, k == 20, k == 21, (k == 5 || k == 40) ? '1' : 0, i / 60.0);
+    CHECK(tg_start(&w, true));
+    ub_game *g = tg_view(), *a = tg_auth();
+    if (!g) {
+        tg_stop();
+        return;
     }
-    CHECK(find_result(&g_g, "char done") >= 0);
-    bool ok = find_result(&g_g, "char ok") >= 0;
+    int ready = -1;
+    for (int i = 0; i < 1200 && find_result(g, "char done") < 0; ++i) {
+        if (ready < 0 && find_result(g, "char ready") >= 0) ready = i;
+        int k = ready >= 0 ? i - ready : -1;
+        gui_frame(g, 400, 400, k == 20, k == 21, (k == 5 || k == 40) ? '1' : 0, i / 60.0);
+    }
+    CHECK(find_result(g, "char done") >= 0);
+    bool ok = find_result(g, "char ok") >= 0;
     CHECK(ok);
-    ub_script_stats st;
-    ub_script_get_stats(&st);
-    CHECK(st.errors == 0);
-    if (!ok || st.errors) print_output();
-    ub_game_stop(&g_g);
+    ub_script_stats st = side_stats(a), stc = side_stats(g);
+    CHECK(st.errors == 0 && stc.errors == 0);
+    if (!ok || st.errors || stc.errors) {
+        print_side_output(a, "server");
+        if (g != a) print_side_output(g, "client");
+    }
+    if (g_net) printf("  character, tools and teams: networked as solo\n");
+    tg_stop();
 }
 
 /* Constraints and body movers (8C). */
@@ -1119,16 +1187,24 @@ static void test_constraints(void)
     i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
     add_script(&w, sss, "Con", src);
     free(src);
-    CHECK(ub_game_start(&g_g, &w, true));
-    for (int i = 0; i < 600 && find_result(&g_g, "con done") < 0; ++i) ub_game_update(&g_g, 1.0f / 60.0f, v3(0, 0, 0), false);
-    CHECK(find_result(&g_g, "con done") >= 0);
-    bool ok = find_result(&g_g, "con ok") >= 0;
+    CHECK(tg_start(&w, true));
+    ub_game *g = tg_view(), *a = tg_auth();
+    if (!g) {
+        tg_stop();
+        return;
+    }
+    for (int i = 0; i < 600 && find_result(g, "con done") < 0; ++i) tg_update(g, 1.0f / 60.0f, v3(0, 0, 0), false);
+    CHECK(find_result(g, "con done") >= 0);
+    bool ok = find_result(g, "con ok") >= 0;
     CHECK(ok);
-    ub_script_stats st;
-    ub_script_get_stats(&st);
-    CHECK(st.errors == 0);
-    if (!ok || st.errors) print_output();
-    ub_game_stop(&g_g);
+    ub_script_stats st = side_stats(a), stc = side_stats(g);
+    CHECK(st.errors == 0 && stc.errors == 0);
+    if (!ok || st.errors || stc.errors) {
+        print_side_output(a, "server");
+        if (g != a) print_side_output(g, "client");
+    }
+    if (g_net) printf("  constraints and movers: networked as solo\n");
+    tg_stop();
 }
 
 /* ------------------------------------------ the wider 2022 API (8B) */
@@ -1160,7 +1236,7 @@ static void interact_frame(ub_game *g, bool press, bool release, int key_press, 
     cam.fov_y = 70.0f * 3.14159265f / 180.0f;
     cam.far_dist = 1000;
     play_gui_input(g, &fr, &in, &cam, false, t);
-    ub_game_update(g, 1.0f / 60.0f, v3(0, 0, 0), jump);
+    tg_update(g, 1.0f / 60.0f, v3(0, 0, 0), jump);
     ub_gui_render(g->gui, &g->world, &cam);
 }
 
@@ -1183,50 +1259,42 @@ static void test_api2022(void)
     i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
     add_script(&w, sss, "Api2022", src);
     free(src);
-    CHECK(ub_game_start(&g_g, &w, true));
+    CHECK(tg_start(&w, true));
+    ub_game *g = tg_view(), *a = tg_auth();
+    if (!g) {
+        tg_stop();
+        return;
+    }
     int ready = -1;
-    for (int i = 0; i < 900 && find_result(&g_g, "api2022 done") < 0; ++i) {
-        if (ready < 0 && find_result(&g_g, "api2022 ready") >= 0) ready = i;
+    for (int i = 0; i < 900 && find_result(g, "api2022 done") < 0; ++i) {
+        if (ready < 0 && find_result(g, "api2022 ready") >= 0) ready = i;
         int k = ready >= 0 ? i - ready : -1;
-        interact_frame(&g_g, k == 5, k == 6, k == 15 ? 'E' : k == 25 ? 'F' : 0, k > 25 && k < 70 ? 'F' : 0,
+        interact_frame(g, k == 5, k == 6, k == 15 ? 'E' : k == 25 ? 'F' : 0, k > 25 && k < 70 ? 'F' : 0,
                        k == 16 ? 'E' : k == 70 ? 'F' : 0, k == 90, i / 60.0);
     }
-    CHECK(find_result(&g_g, "api2022 done") >= 0);
-    bool ok = find_result(&g_g, "api2022 ok") >= 0;
+    CHECK(find_result(g, "api2022 done") >= 0);
+    bool ok = find_result(g, "api2022 ok") >= 0;
     CHECK(ok);
     /* the prompts were drawn: a BillboardGui under CoreGui */
     i32 core = -1;
-    for (i32 i = 0; i < g_g.world.count; ++i)
-        if (g_g.world.inst[i].parent < 0 && ub_world_alive(&g_g.world, i) &&
-            strcmp(ub_world_str(&g_g.world, g_g.world.inst[i].name), "CoreGui") == 0)
+    for (i32 i = 0; i < g->world.count; ++i)
+        if (g->world.inst[i].parent < 0 && ub_world_alive(&g->world, i) &&
+            strcmp(ub_world_str(&g->world, g->world.inst[i].name), "CoreGui") == 0)
             core = i;
-    CHECK(core >= 0 && g_g.world.inst[core].first_child >= 0);
-    ub_script_stats st;
-    ub_script_get_stats(&st);
-    CHECK(st.errors == 0);
-    if (!ok || st.errors) print_output();
-    ub_game_stop(&g_g);
+    CHECK(core >= 0 && g->world.inst[core].first_child >= 0);
+    ub_script_stats st = side_stats(a), stc = side_stats(g);
+    CHECK(st.errors == 0 && stc.errors == 0);
+    if (!ok || st.errors || stc.errors) {
+        print_side_output(a, "server");
+        if (g != a) print_side_output(g, "client");
+    }
+    if (g_net) printf("  2022 API (clicks, prompts, jumping): networked as solo\n");
+    tg_stop();
 }
 
 
 /* ============================================ networked (milestone 9D) */
 
-static ub_session *g_s;
-
-static ub_game *sclient(void) { return ub_session_client(g_s); }
-static ub_game *sserver(void) { return ub_session_server(g_s); }
-
-static void sframes(int n, vec3 move)
-{
-    for (int i = 0; i < n; ++i) ub_session_update(g_s, 1.0f / 60.0f, move, false);
-}
-
-/* runs until the client has joined; false if it does not within `secs` */
-static bool sjoin(f32 secs)
-{
-    for (int i = 0; i < (int)(secs * 60) && !sclient(); ++i) sframes(1, v3(0, 0, 0));
-    return sclient() != NULL;
-}
 
 /* a client frame with this mouse and key (as gui_frame) */
 static void sgui_frame(f32 x, f32 y, bool press, bool release, int key, f64 t)
@@ -1262,22 +1330,6 @@ static bool said(ub_game *g, const char *text)
     return false;
 }
 
-static void print_side_output(ub_game *g, const char *side)
-{
-    const char *lines[UB_SCRIPT_OUTPUT_LINES];
-    bool err[UB_SCRIPT_OUTPUT_LINES];
-    ub_game_scripts(g);
-    int n = ub_script_output(lines, err, UB_SCRIPT_OUTPUT_LINES);
-    for (int i = 0; i < n; ++i) printf("    %s%s: %s\n", side, err[i] ? " (error)" : "", lines[i]);
-}
-
-static ub_script_stats side_stats(ub_game *g)
-{
-    ub_script_stats st;
-    ub_game_scripts(g);
-    ub_script_get_stats(&st);
-    return st;
-}
 
 static void test_session_door(void)
 {
@@ -1541,6 +1593,13 @@ static void test_session_demo(const ub_link_sim *sim, const char *what)
 
 static void test_session(void)
 {
+    /* the interaction tests again, networked: the same checks pass */
+    g_net = true;
+    test_api();
+    test_constraints();
+    test_character();
+    test_api2022();
+    g_net = false;
     test_session_door();
     test_session_remotes();
     test_session_death();
