@@ -168,6 +168,7 @@ typedef struct {
 
     ub_phys_stats stats;
     bool all_asleep_logged;
+    bool remote;              /* parts are moved from outside (a network client): none are simulated */
 } ub_physics;
 
 typedef struct {
@@ -177,8 +178,10 @@ typedef struct {
 } ub_phys_hit;
 
 /* Builds bodies from the world's parts. Parts listed in `kinematic_parts`
- * (with the parts welded to them) become kinematic. Returns false if out
- * of memory. The world must outlive the physics. */
+ * (with the parts welded to them) become kinematic; kinematic_count < 0:
+ * all of them do, now and when added later (a network client's world,
+ * where the server moves them; only characters are simulated). Returns
+ * false if out of memory. The world must outlive the physics. */
 bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int kinematic_count);
 void ub_phys_free(ub_physics *ph);
 

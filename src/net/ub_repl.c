@@ -247,6 +247,7 @@ typedef struct {
     i32 *tlist;            /* those parents, this tick */
     i32 ntl, tl_cap;
     i32 roll;              /* the next part of the rolling check */
+    i32 owned;             /* the subtree the client moves itself (its character), -1 none */
     ub_wbuf motion;        /* the unreliable message being filled */
     u32 motion_n;
     u32 motion_count_at;
@@ -333,10 +334,16 @@ int ub_repl_server_add(ub_repl_server *s, ub_conn *conn)
             memset(&s->c[i], 0, sizeof s->c[i]);
             s->c[i].used = true;
             s->c[i].conn = conn;
+            s->c[i].owned = -1;
             ub_wbuf_init(&s->c[i].motion, NULL, 0);
             return i;
         }
     return -1;
+}
+
+void ub_repl_server_set_owned(ub_repl_server *s, int client, i32 root)
+{
+    if (client >= 0 && client < MAX_CLIENTS && s->c[client].used) s->c[client].owned = root;
 }
 
 void ub_repl_server_remove(ub_repl_server *s, int client)
@@ -699,6 +706,7 @@ static void check_part(ub_repl_server *s, rclient *c, i32 pi)
     rpart *rp = &c->parts[pi];
     if (!rp->has) return;
     const ub_part *p = &w->parts[pi];
+    bool owned = c->owned >= 0 && ub_world_is_descendant(w, inst, c->owned);
     if (!same_looks(p, &rp->sent)) {
         ub_wbuf *b = begin(s, R_PART);
         ub_w_varu(b, s->tick);
@@ -711,7 +719,7 @@ static void check_part(ub_repl_server *s, rclient *c, i32 pi)
         rp->moving = false;
         return;
     }
-    if (same_place(&rp->sent, p->pos, &p->rot)) {
+    if (owned || same_place(&rp->sent, p->pos, &p->rot)) { /* (the client moves its own) */
         rp->moving = false;
         return;
     }
@@ -911,6 +919,7 @@ struct ub_repl_client {
     i32 npend, pend_cap;
     bool joined;
     scratch sc;
+    ub_repl_hooks hooks;
 };
 
 ub_repl_client *ub_repl_client_new(ub_world *w)
@@ -920,6 +929,14 @@ ub_repl_client *ub_repl_client_new(ub_world *w)
     memset(c, 0, sizeof *c);
     c->w = w;
     return c;
+}
+
+void ub_repl_client_set_world(ub_repl_client *c, ub_world *w) { c->w = w; }
+
+void ub_repl_client_hooks(ub_repl_client *c, const ub_repl_hooks *h)
+{
+    if (h) c->hooks = *h;
+    else memset(&c->hooks, 0, sizeof c->hooks);
 }
 
 void ub_repl_client_free(ub_repl_client *c)
@@ -1042,12 +1059,13 @@ static void destroy_local(ub_repl_client *c, i32 root)
             }
             list[n++] = ch;
         }
-    ub_world_destroy(w, root);
+    if (c->hooks.destroy) c->hooks.destroy(c->hooks.ctx, root);
+    else ub_world_destroy(w, root);
     for (i32 k = n - 1; k >= 0; --k) {
         i32 net = ub_repl_client_net(c, list[k]);
         unmap_local(c, list[k]);
         if (net >= 0) resolve_refs(c, net, -1);
-        ub_world_reclaim(w, list[k]);
+        if (!c->hooks.destroy) ub_world_reclaim(w, list[k]);
     }
     for (i32 k = 0; k < c->npend; ++k)
         if (!ub_world_alive(w, c->pend[k].inst)) c->pend[k--] = c->pend[--c->npend];
@@ -1106,6 +1124,7 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
             zero.rot = mat3_identity();
             inst = ub_world_add_part(w, parent, (ub_class)cls, cbuf, nbuf, &zero);
             if (inst >= 0) set_part(c, inst, &p, ptick);
+            if (inst >= 0 && c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 0, ptick);
         } else {
             inst = ub_world_add(w, parent, (ub_class)cls, cbuf, nbuf);
         }
@@ -1203,6 +1222,7 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
         get_part(&r, &p);
         if (r.err || inst < 0) return false;
         set_part(c, inst, &p, tick);
+        if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 0, tick);
         return true;
     }
     case R_XFORM: {
@@ -1219,6 +1239,7 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
         w->parts[pi].rot = rot;
         if (grow((void **)&c->ptick, &c->ptick_cap, pi + 1, sizeof(u32))) c->ptick[pi] = tick + 1;
         w->epoch++;
+        if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 1, tick);
         return true;
     }
     case R_MOTION: {
@@ -1234,6 +1255,7 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
             w->parts[pi].pos = pos;
             w->parts[pi].rot = rot;
             if (grow((void **)&c->ptick, &c->ptick_cap, pi + 1, sizeof(u32))) c->ptick[pi] = tick + 1;
+            if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 2, tick);
         }
         w->epoch++;
         return !r.err;

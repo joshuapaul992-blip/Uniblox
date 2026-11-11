@@ -32,6 +32,9 @@ void ub_repl_server_free(ub_repl_server *s);
  * returns its number, or -1. */
 int ub_repl_server_add(ub_repl_server *s, ub_conn *conn);
 void ub_repl_server_remove(ub_repl_server *s, int client);
+/* The client moves this subtree itself (its character): its parts'
+ * movement is not sent to it. -1: none. */
+void ub_repl_server_set_owned(ub_repl_server *s, int client, i32 root);
 /* Sends what changed since the last tick to every client. */
 void ub_repl_server_tick(ub_repl_server *s);
 /* May a client see this instance? */
@@ -48,7 +51,22 @@ typedef struct ub_repl_client ub_repl_client;
 
 /* w: an empty world (ub_world_init) that becomes the copy. */
 ub_repl_client *ub_repl_client_new(ub_world *w);
+/* The copy moved (a game took the world over). */
+void ub_repl_client_set_world(ub_repl_client *c, ub_world *w);
 void ub_repl_client_free(ub_repl_client *c);
+/* What the client's game hears of (all optional). */
+typedef struct {
+    void *ctx;
+    /* destroy `root` and all in it; their slots are the hook's to reclaim
+     * (when nothing refers to them). Without it, the replicator destroys
+     * and reclaims at once. */
+    void (*destroy)(void *ctx, i32 root);
+    /* a part's fields were set: all of them (what 0), where it came to
+     * rest (1), or where it is while it moves (2); tick: the server's */
+    void (*part)(void *ctx, i32 inst, int what, u32 tick);
+} ub_repl_hooks;
+void ub_repl_client_hooks(ub_repl_client *c, const ub_repl_hooks *h);
+
 /* A replication message; false if it is malformed (it changes nothing
  * further). */
 bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len);

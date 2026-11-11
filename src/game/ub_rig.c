@@ -83,6 +83,74 @@ static void joint(ub_game *g, const char *name, i32 p0, vec3 c0, i32 p1, vec3 c1
     j->c1p = v3_sub(at, c1);
     j->c0r = j->c1r = j->tr = mat3_identity();
     j->swing = swing;
+    ub_rig_joint_saved(g, j);
+}
+
+/* A CFrame property (Roblox's axes: position, then the rotation by rows). */
+static void set_cf(ub_world *w, i32 inst, const char *k, vec3 p, const mat3 *r)
+{
+    f32 m[12] = { p.x, p.y, p.z, r->x.x, r->y.x, r->z.x, r->x.y, r->y.y, r->z.y, r->x.z, r->y.z, r->z.z };
+    ub_value v;
+    memset(&v, 0, sizeof v);
+    v.type = UB_PV_CFRAME;
+    v.v.cf.m = m;
+    ub_world_set_prop_named(w, inst, k, &v);
+}
+
+static bool get_cf(const ub_world *w, i32 inst, const char *k, vec3 *p, mat3 *r)
+{
+    const ub_value *v = ub_world_prop_named(w, inst, k);
+    if (!v || v->type != UB_PV_CFRAME || !v->v.cf.m) return false;
+    const f32 *m = v->v.cf.m;
+    *p = v3(m[0], m[1], m[2]);
+    r->x = v3(m[3], m[6], m[9]);
+    r->y = v3(m[4], m[7], m[10]);
+    r->z = v3(m[5], m[8], m[11]);
+    return true;
+}
+
+static i32 get_ref(const ub_world *w, i32 inst, const char *k)
+{
+    const ub_value *v = ub_world_prop_named(w, inst, k);
+    return v && v->type == UB_PV_REF && ub_world_alive(w, v->v.ref) ? v->v.ref : -1;
+}
+
+void ub_rig_joint_saved(ub_game *g, const ub_joint *j)
+{
+    /* (as the script layer keeps a joint's C0 and C1: replication takes them to the client) */
+    if (j->motor < 0 || !ub_world_alive(&g->world, j->motor)) return;
+    set_cf(&g->world, j->motor, "~C0", j->c0p, &j->c0r);
+    set_cf(&g->world, j->motor, "~C1", j->c1p, &j->c1r);
+    ub_value sw = ub_vint(j->swing);
+    ub_world_set_prop_named(&g->world, j->motor, "~Swing", &sw);
+}
+
+void ub_rig_adopt(ub_game *g)
+{
+    ub_world *w = &g->world;
+    g->joint_count = 0;
+    if (g->char_model < 0 || !ub_world_alive(w, g->char_model)) return;
+    const ub_value *rt = g->humanoid >= 0 ? ub_world_prop_named(w, g->humanoid, "RigType") : NULL;
+    g->r15 = !rt || rt->type != UB_PV_ENUM || rt->v.e != 0;
+    i32 n;
+    i32 *sub = ub_world_subtree(w, g->char_model, &n);
+    for (i32 k = 0; sub && k < n && g->joint_count < UB_RIG_JOINTS; ++k) {
+        i32 m = sub[k];
+        if (ub_strcmp(ub_world_str(w, w->inst[m].class_name), "Motor6D") != 0) continue;
+        ub_joint j;
+        memset(&j, 0, sizeof j);
+        j.motor = m;
+        j.part0 = get_ref(w, m, "Part0");
+        j.part1 = get_ref(w, m, "Part1");
+        j.tr = mat3_identity();
+        const ub_value *sw = ub_world_prop_named(w, m, "~Swing");
+        j.swing = (u8)(sw && sw->type == UB_PV_INT ? sw->v.i : 0);
+        if (j.part0 < 0 || j.part1 < 0 || !get_cf(w, m, "~C0", &j.c0p, &j.c0r) || !get_cf(w, m, "~C1", &j.c1p, &j.c1r))
+            continue;
+        g->joints[g->joint_count++] = j;
+    }
+    plat_free(sub);
+    ub_rig_pose(g, 0);
 }
 
 void ub_rig_build(ub_game *g)

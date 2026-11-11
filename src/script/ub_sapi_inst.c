@@ -186,13 +186,44 @@ static void push_props(lua_State *L, i32 idx, bool create)
     lua_remove(L, -2);
 }
 
+/* Values kept here are also put in the world, as property "~key" when
+ * they are of a kind the world holds, so they are saved and replicated
+ * (a client reads them there: its scripts never set them). */
+static void extra_key(char *out, size_t cap, const char *key) { snprintf(out, cap, "~%s", key); }
+
+static void mirror_extra(lua_State *L, i32 idx, const char *key, int vi)
+{
+    if (idx < 0 || !ub_world_alive(W, idx)) return;
+    char name[80];
+    extra_key(name, sizeof name, key);
+    int t = lua_type(L, vi);
+    u8 type = t == LUA_TBOOLEAN ? UB_PV_BOOL : t == LUA_TNUMBER ? UB_PV_DOUBLE : t == LUA_TSTRING ? UB_PV_STRING
+            : is_v3(L, vi) ? UB_PV_VECTOR3 : is_cf(L, vi) ? UB_PV_CFRAME : is_c3(L, vi) ? UB_PV_COLOR3
+            : is_inst(L, vi) ? UB_PV_REF : UB_PV_NONE;
+    ub_value v;
+    f32 seq[16];
+    const char *err;
+    memset(&v, 0, sizeof v);
+    v.type = type;
+    if (type != UB_PV_NONE && to_pvalue(L, vi, type, -1, &v, seq, &err)) ub_world_set_prop_named(W, idx, name, &v);
+    else if (ub_world_prop_named(W, idx, name)) ub_world_remove_prop(W, idx, ub_world_key(W, name));
+}
+
 /* pushes the stored value (nil if none) */
 static void get_extra(lua_State *L, i32 idx, const char *key)
 {
     push_props(L, idx, false);
-    if (lua_isnil(L, -1)) return;
-    lua_getfield(L, -1, key);
-    lua_remove(L, -2);
+    if (!lua_isnil(L, -1)) {
+        lua_getfield(L, -1, key);
+        lua_remove(L, -2);
+        if (!lua_isnil(L, -1)) return;
+    }
+    lua_pop(L, 1);
+    char name[80];
+    extra_key(name, sizeof name, key);
+    const ub_value *v = idx >= 0 ? ub_world_prop_named(W, idx, name) : NULL;
+    if (v) push_pvalue(L, v, -1);
+    else lua_pushnil(L);
 }
 
 static void set_extra(lua_State *L, i32 idx, const char *key, int vi)
@@ -202,6 +233,7 @@ static void set_extra(lua_State *L, i32 idx, const char *key, int vi)
     lua_pushvalue(L, vi);
     lua_setfield(L, -2, key);
     lua_pop(L, 1);
+    mirror_extra(L, idx, key, vi);
 }
 
 /* ------------------------------------------------------------ helpers */
@@ -466,7 +498,7 @@ static bool get_class_prop(lua_State *L, i32 idx, const char *k)
         return true;
     }
     if (idx == g->players && streq(k, "LocalPlayer")) {
-        push_inst(L, g->player);
+        push_inst(L, g->role == UB_ROLE_SERVER ? -1 : g->player); /* (a server has none) */
         return true;
     }
     if (idx == g->players && streq(k, "MaxPlayers")) {
@@ -639,32 +671,7 @@ static int m_isancestorof(lua_State *L)
 
 /* An instance and everything below it (destroyed ones keep their links),
  * in a plat_alloc'd array; NULL when out of memory. */
-i32 *sapi_subtree(i32 root, i32 *count)
-{
-    i32 cap = 64, n = 0, done = 0;
-    i32 *list = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap);
-    if (!list) return NULL;
-    list[n++] = root;
-    while (done < n) {
-        i32 i = list[done++];
-        for (i32 c = W->inst[i].first_child; c >= 0; c = W->inst[c].next_sibling) {
-            if (n == cap) {
-                i32 *nl = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap * 2);
-                if (!nl) {
-                    plat_free(list);
-                    return NULL;
-                }
-                memcpy(nl, list, sizeof(i32) * (size_t)n);
-                plat_free(list);
-                list = nl;
-                cap *= 2;
-            }
-            list[n++] = c;
-        }
-    }
-    *count = n;
-    return list;
-}
+i32 *sapi_subtree(i32 root, i32 *count) { return ub_world_subtree(W, root, count); }
 
 /* candidates: instances whose userdata went (or that were destroyed) */
 static i32 *g_dead;
@@ -764,11 +771,14 @@ void reclaim_instances(lua_State *L)
     lua_pop(L, 1);
 }
 
+static void free_tweens(void);
+
 void free_instances(void)
 {
     plat_free(g_dead);
     g_dead = NULL;
     g_dead_n = g_dead_cap = 0;
+    free_tweens();
 }
 
 /* May scripts make `n` more instances? Collects garbage first if needed. */
@@ -781,14 +791,15 @@ static void check_room(lua_State *L, i32 n)
         luaL_error(L, "too many instances made by scripts (at most %d)", (int)UB_SCRIPT_MAX_INSTANCES);
 }
 
-static void do_destroy(lua_State *L, i32 i)
+/* force: replication destroys it (a client's): nothing is protected */
+static void destroy_ex(lua_State *L, i32 i, bool force)
 {
-    if (i < 0 || is_service(i) || protected_inst(i)) return;
+    if (i < 0 || (!force && (is_service(i) || protected_inst(i)))) return;
     if (!ub_world_alive(W, i)) return;
     i32 n;
     i32 *sub = sapi_subtree(i, &n);
     if (!sub) return;
-    for (i32 j = 0; j < n; ++j)
+    for (i32 j = 0; j < n && !force; ++j)
         if (protected_inst(sub[j])) { /* the character is never destroyed with something else */
             plat_free(sub);
             return;
@@ -828,6 +839,10 @@ static void do_destroy(lua_State *L, i32 i)
     for (i32 j = 0; j < n; ++j) queue_dead(sub[j]);
     plat_free(sub);
 }
+
+static void do_destroy(lua_State *L, i32 i) { destroy_ex(L, i, false); }
+
+void destroy_from_server(lua_State *L, i32 inst) { destroy_ex(L, inst, true); }
 
 static int m_destroy(lua_State *L)
 {
@@ -1694,7 +1709,15 @@ static int inst_index(lua_State *L)
             if (s != -1) { push_inst(L, s); return 1; }
         }
         if (idx == VIRT_RUNSERVICE) {
-            if (streq(k, "IsServer") || streq(k, "IsClient") || streq(k, "IsRunning") || streq(k, "IsRunMode")) {
+            if (streq(k, "IsServer")) {
+                lua_pushcfunction(L, S.g->role != UB_ROLE_CLIENT ? m_true : m_false);
+                return 1;
+            }
+            if (streq(k, "IsClient")) {
+                lua_pushcfunction(L, S.g->role != UB_ROLE_SERVER ? m_true : m_false);
+                return 1;
+            }
+            if (streq(k, "IsRunning") || streq(k, "IsRunMode")) {
                 lua_pushcfunction(L, m_true);
                 return 1;
             }
@@ -2118,7 +2141,7 @@ typedef struct {
     f32 to_cached[TWEEN_PROPS][12];
 } stween;
 
-static stween g_tweens[MAX_TWEENS];
+static stween *g_tweens;   /* MAX_TWEENS, made with the runtime */
 
 static int value_kind(lua_State *L, int i, f32 *out)
 {
@@ -2249,7 +2272,7 @@ static int tween_create(lua_State *L)
     stweeninfo *info = check_tweeninfo(L, 3);
     luaL_checktype(L, 4, LUA_TTABLE);
     int id = -1;
-    for (int i = 0; i < MAX_TWEENS; ++i)
+    for (int i = 0; i < MAX_TWEENS && g_tweens; ++i)
         if (!g_tweens[i].used || g_tweens[i].state == 4 || g_tweens[i].state == 5 || g_tweens[i].state == 0) {
             if (!g_tweens[i].used || g_tweens[i].state != 0) {
                 id = i;
@@ -2289,7 +2312,7 @@ static int tween_getvalue(lua_State *L)
 
 void update_tweens(lua_State *L, f64 now)
 {
-    for (int id = 0; id < MAX_TWEENS; ++id) {
+    for (int id = 0; id < MAX_TWEENS && g_tweens; ++id) {
         stween *t = &g_tweens[id];
         if (!t->used || (t->state != 1 && t->state != 2)) continue;
         if (!ub_world_alive(W, t->inst)) {
@@ -2340,15 +2363,16 @@ void update_tweens(lua_State *L, f64 now)
 /* --------------------------------------------------------------- Debris */
 
 #define MAX_DEBRIS 4096
-static struct {
+typedef struct {
     i32 inst;
     f64 when;
-} g_debris[MAX_DEBRIS];
+} sdebris;
+static sdebris *g_debris;   /* MAX_DEBRIS, made with the runtime */
 static int g_debris_n;
 
 static void drop_c_refs(const u8 *marked, i32 n)
 {
-    for (int id = 0; id < MAX_TWEENS; ++id)
+    for (int id = 0; id < MAX_TWEENS && g_tweens; ++id)
         if (g_tweens[id].used && g_tweens[id].inst >= 0 && g_tweens[id].inst < n && marked[g_tweens[id].inst]) {
             g_tweens[id].inst = -1;
             g_tweens[id].state = 5;
@@ -2359,11 +2383,20 @@ static void drop_c_refs(const u8 *marked, i32 n)
     g_debris_n = keep;
 }
 
+static void free_tweens(void)
+{
+    plat_free(g_tweens);
+    g_tweens = NULL;
+    plat_free(g_debris);
+    g_debris = NULL;
+    g_debris_n = 0;
+}
+
 static int debris_add(lua_State *L)
 {
     i32 inst = check_inst(L, 2);
     f64 t = luaL_optnumber(L, 3, 10);
-    if (g_debris_n < MAX_DEBRIS) {
+    if (g_debris && g_debris_n < MAX_DEBRIS) {
         g_debris[g_debris_n].inst = inst;
         g_debris[g_debris_n].when = script_time() + t;
         g_debris_n++;
@@ -2404,9 +2437,10 @@ static const char k_waitforchild[] =
 
 void open_instances(lua_State *L)
 {
-    memset(g_tweens, 0, sizeof g_tweens);
-    g_debris_n = 0;
     free_instances();
+    g_tweens = (stween *)plat_alloc(sizeof(stween) * MAX_TWEENS);
+    if (g_tweens) memset(g_tweens, 0, sizeof(stween) * MAX_TWEENS);
+    g_debris = (sdebris *)plat_alloc(sizeof(sdebris) * MAX_DEBRIS);
     S.base_live = ub_world_live_count(W);
     luaL_newmetatable(L, "Instance");
     lua_pushcfunction(L, inst_index);
@@ -2477,4 +2511,15 @@ void open_instances(lua_State *L)
         lua_pop(L, 1);
     }
     lua_pop(L, 1);
+}
+
+/* this file's state, one copy per script runtime (ub_script.c) */
+void inst_vars(ub_svar_fn f)
+{
+    f(&g_dead, sizeof g_dead);
+    f(&g_dead_n, sizeof g_dead_n);
+    f(&g_dead_cap, sizeof g_dead_cap);
+    f(&g_tweens, sizeof g_tweens);
+    f(&g_debris, sizeof g_debris);
+    f(&g_debris_n, sizeof g_debris_n);
 }

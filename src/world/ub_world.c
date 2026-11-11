@@ -1377,3 +1377,32 @@ mat3 ub_rbx_from_orientation(vec3 o)
     m.z = v3(sy * cx, -sx, cy * cx);
     return m;
 }
+
+i32 *ub_world_subtree(const ub_world *w, i32 root, i32 *count)
+{
+    i32 cap = 64, n = 0, done = 0;
+    *count = 0;
+    if (root < 0 || root >= w->count) return NULL;
+    i32 *list = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap);
+    if (!list) return NULL;
+    list[n++] = root;
+    while (done < n) {
+        i32 i = list[done++];
+        for (i32 c = w->inst[i].first_child; c >= 0; c = w->inst[c].next_sibling) {
+            if (n == cap) {
+                i32 *nl = (i32 *)plat_alloc(sizeof(i32) * (size_t)cap * 2);
+                if (!nl) {
+                    plat_free(list);
+                    return NULL;
+                }
+                memcpy(nl, list, sizeof(i32) * (size_t)n);
+                plat_free(list);
+                list = nl;
+                cap *= 2;
+            }
+            list[n++] = c;
+        }
+    }
+    *count = n;
+    return list;
+}

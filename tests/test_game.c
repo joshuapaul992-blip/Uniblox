@@ -10,6 +10,7 @@
 #include "app/app_hud.h"
 #include "game/ub_demo_place.h"
 #include "game/ub_game.h"
+#include "game/ub_session.h"
 #include "gui/ub_gui.h"
 #include "physics/ub_hull.h"
 #include "world/ub_classes.h"
@@ -1207,6 +1208,347 @@ static void test_api2022(void)
     ub_game_stop(&g_g);
 }
 
+
+/* ============================================ networked (milestone 9D) */
+
+static ub_session *g_s;
+
+static ub_game *sclient(void) { return ub_session_client(g_s); }
+static ub_game *sserver(void) { return ub_session_server(g_s); }
+
+static void sframes(int n, vec3 move)
+{
+    for (int i = 0; i < n; ++i) ub_session_update(g_s, 1.0f / 60.0f, move, false);
+}
+
+/* runs until the client has joined; false if it does not within `secs` */
+static bool sjoin(f32 secs)
+{
+    for (int i = 0; i < (int)(secs * 60) && !sclient(); ++i) sframes(1, v3(0, 0, 0));
+    return sclient() != NULL;
+}
+
+/* a client frame with this mouse and key (as gui_frame) */
+static void sgui_frame(f32 x, f32 y, bool press, bool release, int key, f64 t)
+{
+    ub_game *g = sclient();
+    ub_frame fr;
+    memset(&fr, 0, sizeof fr);
+    fr.backend = UB_BACKEND_SOFTWARE;
+    fr.width = 800;
+    fr.height = 636;
+    static ub_input in;
+    memset(&in, 0, sizeof in);
+    in.has_focus = true;
+    in.mouse_x = (int)x;
+    in.mouse_y = (int)y;
+    in.mouse_down[0] = press;
+    in.mouse_pressed[0] = press;
+    in.mouse_released[0] = release;
+    if (key) in.key_pressed[key] = in.key_down[key] = in.key_repeat[key] = true;
+    play_gui_input(g, &fr, &in, NULL, false, t);
+    ub_session_update(g_s, 1.0f / 60.0f, v3(0, 0, 0), false);
+    ub_gui_render(g->gui, &g->world, NULL);
+}
+
+static bool said(ub_game *g, const char *text)
+{
+    const char *lines[UB_SCRIPT_OUTPUT_LINES];
+    bool err[UB_SCRIPT_OUTPUT_LINES];
+    ub_game_scripts(g);
+    int n = ub_script_output(lines, err, UB_SCRIPT_OUTPUT_LINES);
+    for (int i = 0; i < n; ++i)
+        if (!strcmp(lines[i], text)) return true;
+    return false;
+}
+
+static void print_side_output(ub_game *g, const char *side)
+{
+    const char *lines[UB_SCRIPT_OUTPUT_LINES];
+    bool err[UB_SCRIPT_OUTPUT_LINES];
+    ub_game_scripts(g);
+    int n = ub_script_output(lines, err, UB_SCRIPT_OUTPUT_LINES);
+    for (int i = 0; i < n; ++i) printf("    %s%s: %s\n", side, err[i] ? " (error)" : "", lines[i]);
+}
+
+static ub_script_stats side_stats(ub_game *g)
+{
+    ub_script_stats st;
+    ub_game_scripts(g);
+    ub_script_get_stats(&st);
+    return st;
+}
+
+static void test_session_door(void)
+{
+    ub_world w;
+    door_world(&w, k_door);
+    g_s = ub_session_new(&w, true, NULL);
+    CHECK(g_s != NULL);
+    if (!g_s) return;
+    CHECK(sjoin(1.0f));
+    ub_game *c = sclient(), *sv = sserver();
+    if (!c) {
+        ub_session_free(g_s);
+        return;
+    }
+    CHECK(c->role == UB_ROLE_CLIENT && sv->role == UB_ROLE_SERVER);
+    CHECK(side_stats(sv).scripts == 1 && side_stats(c).scripts == 0); /* the door's script runs on the server */
+    i32 door_c = ub_world_find_child(&c->world, ub_world_workspace(&c->world), "Door");
+    i32 door_s = ub_world_find_child(&sv->world, ub_world_workspace(&sv->world), "Door");
+    CHECK(door_c >= 0 && door_s >= 0);
+    f32 best = -1e9f, seen_c = 0, sbest = -1e9f;
+    for (int i = 0; i < 180 && door_c >= 0; ++i) {
+        sframes(1, v3(0, 0, 1));
+        best = UB_MAX(best, c->feet.z);
+        sbest = UB_MAX(sbest, sv->feet.z);
+        seen_c = UB_MAX(seen_c, (f32)c->world.parts[c->world.inst[door_c].part].transparency);
+    }
+    printf("  session door: the client walked to z = %.1f (the server has it at %.1f); the client saw the door at %d/255\n",
+           (double)best, (double)sbest, (int)seen_c);
+    CHECK(best > 12 && sbest > 12);
+    CHECK(seen_c > 140 && seen_c < 160);
+    CHECK(said(sv, "door opened by Player1"));
+    /* the server's character is where the client's is */
+    CHECK(v3_length(v3_sub(c->feet, sv->feet)) < 3.0f);
+    sframes(240, v3(0, 0, 0));
+    CHECK(c->world.parts[c->world.inst[door_c].part].transparency == 0);
+    CHECK(side_stats(sv).errors == 0);
+    ub_session_free(g_s);
+}
+
+static void test_session_remotes(void)
+{
+    ub_world w;
+    door_world(&w, NULL);
+    i32 rs = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ReplicatedStorage", "ReplicatedStorage");
+    i32 ping = ub_world_add(&w, rs, UB_CLASS_OTHER, "RemoteEvent", "Ping");
+    i32 ask = ub_world_add(&w, rs, UB_CLASS_OTHER, "RemoteFunction", "Ask");
+    ub_cdb_fill_defaults(&w, ping, "RemoteEvent");
+    ub_cdb_fill_defaults(&w, ask, "RemoteFunction");
+    i32 sss = ub_world_add(&w, -1, UB_CLASS_FOLDER, "ServerScriptService", "ServerScriptService");
+    add_script(&w, sss, "Server",
+               "local rs = game:GetService('ReplicatedStorage')\n"
+               "local run = game:GetService('RunService')\n"
+               "rs.Ping.OnServerEvent:Connect(function(plr, n, t)\n"
+               "  local f = Instance.new('Folder')\n"
+               "  f.Name = 'ping ' .. plr.Name .. ' ' .. n .. ' ' .. t.k .. ' ' .. tostring(t.v)\n"
+               "  f.Parent = workspace\n"
+               "  rs.Ping:FireClient(plr, 'pong', n + 1, workspace.Floor, f)\n"
+               "end)\n"
+               "rs.Ask.OnServerInvoke = function(plr, a, b) return a * b, 'ok' end\n"
+               "print('server', run:IsServer(), run:IsClient(), game.Players.LocalPlayer)\n"
+               "local secret = Instance.new('Folder', game:GetService('ServerStorage'))\n"
+               "secret.Name = 'Secret'\n");
+    i32 sp = ub_world_add(&w, -1, UB_CLASS_OTHER, "StarterPlayer", "StarterPlayer");
+    i32 sps = ub_world_add(&w, sp, UB_CLASS_FOLDER, "StarterPlayerScripts", "StarterPlayerScripts");
+    i32 ls = ub_world_add(&w, sps, UB_CLASS_OTHER, "LocalScript", "Client");
+    ub_world_set_source(&w, ls,
+                        "local rs = game:GetService('ReplicatedStorage')\n"
+                        "local run = game:GetService('RunService')\n"
+                        "rs.Ping.OnClientEvent:Connect(function(s, n, floor, f)\n"
+                        "  local m = Instance.new('Folder')\n"
+                        "  m.Name = 'client ' .. s .. ' ' .. n .. ' ' .. floor.Name .. ' ' .. f.Name\n"
+                        "  m.Parent = workspace\n"
+                        "end)\n"
+                        "rs.Ping:FireServer(41, { k = 'key', v = Vector3.new(1, 2, 3) })\n"
+                        "local a, b = rs.Ask:InvokeServer(6, 7)\n"
+                        "local g = Instance.new('Folder')\n"
+                        "g.Name = 'invoke ' .. a .. ' ' .. b\n"
+                        "g.Parent = workspace\n"
+                        "local p = Instance.new('Part')\n"
+                        "p.Name = 'ClientPart'\n"
+                        "p.Parent = workspace\n"
+                        "print('client', run:IsServer(), run:IsClient(), game.Players.LocalPlayer.Name)\n"
+                        "print('secret', game:GetService('ServerStorage'):FindFirstChild('Secret'))\n");
+    g_s = ub_session_new(&w, true, NULL);
+    CHECK(g_s && sjoin(1.0f));
+    if (!g_s || !sclient()) {
+        ub_session_free(g_s);
+        return;
+    }
+    sframes(60, v3(0, 0, 0));
+    ub_game *c = sclient(), *sv = sserver();
+    i32 wc = ub_world_workspace(&c->world), wsv = ub_world_workspace(&sv->world);
+    CHECK(ub_world_find_child(&sv->world, wsv, "ping Player1 41 key 1, 2, 3") >= 0);
+    CHECK(ub_world_find_child(&c->world, wc, "ping Player1 41 key 1, 2, 3") >= 0); /* (replicated) */
+    CHECK(ub_world_find_child(&c->world, wc, "client pong 42 Floor ping Player1 41 key 1, 2, 3") >= 0);
+    CHECK(ub_world_find_child(&c->world, wc, "invoke 42 ok") >= 0);
+    /* what a client makes stays on the client */
+    CHECK(ub_world_find_child(&c->world, wc, "ClientPart") >= 0);
+    CHECK(ub_world_find_child(&sv->world, wsv, "ClientPart") < 0);
+    CHECK(ub_world_find_child(&sv->world, wsv, "client pong 42 Floor ping Player1 41 key 1, 2, 3") < 0);
+    CHECK(said(sv, "server true false nil"));
+    CHECK(said(c, "client false true Player1"));
+    CHECK(said(c, "secret nil"));
+    CHECK(side_stats(sv).errors == 0 && side_stats(c).errors == 0);
+    if (side_stats(sv).errors || side_stats(c).errors) {
+        print_side_output(sv, "server");
+        print_side_output(c, "client");
+    }
+    ub_session_free(g_s);
+}
+
+static void test_session_death(void)
+{
+    ub_world w;
+    door_world(&w, NULL);
+    i32 ws = ub_world_workspace(&w);
+    i32 lava = add_box(&w, ws, "Lava", v3(0, 0.1f, 5), v3(8, 0.2f, 2), 0xFF4000);
+    add_script(&w, lava, "Kill",
+               "script.Parent.Touched:Connect(function(hit)\n"
+               "  local h = hit.Parent:FindFirstChild('Humanoid')\n"
+               "  if h then h.Health = 0 end\n"
+               "end)\n"
+               "local p = game:GetService('Players')\n"
+               "p.PlayerAdded:Connect(function(pl)\n"
+               "  pl.CharacterAdded:Connect(function(c) Instance.new('Folder', workspace).Name = 'respawned' end)\n"
+               "  pl.Chatted:Connect(function(m) if m == 'fast' then pl.Character.Humanoid.WalkSpeed = 32 end end)\n"
+               "end)\n"
+               "workspace.Player1.Humanoid.Died:Connect(function() Instance.new('Folder', workspace).Name = 'died' end)\n");
+    g_s = ub_session_new(&w, true, NULL);
+    CHECK(g_s && sjoin(1.0f));
+    if (!g_s || !sclient()) {
+        ub_session_free(g_s);
+        return;
+    }
+    ub_game *c = sclient(), *sv = sserver();
+    sframes(90, v3(0, 0, 1));
+    CHECK(sv->dead && c->dead);
+    CHECK(find_result(c, "died") >= 0);
+    sframes(240, v3(0, 0, 0));
+    CHECK(!sv->dead && !c->dead && c->health == 100);
+    CHECK(find_result(c, "respawned") >= 0);
+    printf("  session death: back at %.1f %.1f %.1f (the spawn is at %.1f %.1f %.1f)\n", (double)c->feet.x,
+           (double)c->feet.y, (double)c->feet.z, (double)sv->spawn.x, (double)sv->spawn.y, (double)sv->spawn.z);
+    CHECK(v3_length(v3_sub(c->feet, sv->spawn)) < 1.0f);
+    /* chat reaches the server's Chatted; the speed it sets reaches the client */
+    ub_game_player_chat(c, "fast");
+    sframes(10, v3(0, 0, 0));
+    CHECK(sv->walk_speed == 32 && c->walk_speed == 32);
+    CHECK(c->hud.chat_count == 1);
+    /* the menu's reset: the server kills the character */
+    ub_game_reset_character(c);
+    sframes(10, v3(0, 0, 0));
+    CHECK(sv->dead && c->dead);
+    CHECK(side_stats(sv).errors == 0 && side_stats(c).errors == 0);
+    ub_session_free(g_s);
+}
+
+static i32 count_children(const ub_world *w, i32 p)
+{
+    i32 n = 0;
+    for (i32 c = w->inst[p].first_child; c >= 0; c = w->inst[c].next_sibling) n++;
+    return n;
+}
+
+/* The demo place, networked: what the solo test checks, seen from the client. */
+static void test_session_demo(const ub_link_sim *sim, const char *what)
+{
+    ub_world w;
+    ub_demo_place(&w);
+    g_s = ub_session_new(&w, true, sim);
+    CHECK(g_s != NULL);
+    if (!g_s) return;
+    CHECK(sjoin(sim ? 30.0f : 1.0f));
+    ub_game *c = sclient(), *sv = sserver();
+    if (!c) {
+        ub_session_free(g_s);
+        return;
+    }
+    ub_session_stats ss;
+    ub_session_get_stats(g_s, &ss);
+    u64 join_bytes = ss.down_bytes;
+    i32 wsc = ub_world_workspace(&c->world);
+    i32 house = ub_world_find_child(&c->world, wsc, "House");
+    i32 door = house >= 0 ? ub_world_find_child(&c->world, house, "Door") : -1;
+    i32 spinner = house >= 0 ? ub_world_find_child(&c->world, house, "Spinner") : -1;
+    CHECK(door >= 0 && spinner >= 0);
+    if (door < 0 || spinner < 0) {
+        ub_session_free(g_s);
+        return;
+    }
+    sframes(30, v3(0, 0, 0));
+    ub_session_get_stats(g_s, &ss);
+    u64 b0 = ss.down_bytes, u0 = ss.up_bytes;
+    f32 z = -1e9f, seen = 0;
+    int walk_frames = sim ? 240 : 120;
+    for (int i = 0; i < walk_frames; ++i) {
+        sframes(1, v3(0, 0, 1));
+        z = UB_MAX(z, c->feet.z);
+        seen = UB_MAX(seen, (f32)c->world.parts[c->world.inst[door].part].transparency);
+    }
+    sframes(60 * 3, v3(0, 0, 0));
+    ub_session_get_stats(g_s, &ss);
+    f32 secs = (f32)(walk_frames + 180) / 60.0f;
+    f32 down = (f32)(ss.down_bytes - b0) / secs, up = (f32)(ss.up_bytes - u0) / secs;
+    printf("  session demo (%s): joined with %u KB; walked to z = %.1f, the door at %d/255; %.0f bytes/s down, %.0f up, "
+           "round trip %u ms\n",
+           what, (unsigned)(join_bytes / 1024), (double)z, (int)seen, (double)down, (double)up, ss.rtt_ms);
+    CHECK(z > 26 && seen > 100);
+    if (!sim) CHECK(down < 4096); /* the plan's budget: 2-4 KB/s per client */
+    const ub_part *sp = &c->world.parts[c->world.inst[spinner].part];
+    CHECK(fabsf(sp->rot.x.x - 1.0f) > 0.01f || fabsf(sp->rot.y.y - 1.0f) > 0.01f);
+    if (!sim) {
+        /* the button rains balls (the server's), and Debris clears them */
+        i32 n0 = count_children(&c->world, wsc);
+        ub_game_teleport(sv, v3(18, 0.4f, -2)); /* (the server moves it; a client's own jump would be refused) */
+        sframes(40, v3(0, 0, 0));
+        i32 n1 = count_children(&c->world, wsc);
+        CHECK(n1 == n0 + 6);
+        sframes(60 * 16, v3(0, 0, 0));
+        CHECK(count_children(&c->world, wsc) == n0);
+        /* the lava kills */
+        ub_game_teleport(sv, v3(-40, 1.3f, -25));
+        sframes(30, v3(0, 0, 0));
+        CHECK(c->dead && sv->dead);
+        sframes(60 * 4, v3(0, 0, 0));
+        CHECK(!c->dead);
+        /* the panel (a LocalScript told by a RemoteEvent) counted the door */
+        i32 hud = ub_world_find_child(&c->world, c->player_gui, "DemoHud");
+        i32 panel = hud >= 0 ? ub_world_find_child(&c->world, hud, "Panel") : -1;
+        i32 stats = panel >= 0 ? ub_world_find_child(&c->world, panel, "Stats") : -1;
+        const ub_value *sv_text = stats >= 0 ? ub_world_prop_named(&c->world, stats, "Text") : NULL;
+        CHECK(sv_text && !strcmp(sv_text->v.str.s, "Doors opened: 1"));
+        if (sv_text) printf("  session demo: the client's panel says \"%s\"\n", sv_text->v.str.s);
+        /* the lamp: E at its prompt (on the client) switches it on (on the server) */
+        i32 lamp = ub_world_find_child(&c->world, wsc, "Lamp");
+        i32 bulb = lamp >= 0 ? ub_world_find_child(&c->world, lamp, "Bulb") : -1;
+        CHECK(bulb >= 0);
+        sgui_frame(400, 400, false, false, 0, 30.0);
+        sgui_frame(400, 400, false, false, 'E', 31.0);
+        sframes(10, v3(0, 0, 0));
+        i32 lamp_s = ub_world_find_child(&sv->world, ub_world_workspace(&sv->world), "Lamp");
+        const ub_value *on = lamp_s >= 0 ? ub_world_prop_named(&sv->world, lamp_s, "@On") : NULL;
+        CHECK(on && on->type == UB_PV_BOOL && on->v.b);
+        CHECK(bulb >= 0 && (c->world.parts[c->world.inst[bulb].part].flags & UB_PART_GLOW));
+        /* chat commands, from the client */
+        ub_game_player_chat(c, "fast");
+        sframes(10, v3(0, 0, 0));
+        CHECK(c->walk_speed == 32);
+        ub_game_player_chat(c, "night");
+        sframes(10, v3(0, 0, 0));
+        CHECK(c->world.lighting.clock_time < 0.01f);
+    }
+    ub_script_stats a = side_stats(sv), b = side_stats(c);
+    CHECK(a.errors == 0 && b.errors == 0 && a.stopped == 0 && b.stopped == 0);
+    if (a.errors || b.errors) {
+        print_side_output(sv, "server");
+        print_side_output(c, "client");
+    }
+    ub_session_free(g_s);
+}
+
+static void test_session(void)
+{
+    test_session_door();
+    test_session_remotes();
+    test_session_death();
+    test_session_demo(NULL, "loopback");
+    ub_link_sim modem = { 100, 20, 10, 0, 5000, 7 }; /* a 56k modem: 100 ms each way, 1% lost, 5 KB/s */
+    test_session_demo(&modem, "simulated 56k");
+}
+
 void test_game(void)
 {
     test_door();
@@ -1223,4 +1565,5 @@ void test_game(void)
     test_demo_place();
     test_client_ui();
     test_camera();
+    test_session();
 }

@@ -110,7 +110,9 @@ static void start(lua_State *L, i32 inst, f64 from, int ev)
     pp.volume = vol < 0 ? 0 : vol;
     pp.pitch = (f32)(speed > 0 ? speed : 1);
     pp.loop = fnum(inst, "Looped", 0) != 0;
-    p->voice = s ? ub_mixer_play(s, pp) : 0;
+    bool server = S.g->role == UB_ROLE_SERVER;
+    p->voice = s && !server ? ub_mixer_play(s, pp) : 0; /* (a server's sounds play on the client) */
+    if (server && ev >= 0) net_sound(inst, NET_SOUND_PLAY, from);
     p->started = script_time();
     p->offset = from;
     p->playing = true;
@@ -128,6 +130,7 @@ static void halt(lua_State *L, i32 inst, bool pause, int ev)
     if (!p || !p->playing) return;
     if (p->voice) ub_mixer_stop(p->voice);
     p->voice = 0;
+    if (S.g->role == UB_ROLE_SERVER && ev >= 0) net_sound(inst, pause ? NET_SOUND_PAUSE : NET_SOUND_STOP, 0);
     p->offset = pause ? p->offset + (script_time() - p->started) : 0;
     p->playing = false;
     p->paused = pause;
@@ -250,4 +253,22 @@ void sound_reset(void)
     plat_free(g_files);
     g_files = NULL;
     g_nfiles = 0;
+}
+
+/* this file's state, one copy per script runtime (ub_script.c) */
+void sound_vars(ub_svar_fn f)
+{
+    f(&g_files, sizeof g_files);
+    f(&g_nfiles, sizeof g_nfiles);
+    f(g_play, sizeof g_play);
+    f(&g_nplay, sizeof g_nplay);
+    f(&g_first, sizeof g_first);
+}
+
+/* a client: the server played or stopped one */
+void sound_remote(lua_State *L, i32 inst, int action, f64 from)
+{
+    if (!is_sound(inst)) return;
+    if (action == NET_SOUND_PLAY) start(L, inst, from, EV_PLAYED);
+    else halt(L, inst, action == NET_SOUND_PAUSE, action == NET_SOUND_PAUSE ? EV_PAUSED : EV_STOPPED);
 }

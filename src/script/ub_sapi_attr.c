@@ -367,3 +367,9 @@ void tags_moved(lua_State *L, i32 root, bool was_in, bool now_in)
     }
     plat_free(sub);
 }
+
+/* this file's state, one copy per script runtime (ub_script.c) */
+void attr_vars(ub_svar_fn f)
+{
+    f(&g_tag_signals, sizeof g_tag_signals);
+}

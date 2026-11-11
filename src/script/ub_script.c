@@ -169,6 +169,8 @@ typedef struct {
 static sched *g_q;
 static int g_qn, g_qcap;
 static int g_depth;   /* nested resumes (a script spawning another thread) */
+static f32 g_frame_dt;
+static i32 g_touch_a, g_touch_b;
 
 f64 script_time(void) { return (f64)S.g->time; }
 
@@ -1299,6 +1301,9 @@ static bool runs_here(const ub_world *w, i32 i, i32 sss)
     bool local = strcmp(cls, "LocalScript") == 0, script = strcmp(cls, "Script") == 0;
     if (!local && !script) return false;
     const ub_game *g = S.g;
+    bool server_script = script && !(in->flags & UB_INST_CLIENT);
+    if (g->role == UB_ROLE_SERVER && !server_script) return false; /* each side runs its own */
+    if (g->role == UB_ROLE_CLIENT && server_script) return false;
     bool in_player = g->player >= 0 && ub_world_is_descendant(w, i, g->player);
     bool in_char = g->char_model >= 0 && ub_world_is_descendant(w, i, g->char_model);
     if (script && !(in->flags & UB_INST_CLIENT))
@@ -1350,8 +1355,100 @@ static void report(int r)
     collect_if_owed(S.L);
 }
 
+/* ------------------------------------------------------------ runtimes
+ *
+ * The script layer's variables (S and the files' own) are one copy per
+ * runtime: the active runtime's live in them, the others' in their blobs.
+ * A new runtime starts from the variables as they were before any script
+ * ran (never from another runtime's, whose pointers are its own). */
+
+#define MAX_SVARS 64
+static struct {
+    void *addr;
+    size_t size;
+} g_svars[MAX_SVARS];
+static int g_nsvars;
+static size_t g_svars_size;
+static u8 *g_pristine;
+static int g_nrt;
+struct ub_script_rt {
+    u8 *blob;
+};
+static ub_script_rt *g_rt;
+
+static void add_svar(void *addr, size_t size)
+{
+    if (g_nsvars == MAX_SVARS) {
+        ub_error("scripts: too many runtime variables");
+        return;
+    }
+    g_svars[g_nsvars].addr = addr;
+    g_svars[g_nsvars].size = size;
+    g_nsvars++;
+    g_svars_size += size;
+}
+
+static void script_vars(ub_svar_fn f)
+{
+    f(&S, sizeof S);
+    f(&g_out, sizeof g_out);
+    f(&g_q, sizeof g_q);
+    f(&g_qn, sizeof g_qn);
+    f(&g_qcap, sizeof g_qcap);
+    f(&g_depth, sizeof g_depth);
+    f(&g_frame_dt, sizeof g_frame_dt);
+    f(&g_touch_a, sizeof g_touch_a);
+    f(&g_touch_b, sizeof g_touch_b);
+}
+
+static void svars_copy(u8 *blob, bool save)
+{
+    for (int i = 0; i < g_nsvars; ++i) {
+        if (save) memcpy(blob, g_svars[i].addr, g_svars[i].size);
+        else memcpy(g_svars[i].addr, blob, g_svars[i].size);
+        blob += g_svars[i].size;
+    }
+}
+
+static bool svars_ready(void)
+{
+    if (g_pristine) return true;
+    g_nsvars = 0;
+    g_svars_size = 0;
+    script_vars(add_svar);
+    inst_vars(add_svar);
+    gui_vars(add_svar);
+    interact_vars(add_svar);
+    sound_vars(add_svar);
+    attr_vars(add_svar);
+    ubc_vars(add_svar);
+    g_pristine = (u8 *)plat_alloc(g_svars_size);
+    if (!g_pristine) return false;
+    svars_copy(g_pristine, true);
+    return true;
+}
+
+void ub_script_use(ub_script_rt *rt)
+{
+    if (rt == g_rt) return;
+    if (g_rt) svars_copy(g_rt->blob, true);
+    svars_copy(rt ? rt->blob : g_pristine, false);
+    g_rt = rt;
+}
+
+ub_script_rt *ub_script_current(void) { return g_rt; }
+
 bool ub_script_init(ub_game *g)
 {
+    g->srt = NULL;
+    if (!svars_ready()) return false;
+    ub_script_rt *rt = (ub_script_rt *)plat_alloc(sizeof *rt + g_svars_size);
+    if (!rt) return false;
+    rt->blob = (u8 *)(rt + 1);
+    ub_script_use(NULL); /* (the variables as they were at first) */
+    g_rt = rt;
+    g_nrt++;
+    g->srt = rt;
     memset(&S, 0, sizeof S);
     memset(&g_out, 0, sizeof g_out);
     g_qn = 0;
@@ -1360,7 +1457,10 @@ bool ub_script_init(ub_game *g)
     S.cur_script = -1;
     ubc_set_output(lua_stdout);
     lua_State *L = lua_newstate(l_alloc, NULL);
-    if (!L) return false;
+    if (!L) {
+        ub_script_shutdown();
+        return false;
+    }
     S.L = L;
     lua_atpanic(L, l_panic);
     static char *const regs[] = { &REG_INSTANCES, &REG_SIGNALS, &REG_WAITERS, &REG_PROPS, &REG_SCRIPTS,
@@ -1395,8 +1495,15 @@ void ub_script_shutdown(void)
     g_qn = g_qcap = 0;
     plat_free(S.touch_watch);
     plat_free(S.started);
-    ubc_set_output(NULL);
+    sound_reset();
+    if (S.g && S.g->srt == g_rt) S.g->srt = NULL;
     memset(&S, 0, sizeof S);
+    if (g_rt) { /* the runtime goes; no runtime is active after */
+        plat_free(g_rt);
+        g_rt = NULL;
+        svars_copy(g_pristine, false);
+        if (--g_nrt == 0) ubc_set_output(NULL);
+    }
 }
 
 static bool is_client(const ub_world *w, i32 i)
@@ -1475,7 +1582,6 @@ bool ub_script_run(const char *name, const char *source, i32 parent)
     return a.ok;
 }
 
-static f32 g_frame_dt;
 
 static int e_begin(lua_State *L)
 {
@@ -1515,7 +1621,6 @@ void ub_script_end_frame(f32 dt)
     report(lua_cpcall(S.L, e_end, NULL));
 }
 
-static i32 g_touch_a, g_touch_b;
 static int e_touched(lua_State *L)
 {
     if (signal_has_handlers(L, g_touch_a, EV_TOUCHED)) {
@@ -1549,7 +1654,7 @@ void ub_script_died(void) { report(lua_cpcall(S.L, e_died, NULL)); }
 
 static int e_respawned(lua_State *L)
 {
-    gui_respawned(L);
+    if (S.g->role != UB_ROLE_CLIENT) gui_respawned(L); /* (a client gets its new GUIs from the server) */
     push_inst(L, S.g->char_model);
     fire_signal(L, S.g->player, EV_CHARACTERADDED, NULL, 1);
     return 0;
@@ -1567,6 +1672,31 @@ static int e_chatted(lua_State *L)
 void ub_script_chatted(const char *message)
 {
     if (S.L) report(lua_cpcall(S.L, e_chatted, (void *)message));
+}
+
+void ub_script_message(const u8 *msg, u32 len)
+{
+    if (!S.L) return;
+    net_message(S.L, msg, len);
+    collect_if_owed(S.L);
+}
+
+void ub_script_replicated(void)
+{
+    if (!S.L) return;
+    net_replicated(S.L);
+    collect_if_owed(S.L);
+}
+
+static int e_destroy_remote(lua_State *L)
+{
+    destroy_from_server(L, *(const i32 *)lua_touserdata(L, 1));
+    return 0;
+}
+
+void ub_script_destroy_from_server(i32 inst)
+{
+    if (S.L) report(lua_cpcall(S.L, e_destroy_remote, &inst));
 }
 
 void ub_script_get_stats(ub_script_stats *out)

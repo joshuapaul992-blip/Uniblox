@@ -17,6 +17,7 @@
 #include "physics/ub_physics.h"
 #include "render/ub_render.h"
 #include "world/ub_world.h"
+#include "net/ub_repl.h"
 
 #define UB_GAME_MAX_STEPS 12          /* per frame: below 10 fps the game slows down */
 #define UB_GAME_RESPAWN_TIME 3.0f     /* seconds from dying to coming back */
@@ -119,12 +120,77 @@ typedef struct {
     f32 distance;               /* from the camera to its subject */
 } ub_cam_state;
 
+/* --- networked games (milestone 9D) ---
+ *
+ * A networked game is two games: the server's (the world as it is, its
+ * Scripts, the physics of everything but the player's character) and the
+ * client's (a copy of what the client may see, its LocalScripts, and the
+ * player's character, which the client moves and reports). Changes the
+ * client's scripts make stay on the client, except to its character.
+ * game/ub_session.h runs both over a connection; a solo game (the editor's,
+ * the tests' reference) is both in one. */
+enum { UB_ROLE_SOLO, UB_ROLE_SERVER, UB_ROLE_CLIENT };
+
+/* messages between the games (after replication's, see net/ub_repl.h) */
+enum {
+    UB_MSG_HELLO = UB_REPL_LAST + 1, /* server: who the player is (8 net ids) */
+    UB_MSG_STATE,     /* server: health, speeds, dead, spawn count */
+    UB_MSG_MOVE,      /* server: a teleport or a launch of the character */
+    UB_MSG_REPORT,    /* client (unreliable): where the character is and how it looks */
+    UB_MSG_CHAT,      /* client: the player said something */
+    UB_MSG_RESET,     /* client: reset the character */
+    UB_MSG_SCRIPT,    /* both: the scripts' (remotes, clicks, prompts, tools, sounds) */
+};
+#define UB_NET_NONE 0xFFFFFFFFu
+#define UB_REPORT_HZ 20
+
+/* How a networked game reaches the other side. */
+typedef struct {
+    void *ctx;
+    void (*send)(void *ctx, bool reliable, const u8 *msg, u32 len);
+    u32 (*to_net)(void *ctx, i32 inst);    /* UB_NET_NONE: the other side has no such instance */
+    i32 (*to_local)(void *ctx, u32 net);   /* -1: none */
+} ub_game_link;
+
+/* The client's last report of its character (server). */
+typedef struct {
+    bool have;
+    u16 move_seq;               /* the last of the server's moves it had applied */
+    vec3 feet, vel;
+    f32 facing, phase, amount, fallen;
+    f32 client_time, time;      /* its game time; the server's when it came */
+    u32 rejected;               /* reports that moved too far, too fast */
+} ub_report;
+
+/* A part the server moves, blended between its last two positions (client). */
+typedef struct {
+    i32 part;
+    vec3 p0, p1;
+    f32 q0[4], q1[4];
+    f32 t0, t1;                 /* server time of each */
+} ub_interp;
+
 typedef struct ub_game {
     ub_world world;
+    int role;                   /* UB_ROLE_* */
+    const ub_game_link *link;   /* networked: the other side */
+    ub_report report;           /* server: the client's character */
+    u16 move_seq;               /* server: moves sent; client: the last applied */
+    bool moved;                 /* server: the character was teleported (send it) */
+    vec3 launch;                /* server: a velocity a script gave it (send it) */
+    bool launched;
+    u32 state_sig;              /* server: the state last sent */
+    f32 report_timer;           /* client */
+    ub_interp *interp;          /* client: parts blending (by part, -1 none) */
+    i32 *interp_of;
+    i32 interp_count, interp_cap, interp_of_cap;
+    f32 clock_off;              /* client: server time minus ours (the least seen) */
+    bool clock_ok;
     ub_physics phys;
     bool phys_ok;
     ub_character chr;
     bool scripts;               /* the place's scripts are running */
+    struct ub_script_rt *srt;   /* their runtime (script/ub_script.h) */
 
     f32 accum;                  /* simulated time owed */
     f32 time;                   /* seconds since the game started (scripts' time()) */
@@ -189,6 +255,28 @@ typedef struct ub_game {
  * run_scripts: start the place's scripts. */
 bool ub_game_start(ub_game *g, ub_world *w, bool run_scripts);
 void ub_game_stop(ub_game *g);
+/* The server's game of a networked one: as ub_game_start, but the
+ * character follows the client's reports and only Scripts run. */
+bool ub_game_start_server(ub_game *g, ub_world *w, bool run_scripts, const ub_game_link *link);
+/* The client's: `w` is the copy replication made, ids the HELLO's
+ * (player, character, root, humanoid, PlayerGui, Backpack, PlayerScripts,
+ * Players: local instances). Only client scripts run. */
+#define UB_HELLO_IDS 8
+bool ub_game_start_client(ub_game *g, ub_world *w, const i32 ids[UB_HELLO_IDS], bool run_scripts,
+                          const ub_game_link *link);
+/* A message from the other side (UB_MSG_*). */
+void ub_game_message(ub_game *g, const u8 *msg, u32 len);
+/* The server's HELLO for its player. */
+u32 ub_game_hello(const ub_game *g, u8 *out, u32 cap);
+/* Client: a part's position came from the server (replication's hook). */
+void ub_game_part_from_server(ub_game *g, i32 inst, int what, u32 tick);
+/* Client: replication destroys an instance (and all in it). */
+void ub_game_destroy_from_server(ub_game *g, i32 inst);
+/* Client: after a batch of replication, what changed (the world's journal). */
+void ub_game_after_replication(ub_game *g);
+#define UB_REPL_TICK_DT 0.05f   /* the server sends 20 times a second */
+/* Selects the game's script runtime (before calling ub_script_* directly). */
+bool ub_game_scripts(const ub_game *g);
 
 /* One frame: scripts, then fixed physics steps for dt, then scripts again.
  * move: direction on the ground (length up to 1); jump: held. */
@@ -216,6 +304,10 @@ void ub_game_pick_spawn(ub_game *g);
 void ub_rig_build(ub_game *g);
 /* Puts the rig's parts and carried parts where they are this frame. */
 void ub_rig_pose(ub_game *g, f32 dt);
+/* Client: the rig the server built (its Motor6Ds, as replicated). */
+void ub_rig_adopt(ub_game *g);
+/* Keeps a rig joint's C0, C1 in its Motor6D's properties (after a change). */
+void ub_rig_joint_saved(ub_game *g, const ub_joint *j);
 /* A rig joint by its Motor6D instance, or NULL. */
 ub_joint *ub_rig_joint(ub_game *g, i32 motor);
 /* Is it one of the character's parts (its root, its rig, or carried by them)? */

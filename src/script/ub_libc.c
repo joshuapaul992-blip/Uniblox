@@ -1029,3 +1029,9 @@ int ubc_getc(FILE *f) { (void)f; return EOF; }
 int ubc_ungetc(int c, FILE *f) { (void)c; (void)f; return EOF; }
 int ubc_feof(FILE *f) { (void)f; return 1; }
 int ubc_ferror(FILE *f) { (void)f; return 0; }
+
+/* the C library's state, one copy per script runtime (math.random's seed) */
+void ubc_vars(void (*f)(void *addr, size_t size))
+{
+    f(&g_rand_seed, sizeof g_rand_seed);
+}

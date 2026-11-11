@@ -159,6 +159,7 @@ bool joint_set(lua_State *L, i32 i, const char *k, int v)
             mat3 *rr = c0 ? &j->c0r : c1 ? &j->c1r : &j->tr;
             *pp = c->p;
             *rr = c->r;
+            ub_rig_joint_saved(S.g, j);
         } else {
             set_extra_value(L, i, k, v);
         }

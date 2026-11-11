@@ -338,6 +338,7 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
 {
     memset(ph, 0, sizeof *ph);
     ph->world = w;
+    ph->remote = kinematic_count < 0;
     ph->gravity = v3(0, -w->gravity, 0);
     ph->up = w->gravity >= 0 ? v3(0, 1, 0) : v3(0, -1, 0);
     ph->fallen_height = w->fallen_height;
@@ -379,6 +380,8 @@ bool ub_phys_init(ub_physics *ph, ub_world *w, const i32 *kinematic_parts, int k
     }
     for (i32 i = 0; i < np; ++i)
         if (flags[i] && (w->parts[i].flags & UB_PART_ANCHORED)) flags[uf_find(group, i)] |= 2;
+    for (i32 i = 0; i < np && ph->remote; ++i)
+        if (flags[i] && !(flags[uf_find(group, i)] & 2)) flags[uf_find(group, i)] |= 4;
 
     /* body 0: everything anchored */
     ok = new_body(ph, UB_BODY_STATIC) == 0;
@@ -719,7 +722,7 @@ void ub_phys_sync_part(ub_physics *ph, i32 part, bool alive, bool sensor)
     alive = alive && !(p->flags & (UB_PART_REMOVED | UB_PART_CARRIED));
     bool collide = alive && (p->flags & UB_PART_CAN_COLLIDE);
     bool touch = alive && sensor && !collide;
-    bool anchored = (p->flags & UB_PART_ANCHORED) != 0;
+    bool anchored = (p->flags & UB_PART_ANCHORED) != 0 || ph->remote;
     u8 want = (u8)((collide ? UB_SHAPE_COLLIDES : 0) | (touch ? UB_SHAPE_SENSOR : 0));
     mat3 prot = quat_to_mat3(quat_from_mat3(&p->rot));
     i32 si = ph->part_shape[part];
