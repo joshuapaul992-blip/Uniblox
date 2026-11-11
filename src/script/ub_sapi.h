@@ -27,9 +27,21 @@ typedef struct {
     u8 *started;             /* per instance: script already started */
     i32 started_cap;
     ub_script_stats stats;
+    u32 next_invoke;         /* RemoteFunction calls made (networked) */
 } ub_sstate;
 
 extern ub_sstate S;
+
+/* The script layer's state is one copy per runtime (each side of a
+ * networked game has its own, see ub_script.h): each file lists its
+ * variables, and ub_script.c swaps them when another runtime is used. */
+typedef void (*ub_svar_fn)(void *addr, size_t size);
+void inst_vars(ub_svar_fn f);
+void gui_vars(ub_svar_fn f);
+void interact_vars(ub_svar_fn f);
+void sound_vars(ub_svar_fn f);
+void attr_vars(ub_svar_fn f);
+void ubc_vars(void (*f)(void *addr, size_t size));
 
 /* registry keys (light userdata addresses) */
 extern char REG_INSTANCES, REG_SIGNALS, REG_WAITERS, REG_PROPS, REG_SCRIPTS, REG_THREAD_SCRIPT, REG_MODULES,
@@ -279,5 +291,22 @@ bool teams_set(lua_State *L, i32 idx, const char *k, int v);
 
 /* Errors as Roblox words them. */
 int sapi_error(lua_State *L, const char *fmt, ...);
+
+/* --- a networked game (ub_sapi_net.c) */
+bool sapi_networked(void);                                   /* a server's or a client's runtime */
+bool get_enum(lua_State *L, int i, int *type, int *value);  /* an EnumItem's (ub_sapi_types.c) */
+void net_fire_remote(lua_State *L, i32 remote, int first, int n);
+void net_open(lua_State *L, int table);                      /* netinvoke, netreply, networked */
+void net_player_event(i32 inst, int ev);                     /* client: a click or prompt event */
+enum { NET_TOOL_EQUIP = 1, NET_TOOL_UNEQUIP, NET_TOOL_ACTIVATE, NET_TOOL_DEACTIVATE };
+void net_tool(int action, i32 tool);                         /* client: to the server */
+enum { NET_SOUND_PLAY = 1, NET_SOUND_STOP, NET_SOUND_PAUSE };
+void net_sound(i32 inst, int action, f64 from);              /* server: to the client */
+void net_message(lua_State *L, const u8 *msg, u32 len);
+void net_replicated(lua_State *L);
+void interact_remote_event(lua_State *L, i32 inst, int ev);  /* server: the client's click or prompt */
+void interact_remote_tool(lua_State *L, int action, i32 tool);
+void sound_remote(lua_State *L, i32 inst, int action, f64 from);
+void destroy_from_server(lua_State *L, i32 inst);            /* client (ub_sapi_inst.c) */
 
 #endif

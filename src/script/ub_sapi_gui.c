@@ -1401,6 +1401,11 @@ static int m_fireserver(lua_State *L)
 {
     i32 idx = check_inst(L, 1);
     int n = lua_gettop(L) - 1;
+    if (sapi_networked()) {
+        if (S.g->role != UB_ROLE_CLIENT) return luaL_error(L, "FireServer can only be called from the client");
+        net_fire_remote(L, idx, 2, n);
+        return 0;
+    }
     push_inst(L, S.g->player);
     lua_insert(L, 2);
     fire_signal(L, idx, EV_SERVEREVENT, NULL, n + 1);
@@ -1411,6 +1416,11 @@ static int m_fireclient(lua_State *L)
 {
     i32 idx = check_inst(L, 1);
     check_inst(L, 2); /* the player: there is one */
+    if (sapi_networked()) {
+        if (S.g->role != UB_ROLE_SERVER) return luaL_error(L, "FireClient can only be called from the server");
+        net_fire_remote(L, idx, 3, lua_gettop(L) - 2);
+        return 0;
+    }
     lua_remove(L, 2);
     fire_signal(L, idx, EV_CLIENTEVENT, NULL, lua_gettop(L) - 1);
     return 0;
@@ -1419,6 +1429,11 @@ static int m_fireclient(lua_State *L)
 static int m_fireall(lua_State *L)
 {
     i32 idx = check_inst(L, 1);
+    if (sapi_networked()) {
+        if (S.g->role != UB_ROLE_SERVER) return luaL_error(L, "FireAllClients can only be called from the server");
+        net_fire_remote(L, idx, 2, lua_gettop(L) - 1);
+        return 0;
+    }
     fire_signal(L, idx, EV_CLIENTEVENT, NULL, lua_gettop(L) - 1);
     return 0;
 }
@@ -2135,6 +2150,7 @@ bool gui_virtual_newindex(lua_State *L, i32 idx, const char *k, int v)
 /* --------------------------------------------------------------- pump */
 
 static int g_last_sw, g_last_sh;
+static f64 g_pump_last = -1;
 static f32 g_last_mx = -1, g_last_my = -1;
 
 void gui_pump(lua_State *L)
@@ -2269,10 +2285,9 @@ void gui_pump(lua_State *L)
         fire_signal(L, VIRT_MOUSE, in->wheel > 0 ? EV_WHEELFORWARD : EV_WHEELBACKWARD, NULL, 0);
     }
     /* click detectors, proximity prompts, the humanoid's state */
-    static f64 last = -1;
     f64 now = script_time();
-    interact_pump(L, last < 0 || now < last ? 0 : (f32)(now - last));
-    last = now;
+    interact_pump(L, g_pump_last < 0 || now < g_pump_last ? 0 : (f32)(now - g_pump_last));
+    g_pump_last = now;
 }
 
 /* ------------------------------------------------------------- respawn */
@@ -2310,15 +2325,34 @@ void gui_respawned(lua_State *L)
 /* ---------------------------------------------------------------- setup */
 
 static const char k_gui_lua[] =
-    "local base, getcb = ...\n"
+    "local base, getcb, net = ...\n"
     "local M = {}\n"
     "local function call(obj, name, ...)\n"
     "  local f = getcb(obj, name)\n"
     "  while f == nil do base.task.wait() f = getcb(obj, name) end\n"
     "  return f(...)\n"
     "end\n"
-    "function M.InvokeServer(self, ...) return call(self, 'OnServerInvoke', base.game.Players.LocalPlayer, ...) end\n"
-    "function M.InvokeClient(self, plr, ...) return call(self, 'OnClientInvoke', ...) end\n"
+    "local function finish(ok, ...)\n"
+    "  if not ok then error(..., 0) end\n"
+    "  return ...\n"
+    "end\n"
+    "function M.InvokeServer(self, ...)\n"
+    "  if net.networked() then\n"
+    "    if base.game:GetService('RunService'):IsServer() then error('InvokeServer can only be called from the client', 2) end\n"
+    "    return finish(net.netinvoke(self, ...))\n"
+    "  end\n"
+    "  return call(self, 'OnServerInvoke', base.game.Players.LocalPlayer, ...)\n"
+    "end\n"
+    "function M.InvokeClient(self, plr, ...)\n"
+    "  if net.networked() then\n"
+    "    if base.game:GetService('RunService'):IsClient() then error('InvokeClient can only be called from the server', 2) end\n"
+    "    return finish(net.netinvoke(self, ...))\n"
+    "  end\n"
+    "  return call(self, 'OnClientInvoke', ...)\n"
+    "end\n"
+    "function M.serve(id, self, name, ...)\n"
+    "  net.netreply(id, pcall(call, self, name, ...))\n"
+    "end\n"
     "function M.Invoke(self, ...) return call(self, 'OnInvoke', ...) end\n"
     "local running = setmetatable({}, { __mode = 'k' })\n"
     "local function tween(self, goals, dir, style, time, override, cb)\n"
@@ -2465,11 +2499,24 @@ void open_gui(lua_State *L)
     if (luaL_loadbuffer(L, k_gui_lua, sizeof k_gui_lua - 1, "=gui") == 0) {
         lua_pushvalue(L, base);
         lua_pushcfunction(L, l_getcb);
-        lua_call(L, 2, 1);
+        lua_newtable(L);
+        net_open(L, lua_gettop(L));
+        lua_call(L, 3, 1);
         lua_setfield(L, LUA_REGISTRYINDEX, "ub.GuiLua");
     } else {
         ub_error("scripts: gui helpers: %s", lua_tostring(L, -1));
         lua_pop(L, 1);
     }
     lua_pop(L, 1);
+}
+
+/* this file's state, one copy per script runtime (ub_script.c) */
+void gui_vars(ub_svar_fn f)
+{
+    f(&V, sizeof V);
+    f(&g_last_sw, sizeof g_last_sw);
+    f(&g_last_sh, sizeof g_last_sh);
+    f(&g_last_mx, sizeof g_last_mx);
+    f(&g_last_my, sizeof g_last_my);
+    f(&g_pump_last, sizeof g_pump_last);
 }

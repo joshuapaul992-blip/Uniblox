@@ -49,6 +49,7 @@ struct ub_conn {
     u16 remote_seq;
     u32 recv_bits;         /* bit i: remote_seq - 1 - i arrived */
     bool any_received, need_ack;
+    u64 ack_owed_since;    /* when data first arrived unacknowledged */
     u32 recv_off;          /* the next stream byte expected */
     u8 *in;                /* stream bytes arrived in order, not yet read as messages */
     u32 in_len, in_cap, in_read;
@@ -225,6 +226,8 @@ static bool add_segment(ub_conn *c, packet *p, seg *s, u64 now)
     return true;
 }
 
+#define ACK_DELAY_US 25000u
+
 void ub_conn_flush(ub_conn *c, u64 now_us, void (*out)(void *ctx, const u8 *pkt, u32 len), void *ctx)
 {
     /* the bandwidth budget */
@@ -291,7 +294,8 @@ void ub_conn_flush(ub_conn *c, u64 now_us, void (*out)(void *ctx, const u8 *pkt,
             ur += r.pos + n;
             added = true;
         }
-        if (added || c->need_ack) {
+        /* an acknowledgement alone waits a little for data to ride with */
+        if (added || (c->need_ack && now_us - c->ack_owed_since >= ACK_DELAY_US)) {
             end_packet(c, &p, out, ctx);
             open = false;
         }
@@ -413,7 +417,10 @@ void ub_conn_receive(ub_conn *c, const void *pkt, u32 len, u64 now_us)
             break; /* not ours */
         }
     }
-    if (data) c->need_ack = true;
+    if (data && !c->need_ack) {
+        c->need_ack = true;
+        c->ack_owed_since = now_us;
+    }
 }
 
 bool ub_conn_next(ub_conn *c, const u8 **msg, u32 *len, bool *reliable)

@@ -1025,6 +1025,15 @@ void push_enum(lua_State *L, int type, int value)
     lua_remove(L, -2);
 }
 
+bool get_enum(lua_State *L, int i, int *type, int *value)
+{
+    senum *e = (senum *)test_udata(L, i, "EnumItem");
+    if (!e) return false;
+    *type = e->type;
+    *value = e->value;
+    return true;
+}
+
 bool is_enum_of(lua_State *L, int i, int type)
 {
     senum *e = (senum *)test_udata(L, i, "EnumItem");

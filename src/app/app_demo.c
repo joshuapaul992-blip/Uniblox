@@ -30,6 +30,7 @@
 #include "core/ub_vec.h"
 #include "game/ub_demo_place.h"
 #include "game/ub_game.h"
+#include "game/ub_session.h"
 #include "render/ub_render.h"
 #include "script/ub_script.h"
 #include "ui/ub_ui.h"
@@ -49,7 +50,11 @@
 
 static ub_system_info g_sys;
 static ub_world g_world;              /* a place being built or loaded; then the game takes it */
-static ub_game g_game;                /* the running place */
+static ub_session *g_sess;            /* the running place: its server and this client, over loopback */
+static ub_game g_wait;                /* an empty game, shown until the client has joined */
+static bool g_wait_on;
+static ub_game *g_cur = &g_wait;      /* what the player sees: the client's game (or g_wait) */
+#define g_game (*g_cur)
 static bool g_game_on;
 #define GW (&g_game.world)
 static ub_settings g_set;             /* everything in uniblox.cfg (the menu changes it) */
@@ -109,23 +114,79 @@ static void build_demo_world(void)
 }
 
 
-/* After building or loading g_world: run it (the game takes it over). */
-static void world_changed(void)
+/* The link the menu's "Simulated network" asks for (NULL: perfect). */
+static const ub_link_sim *net_sim(void)
+{
+    static const ub_link_sim k[UB_NET_SIM_COUNT] = {
+        { 0, 0, 0, 0, 0, 1 },
+        { 20, 4, 0, 0, 0, 1 },            /* broadband: 40 ms round trip */
+        { 100, 20, 10, 0, 5000, 1 },      /* a 56k modem: 200 ms round trip, 1% lost, 5 KB/s */
+    };
+    return g_set.net_sim > 0 && g_set.net_sim < UB_NET_SIM_COUNT ? &k[g_set.net_sim] : NULL;
+}
+
+static void stop_game(void)
 {
     ub_render_set_static(NULL, 0);
-    if (g_game_on) ub_game_stop(&g_game);
-    g_game_on = ub_game_start(&g_game, &g_world, g_run_scripts);
+    ub_session_free(g_sess);
+    g_sess = NULL;
+    if (g_wait_on) ub_game_stop(&g_wait);
+    g_wait_on = false;
+    g_cur = &g_wait;
+    g_game_on = false;
+}
+
+/* The client has joined: the player sees its game from now on. */
+static void client_joined(ub_game *c)
+{
+    g_cur = c;
+    ub_render_set_static(NULL, 0);
+    play_view_reset(&g_view, c);
+    hud_begin_game(c);
+    g_bench_center = g_demo_world ? v3(0, 3, 40) : v3_add(c->spawn, v3(0, 3, 0));
+    if (g_wait_on) ub_game_stop(&g_wait);
+    g_wait_on = false;
+}
+
+/* The session's frame: the client's game with the player's input, the server's ticks. */
+static void net_update(f32 dt, vec3 move, bool jump)
+{
+    if (!g_sess) {
+        ub_game_update(&g_game, dt, move, jump);
+        return;
+    }
+    bool was = ub_session_client(g_sess) != NULL;
+    ub_session_update(g_sess, dt, move, jump);
+    ub_game *c = ub_session_client(g_sess);
+    if (c && !was) client_joined(c);
+}
+
+/* After building or loading g_world: run it (a server takes it over; this client joins). */
+static void world_changed(void)
+{
+    stop_game();
+    ub_world empty;
+    ub_world_init(&empty);
+    g_wait_on = ub_game_start(&g_wait, &empty, false);
+    g_cur = &g_wait;
+    g_sess = ub_session_new(&g_world, g_run_scripts, net_sim());
+    g_game_on = g_sess != NULL;
+    if (!g_sess) ub_error("could not start the place's server (out of memory)");
     play_view_reset(&g_view, &g_game);
-    hud_begin_game(g_game_on ? &g_game : NULL);
+    hud_begin_game(&g_game);
+    /* a perfect link joins at once: the client's first copy comes with the server's first ticks */
+    for (int i = 0; i < 30 && g_sess && !net_sim() && !ub_session_client(g_sess); ++i) net_update(1.0f / 60.0f, v3(0, 0, 0), false);
     g_bench_center = g_demo_world ? v3(0, 3, 40) : v3_add(g_game.spawn, v3(0, 3, 0));
     char title[128];
     ub_fmt(title, sizeof title, "Uniblox - %s", GW->name);
     plat_set_title(title);
     ub_script_stats st;
+    ub_game *srv = ub_session_server(g_sess);
+    if (srv) ub_game_scripts(srv);
     ub_script_get_stats(&st);
     ub_info("world: \"%s\", %d instances, %d parts drawn (%d live), spawn at %d,%d,%d; %u script(s) running%s",
             GW->name, GW->count, g_view.static_count, g_game.live_count, ub_roundf(g_game.spawn.x),
-            ub_roundf(g_game.spawn.y), ub_roundf(g_game.spawn.z), g_game.scripts ? st.scripts : 0u,
+            ub_roundf(g_game.spawn.y), ub_roundf(g_game.spawn.z), srv && srv->scripts ? st.scripts : 0u,
             g_run_scripts ? "" : " (scripts are off: scripts=0 in uniblox.cfg)");
 }
 
@@ -227,7 +288,9 @@ static void save_place(void)
     ub_fmt(path, sizeof path, "places/%s.ubx", name);
     u8 *data;
     u32 size;
-    if (!plat_make_dir("places") || !ub_ubx_save(GW, &data, &size)) {
+    /* the server's world: the place as it really is (the client's is a copy of part of it) */
+    ub_world *sw = g_sess ? &ub_session_server(g_sess)->world : GW;
+    if (!plat_make_dir("places") || !ub_ubx_save(sw, &data, &size)) {
         ub_fmt(g_status, sizeof g_status, "Could not save %s", path);
         return;
     }
@@ -441,8 +504,7 @@ void app_shutdown(void)
     ub_render_set_static(NULL, 0);
     play_view_free(&g_view);
     u32 jumps = g_game.jumps;
-    if (g_game_on) ub_game_stop(&g_game);
-    g_game_on = false;
+    stop_game();
     ub_world_free(&g_world);
     ub_render_shutdown();
     ub_info("demo: %u jumps, %u clicks", jumps, g_clicks);
@@ -518,6 +580,10 @@ static void apply_menu(int f, ub_frame *frame)
     if (f & SET_PRESENT) plat_set_present_changed_only(g_set.changed_only);
     if (f & SET_SOUND) apply_volume();
     if (f & SET_CONTROLS) apply_controls();
+    if ((f & SET_NET) && g_sess) {
+        ub_session_set_sim(g_sess, net_sim());
+        ub_info("network: %s", settings_net_sim_name(g_set.net_sim));
+    }
     if (f & SET_RESTART_NEEDED) ub_fmt(g_status, sizeof g_status, "Some changes take effect when Uniblox starts again");
     if (f & 0xFFFF) save_config(); /* changes are kept at once */
     if (f & MENU_RESUME) {
@@ -744,8 +810,9 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     bool jump;
     play_view_input(&g_view, &g_game, &pin, dt, play_keys, !g_bench && !g_menu_open && !hud_menu_open(), &move, &jump);
 
-    /* --- the game: scripts, physics in fixed steps, the character --- */
-    ub_game_update(&g_game, dt, move, jump);
+    /* --- the game: the client's (scripts, physics in fixed steps, the
+     * character) and the server's ticks --- */
+    net_update(dt, move, jump);
     if (g_game.jumped) {
         g_game.jumped = false;
         ub_mixer_play(&g_snd_jump, ub_play_default());
@@ -824,8 +891,20 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
     g_fps_log_us += real_dt_us;
     if (g_fps_log_us >= 5000000) { /* a periodic line helps when reading logs from testers */
         g_fps_log_us = 0;
-        ub_debug("fps %u.%u at %dx%d, cap %u, slept %u us last frame", g_fps_x10 / 10, g_fps_x10 % 10,
-                 frame->width, frame->height, frame->fps_cap, frame->sleep_us);
+        ub_game *srv = ub_session_server(g_sess);
+        u32 game_us = g_game.phys_us + g_game.script_us + (srv ? srv->phys_us + srv->script_us : 0u);
+        ub_debug("fps %u.%u at %dx%d, cap %u, slept %u us last frame; render %u.%u ms (quality %s), present %u.%u ms, "
+                 "game %u.%u ms", g_fps_x10 / 10, g_fps_x10 % 10, frame->width, frame->height, frame->fps_cap,
+                 frame->sleep_us, g_stats.render_us / 1000u, g_stats.render_us / 100u % 10u,
+                 ub_render_quality_name((ub_quality)g_quality), frame->present_us / 1000u, frame->present_us / 100u % 10u,
+                 game_us / 1000u, game_us / 100u % 10u);
+    }
+    if (g_sess && !ub_session_client(g_sess) && !g_menu_open) { /* (a slow link: the first copy takes a while) */
+        ub_session_stats ns;
+        ub_session_get_stats(g_sess, &ns);
+        char jl[96];
+        ub_fmt(jl, sizeof jl, "Joining the place... %u KB", (u32)(ns.down_bytes / 1024u));
+        ub_render_text(frame->width / 2 - ub_render_text_width(jl) / 2, frame->height / 2, jl, 0xFFFFFF);
     }
     if ((!g_hide_overlay || g_bench) && !g_menu_open) {
         int lh = ub_render_line_height(), x = lh / 2, y = g_game_on && !g_bench ? hud_below_chat() : lh / 3;
@@ -858,19 +937,48 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
                     LINE("GUI: %u layer(s), %u objects; layout %u.%u ms, drawing %u.%u ms", gs.layers, gs.objects,
                          gs.layout_us / 1000u, gs.layout_us / 100u % 10u, gs.drawn_us / 1000u, gs.drawn_us / 100u % 10u);
             }
-            if (g_game.scripts) {
-                ub_script_stats st;
-                ub_script_get_stats(&st);
-                u32 s10 = g_game.script_us / 100u;
-                LINE("Scripts: %u running, %u waiting, %u KB, %u.%u ms%s", st.scripts, st.threads, st.memory_kb,
-                     s10 / 10, s10 % 10, st.errors ? "  - errors below" : "");
-                const char *out[UB_SCRIPT_OUTPUT_LINES];
-                bool err[UB_SCRIPT_OUTPUT_LINES];
-                int n = ub_script_output(out, err, 4);
-                for (int i = 0; i < n; ++i) {
-                    ub_fmt(line, sizeof line, "  %s", out[i]);
-                    ub_render_text(x, y, line, err[i] ? 0xFF9080 : 0xC8F0C8);
-                    y += lh;
+            if (g_sess) {
+                ub_session_stats ns;
+                ub_session_get_stats(g_sess, &ns);
+                if (ns.joined)
+                    LINE("Network (%s): %u.%u KB/s down, %u.%u up, round trip %u ms, %u/%u packets lost%s",
+                         settings_net_sim_name(g_set.net_sim), ns.down_bps / 1000u, ns.down_bps / 100u % 10u,
+                         ns.up_bps / 1000u, ns.up_bps / 100u % 10u, ns.rtt_ms, ns.lost, ns.sent,
+                         ns.reports_rejected ? "  (moves refused)" : "");
+                else
+                    LINE("Joining the server (%s): %u KB so far", settings_net_sim_name(g_set.net_sim),
+                         (u32)(ns.down_bytes / 1024u));
+            }
+            ub_game *srv = ub_session_server(g_sess);
+            if (g_game.scripts || (srv && srv->scripts)) {
+                ub_script_stats st, cst;
+                memset(&st, 0, sizeof st);
+                memset(&cst, 0, sizeof cst);
+                if (srv && srv->scripts) {
+                    ub_game_scripts(srv);
+                    ub_script_get_stats(&st);
+                }
+                if (g_game.scripts) {
+                    ub_game_scripts(&g_game);
+                    ub_script_get_stats(&cst);
+                }
+                u32 s10 = (g_game.script_us + (srv ? srv->script_us : 0u)) / 100u;
+                LINE("Scripts: %u on the server, %u here; %u waiting, %u KB, %u.%u ms%s", st.scripts, cst.scripts,
+                     st.threads + cst.threads, st.memory_kb + cst.memory_kb, s10 / 10, s10 % 10,
+                     st.errors + cst.errors ? "  - errors below" : "");
+                /* the last lines each side printed (the server's first) */
+                for (int side = 0; side < 2; ++side) {
+                    ub_game *sg = side ? &g_game : srv;
+                    if (!sg || !sg->scripts) continue;
+                    ub_game_scripts(sg);
+                    const char *out[UB_SCRIPT_OUTPUT_LINES];
+                    bool err[UB_SCRIPT_OUTPUT_LINES];
+                    int n = ub_script_output(out, err, 2);
+                    for (int i = 0; i < n; ++i) {
+                        ub_fmt(line, sizeof line, "  %s%s", side ? "" : "[server] ", out[i]);
+                        ub_render_text(x, y, line, err[i] ? 0xFF9080 : 0xC8F0C8);
+                        y += lh;
+                    }
                 }
                 ub_fmt(line, sizeof line, "Health %d", ub_roundf(g_game.health));
                 if (g_game.dead) ub_fmt(line, sizeof line, "You died - back in %d s", (int)g_game.respawn_timer + 1);

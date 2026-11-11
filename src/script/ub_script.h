@@ -35,7 +35,17 @@ typedef struct {
     u32 skipped_client;   /* LocalScripts and client scripts (not run yet) */
 } ub_script_stats;
 
+/* Script runtimes: each game has its own (the server's and the client's
+ * of a networked game), made by ub_script_init and kept in g->srt. The
+ * functions here work on the runtime in use; ub_script_use changes it
+ * (ub_game does that before calling in). */
+typedef struct ub_script_rt ub_script_rt;
+void ub_script_use(ub_script_rt *rt);
+ub_script_rt *ub_script_current(void);
+
+/* Makes the game's runtime (and uses it). */
 bool ub_script_init(struct ub_game *g);
+/* Ends the runtime in use. */
 void ub_script_shutdown(void);
 /* Runs the place's scripts (Scripts in the Workspace and
  * ServerScriptService), then the player joins (PlayerAdded,
@@ -54,6 +64,12 @@ void ub_script_end_frame(f32 dt);
 void ub_script_touched(i32 inst_a, i32 inst_b);
 void ub_script_died(void);
 void ub_script_respawned(void);
+/* Networked (milestone 9D): a UB_MSG_SCRIPT message from the other side;
+ * on a client, after replication changed the world (its journal: scripts
+ * start, joints join, signals fire); replication destroying an instance. */
+void ub_script_message(const u8 *msg, u32 len);
+void ub_script_replicated(void);
+void ub_script_destroy_from_server(i32 inst);
 void ub_script_chatted(const char *message);   /* the player said something */
 /* Does some script listen to this part's Touched? (Then it reports
  * touches even when not solid.) */

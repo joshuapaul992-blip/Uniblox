@@ -29,6 +29,8 @@ void ub_w_vari(ub_wbuf *b, i32 v);
 void ub_w_str(ub_wbuf *b, const char *s, u32 n);   /* length, then the bytes */
 void ub_w_vec3(ub_wbuf *b, vec3 v);
 void ub_w_rot(ub_wbuf *b, const mat3 *m);         /* 6 bytes, within 1e-4 per element */
+void ub_w_rot32(ub_wbuf *b, const mat3 *m);       /* 4 bytes, within about 0.0015 */
+void ub_w_pos64(ub_wbuf *b, vec3 p);              /* to 1/64 stud, 3 bytes an axis within 2048 studs */
 
 typedef struct {
     const u8 *p;
@@ -51,6 +53,8 @@ i32 ub_r_vari(ub_rbuf *r);
 const char *ub_r_str(ub_rbuf *r, u32 *n);
 vec3 ub_r_vec3(ub_rbuf *r);
 mat3 ub_r_rot(ub_rbuf *r);
+mat3 ub_r_rot32(ub_rbuf *r);
+vec3 ub_r_pos64(ub_rbuf *r);
 
 /* the conversions behind ub_w_rot / ub_r_rot (columns = the rotated axes) */
 void ub_mat3_to_quat(const mat3 *m, f32 q[4]);

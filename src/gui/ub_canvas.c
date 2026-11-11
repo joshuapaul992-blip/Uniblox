@@ -225,7 +225,7 @@ static u32 sample(const ub_image_px *img, f32 sx, f32 sy, bool nearest)
     y0 = UB_CLAMP(y0, 0, img->h - 1);
     u32 p00 = img->px[(size_t)y0 * img->w + x0], p10 = img->px[(size_t)y0 * img->w + x1];
     u32 p01 = img->px[(size_t)y1 * img->w + x0], p11 = img->px[(size_t)y1 * img->w + x1];
-    u32 wx = (u32)(fx * 256), wy = (u32)(fy * 256), out = 0;
+    u32 wx = (u32)ub_floorf(fx * 256), wy = (u32)ub_floorf(fy * 256), out = 0; /* (no truncating casts: see ub_rint) */
     for (int s = 0; s < 32; s += 8) {
         u32 a = (p00 >> s) & 255, b = (p10 >> s) & 255, c = (p01 >> s) & 255, d = (p11 >> s) & 255;
         u32 top = a * (256 - wx) + b * wx, bot = c * (256 - wx) + d * wx;
@@ -282,7 +282,7 @@ static void walk(ub_canvas *c, const ub_xform *t, const job *j)
                 f32 cxv = UB_MIN((f32)(x + 1), bx1) - UB_MAX((f32)x, bx0);
                 if (cxv <= 0) continue;
                 f32 cov = cxv * (cyv > 1 ? 1 : cyv) * alpha;
-                u32 a = (u32)(cov * 255.0f + 0.5f);
+                u32 a = (u32)ub_floorf(cov * 255.0f + 0.5f);
                 blend_px(&row[x], a, div255(pr * a), div255(pg * a), div255(pb * a));
             }
         }
@@ -299,7 +299,7 @@ static void walk(ub_canvas *c, const ub_xform *t, const job *j)
                 /* masks: sampled at the pixel (nearest when unrotated) */
                 f32 mu = u - j->mask_x, mv = v - j->mask_y;
                 if (mu < 0 || mv < 0 || mu >= (f32)j->mask_w || mv >= (f32)j->mask_h) continue;
-                int mxi = (int)mu, myi = (int)mv;
+                int mxi = ub_floorf(mu), myi = ub_floorf(mv);
                 cov = j->mask[(size_t)myi * j->mask_w + mxi] * (1.0f / 255.0f);
             } else if (plain && j->radius <= 0 && !j->ring && j->outer == 0) {
                 if (u < -0.5f || v < -0.5f || u > j->w + 0.5f || v > j->h + 0.5f) continue;
@@ -337,9 +337,9 @@ static void walk(ub_canvas *c, const ub_xform *t, const job *j)
                 a *= sa;
             }
             if (a <= 0) continue;
-            u32 ai = (u32)(a * 255.0f + 0.5f);
+            u32 ai = (u32)ub_floorf(a * 255.0f + 0.5f);
             if (ai > 255) ai = 255;
-            u32 ri = (u32)(r * a + 0.5f), gi = (u32)(gg * a + 0.5f), bi = (u32)(b * a + 0.5f);
+            u32 ri = (u32)ub_floorf(r * a + 0.5f), gi = (u32)ub_floorf(gg * a + 0.5f), bi = (u32)ub_floorf(b * a + 0.5f);
             blend_px(&row[x], ai, UB_MIN(ri, ai), UB_MIN(gi, ai), UB_MIN(bi, ai));
         }
     }

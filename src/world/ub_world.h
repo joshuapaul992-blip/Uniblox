@@ -263,6 +263,9 @@ i32 ub_world_clone(ub_world *w, i32 inst);
  * when nothing refers to the index any more. Its children are left
  * without a parent. */
 void ub_world_reclaim(ub_world *w, i32 inst);
+/* An instance and all inside it, it first (destroyed ones keep their
+ * children linked); *count of them. plat_free it; NULL if out of memory. */
+i32 *ub_world_subtree(const ub_world *w, i32 root, i32 *count);
 /* Instances in use (not free slots). */
 static inline i32 ub_world_live_count(const ub_world *w) { return w->count - w->free_inst_count; }
 bool ub_world_set_name(ub_world *w, i32 inst, const char *name);

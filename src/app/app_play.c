@@ -218,6 +218,8 @@ static f32 zoom_step(f32 z, int dir, f32 factor, f32 lo, f32 hi)
     return ub_clampf(z, lo, hi);
 }
 
+#define MID_ZOOM_PX 16 /* pixels of a middle-button drag per zoom step */
+
 void play_view_input(ub_play_view *v, ub_game *g, const ub_input *in, f32 dt, bool keys, bool look, vec3 *move,
                      bool *jump)
 {
@@ -229,6 +231,18 @@ void play_view_input(ub_play_view *v, ub_game *g, const ub_input *in, f32 dt, bo
     /* zoom: the wheel, I and O */
     for (int n = in->wheel; n >= UB_WHEEL_NOTCH; n -= UB_WHEEL_NOTCH) v->zoom = zoom_step(v->zoom, -1, 0.8f, lo, hi);
     for (int n = in->wheel; n <= -UB_WHEEL_NOTCH; n += UB_WHEEL_NOTCH) v->zoom = zoom_step(v->zoom, 1, 0.8f, lo, hi);
+    /* the middle button (or pressing the wheel) held: drag up to zoom in,
+     * down to zoom out, for mice whose wheel the system does not report */
+    if (in->mouse_down[UB_MOUSE_MIDDLE] && look) {
+        if (v->mid_down) v->mid_acc += in->mouse_y - v->mid_y;
+        v->mid_down = true;
+        v->mid_y = in->mouse_y;
+        for (; v->mid_acc <= -MID_ZOOM_PX; v->mid_acc += MID_ZOOM_PX) v->zoom = zoom_step(v->zoom, -1, 0.85f, lo, hi);
+        for (; v->mid_acc >= MID_ZOOM_PX; v->mid_acc -= MID_ZOOM_PX) v->zoom = zoom_step(v->zoom, 1, 0.85f, lo, hi);
+    } else {
+        v->mid_down = false;
+        v->mid_acc = 0;
+    }
     if (keys && in->key_pressed['I']) v->zoom = zoom_step(v->zoom, -1, 0.85f, lo, hi);
     else if (keys && in->key_down['I']) v->zoom = zoom_step(v->zoom, -1, 1.0f - ub_clampf(dt * 1.6f, 0, 0.5f), lo, hi);
     if (keys && in->key_pressed['O']) v->zoom = zoom_step(v->zoom, 1, 0.85f, lo, hi);

@@ -8,7 +8,7 @@
 # renderer is "software" (default) or "opengl"; OpenGL needs a GLX-capable
 # X server (Xvfb with Mesa works).
 #
-# Runs build/win32/uniblox.exe three times with Wine pretending to be the given
+# Runs build/win32/uniblox.exe four times with Wine pretending to be the given
 # Windows version, drives it with real X keyboard/mouse events (xdotool),
 # then checks uniblox.log and uniblox.cfg for the expected results.
 #
@@ -35,7 +35,8 @@ export WINEPREFIX=${WINEPREFIX:-$PWD/build/wineprefix}
 export WINEDEBUG=-all
 RUN1=$DIR/smoke-run1.log
 RUN2=$DIR/smoke-run2.log
-rm -f "$LOG" "$DIR/uniblox.old.log" "$CFG" "$DIR/places/castle-generated.ubx" "$RUN1" "$RUN2"
+RUN3=$DIR/smoke-run3.log
+rm -f "$LOG" "$DIR/uniblox.old.log" "$CFG" "$DIR/places/castle-generated.ubx" "$RUN1" "$RUN2" "$RUN3"
 printf 'renderer=%s\r\n' "$RENDERER" > "$CFG"
 mkdir -p "$(dirname "$SHOT")"
 
@@ -148,6 +149,22 @@ cp build/win32/uniblox.log build/win32/smoke-run2.log
 sed -i 's|^place=.*|place=places/castle-generated.ubx\r|' build/win32/uniblox.cfg
 start_game
 stop_game
+cp build/win32/uniblox.log build/win32/smoke-run3.log
+cp build/win32/uniblox.cfg build/win32/smoke-run3.cfg
+
+# Run 4: the demo over a simulated 56k modem (the server and the client
+# in one program; their link slow, late and lossy): join, walk into the door.
+sed -i 's|^place=.*|place=\r|; s|^net_sim=.*|net_sim=56k\r|; s|^yaw_deg=.*|yaw_deg=0\r|' build/win32/uniblox.cfg
+start_game
+for _ in $(seq 120); do grep -q "client: joined" build/win32/uniblox.log 2>/dev/null && break; sleep 0.5; done
+sleep 1
+eval "$(xdotool getwindowgeometry --shell "$WIN")"
+xdotool mousemove $((X + WIDTH / 2)) $((Y + HEIGHT * 3 / 4)); sleep 0.2
+xdotool keydown w; sleep 2.5
+import -window root "${SHOT%.png}-56k.png"
+xdotool keyup w; sleep 1
+stop_game
+sed -i 's|^net_sim=.*|net_sim=none\r|' build/win32/uniblox.cfg
 wineserver -k 2>/dev/null || true
 EOF
 
@@ -166,15 +183,20 @@ expect "$RUN2" "shutdown complete" "clean shutdown"
 expect "$RUN2" "imported Roblox place" "Roblox place imported from the command line"
 expect "$RUN2" "18 parts, .* 1 mesh/union placeholders" "all castle parts imported"
 expect "$RUN2" "saved places/castle-generated.ubx" "F7 saved the place as .ubx"
-expect "$LOG" "loaded place \"places/castle-generated.ubx\"" "place= in the settings opened the saved .ubx"
-expect "$LOG" "shutdown complete" "third run shut down cleanly"
-expect "$CFG" "place=places/castle-generated.ubx" "place= kept when settings are rewritten"
+expect "$RUN3" "loaded place \"places/castle-generated.ubx\"" "place= in the settings opened the saved .ubx"
+expect "$RUN3" "shutdown complete" "third run shut down cleanly"
+expect "$DIR/smoke-run3.cfg" "place=places/castle-generated.ubx" "place= kept when settings are rewritten"
 expect "$RUN1" "script(s) running" "the demo's scripts started"
+expect "$RUN1" "session: server started" "the place runs on a server in the program"
+expect "$RUN1" "client: joined" "the client joined it over loopback"
+expect "$LOG" "client: joined" "over a simulated 56k modem too"
+expect "$LOG" "script: Player1 opened the door" "and walking into the door there opened it"
+expect "$LOG" "shutdown complete" "fourth run shut down cleanly"
 expect "$RUN1" "script: Welcome, Player1" "a script greeted the player (PlayerAdded)"
 expect "$RUN1" "script: Player1 opened the door" "walking into the door opened it (Touched)"
 expect "$RUN1" "script: The demo panel is ready" "the demo's GUI started (a LocalScript from StarterGui)"
 expect "$RUN1" "script: Player1 went back to the start" "clicking a GUI button reached a server script (RemoteEvent)"
-if grep -E "script: .*(attempt to|is not a valid|was stopped|error)" "$RUN1" "$RUN2" "$LOG"; then
+if grep -E "script: .*(attempt to|is not a valid|was stopped|error)" "$RUN1" "$RUN2" "$RUN3" "$LOG"; then
     echo "  FAIL  a script failed"; fail=1
 else echo "  ok    no script errors"; fi
 expect "$RUN1" "jump 1" "space bar jumped"
@@ -214,9 +236,9 @@ expect "$RUN1" "shift lock on" "Shift turned shift lock on"
 expect "$RUN1" "shift lock off" "and off"
 expect "$RUN1" "camera: first person" "the wheel went into first person"
 expect "$RUN1" "camera: third person" "and out of it"
-if grep -q "yaw_deg=0" "$CFG"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
-else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$CFG" | tr -d '\r'))"; fi
+if grep -q "yaw_deg=0" "$DIR/smoke-run3.cfg"; then echo "  FAIL  mouse-look did not turn the camera"; fail=1
+else echo "  ok    mouse-look turned the camera ($(grep yaw_deg "$DIR/smoke-run3.cfg" | tr -d '\r'))"; fi
 grep -o "benchmark: [0-9]* frames.*render [0-9x]*" "$RUN1" | sed 's/^/  /' || true
-echo "Screenshots: $SHOT, ${SHOT%.png}-gui.png, ${SHOT%.png}-door.png, ${SHOT%.png}-chat.png, ${SHOT%.png}-menu.png, ${SHOT%.png}-help.png, ${SHOT%.png}-fullscreen.png"
-echo "Logs:       $RUN1, $RUN2, $LOG"
+echo "Screenshots: $SHOT, ${SHOT%.png}-gui.png, ${SHOT%.png}-door.png, ${SHOT%.png}-chat.png, ${SHOT%.png}-menu.png, ${SHOT%.png}-help.png, ${SHOT%.png}-fullscreen.png, ${SHOT%.png}-56k.png"
+echo "Logs:       $RUN1, $RUN2, $RUN3, $LOG"
 exit $fail

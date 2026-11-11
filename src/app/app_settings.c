@@ -92,11 +92,20 @@ void settings_parse(ub_settings *s, const char *text)
         else if (key_is(buf, "shift_lock", &v)) s->shift_lock = parse_int(v) != 0;
         else if (key_is(buf, "fov", &v)) s->fov = UB_CLAMP(parse_int(v), 40, 110);
         else if (key_is(buf, "scripts", &v)) s->scripts = parse_int(v) != 0;
+        else if (key_is(buf, "net_sim", &v)) s->net_sim = str_is(v, "56k") ? 2 : str_is(v, "broadband") ? 1 : 0;
         else if (key_is(buf, "zoom", &v)) s->zoom = parse_int(v);
         else if (key_is(buf, "yaw_deg", &v)) s->yaw_deg = parse_int(v);
         else if (key_is(buf, "pitch_deg", &v)) s->pitch_deg = parse_int(v);
         else if (key_is(buf, "place", &v)) ub_fmt(s->place, sizeof s->place, "%s", v);
     }
+}
+
+static const char *const k_net_sim_cfg[UB_NET_SIM_COUNT] = { "none", "broadband", "56k" };
+
+const char *settings_net_sim_name(int v)
+{
+    static const char *const n[UB_NET_SIM_COUNT] = { "None (perfect)", "Broadband", "56k modem" };
+    return n[(unsigned)v % UB_NET_SIM_COUNT];
 }
 
 int settings_write(const ub_settings *s, char *buf, int cap)
@@ -137,13 +146,17 @@ int settings_write(const ub_settings *s, char *buf, int cap)
                   "zoom=%d\r\nyaw_deg=%d\r\npitch_deg=%d\r\n"
                   "# scripts: 1 = run the place's scripts, 0 = do not\r\n"
                   "scripts=%d\r\n"
+                  "# net_sim: the game runs as a server and a client in one program; their link acts like\r\n"
+                  "# none (a perfect one), broadband (40 ms round trip) or 56k (a modem: 200 ms, some loss, 5 KB/s)\r\n"
+                  "net_sim=%s\r\n"
                   "# place: place file to open at start, relative to this folder (.ubx, .rbxl, .rbxm, .rbxlx, .rbxmx),\r\n"
                   "# e.g. places/castle.ubx. Empty = the built-in demo. A file named on the command line wins\r\n"
                   "place=%s\r\n",
                   renderer[p->backend % 4], s->render_threads, s->quality, s->gl_shaders, p->fps_cap, p->vsync, p->fullscreen,
                   p->window_w, p->window_h, p->fs_width, p->fs_height, p->sw_height, s->colors, s->changed_only,
                   p->timer_qpc ? "qpc" : "auto", !s->hide_overlay, s->volume, s->muted, s->mouse_pct, s->invert_y,
-                  s->fov, s->shift_lock, s->zoom, s->yaw_deg, s->pitch_deg, s->scripts, s->place);
+                  s->fov, s->shift_lock, s->zoom, s->yaw_deg, s->pitch_deg, s->scripts, k_net_sim_cfg[s->net_sim % 3],
+                  s->place);
 }
 
 /* ------------------------------------------------------------ the menu */
@@ -260,6 +273,11 @@ static int game_page(ub_settings *s)
 {
     int f = 0;
     if (on_off("Scripts (next place)", &s->scripts)) f |= SET_RESTART_NEEDED;
+    int d;
+    if ((d = ui_stepper("Simulated network", settings_net_sim_name(s->net_sim))) != 0) {
+        s->net_sim = step_index(UB_NET_SIM_COUNT, s->net_sim, d);
+        f |= SET_NET;
+    }
     bool steady = !s->prefs.timer_qpc;
     if (ui_stepper("Timer (restart)", steady ? "CPU counter if steady" : "Windows' timer")) {
         s->prefs.timer_qpc = steady;

@@ -236,6 +236,7 @@ void test_editor_app(void)
     CHECK(app_editor_playing());
     frames(30);
     ub_script_stats st;
+    CHECK(app_editor_server() && ub_game_scripts(app_editor_server())); /* (the play test is networked) */
     ub_script_get_stats(&st);
     CHECK(st.scripts == 2 && st.errors == 0);
     CHECK(app_editor_game()->char_model >= 0);

@@ -88,6 +88,8 @@ GetCursorPos
 SetCursorPos
 ShowCursor
 SetCapture
+# 9D: is a wheel driver (IntelliPoint) running?
+FindWindowW
 ReleaseCapture
 GetFocus
 GetSystemMetrics

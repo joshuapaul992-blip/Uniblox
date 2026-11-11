@@ -76,6 +76,7 @@ static i32 detector_for(i32 part, vec3 hit_rbx)
 static void fire_player(lua_State *L, i32 inst, int ev)
 {
     if (inst < 0 || !ub_world_alive(W, inst)) return;
+    if (S.g->role == UB_ROLE_CLIENT) net_player_event(inst, ev); /* the server's scripts hear it too */
     push_inst(L, S.g->player);
     fire_signal(L, inst, ev, NULL, 1);
 }
@@ -298,6 +299,7 @@ static void rescan(void)
 static void fire_prompt(lua_State *L, sprompt *p, int ev, bool input_type)
 {
     /* on the prompt: (player) or (inputType); on ProximityPromptService: (prompt, the same) */
+    if (!input_type && S.g->role == UB_ROLE_CLIENT) net_player_event(p->inst, ev);
     if (input_type) push_enum(L, enum_type_named("ProximityPromptInputType"), 0); /* Keyboard */
     else push_inst(L, S.g->player);
     fire_signal(L, p->inst, ev, NULL, 1);
@@ -577,12 +579,29 @@ lua_CFunction interact_method(i32 idx, const char *k)
 void interact_pump(lua_State *L, f32 dt)
 {
     if (S.g->player < 0) return;
-    click_pump(L);
-    prompt_pump(L, dt);
+    if (S.g->role != UB_ROLE_SERVER) { /* (a server has no mouse, keys or screen) */
+        click_pump(L);
+        prompt_pump(L, dt);
+    }
     humanoid_pump(L);
     tools_pump(L);
     teams_pump(L);
     sound_pump(L);
+}
+
+/* server: the client clicked, hovered or used a prompt */
+void interact_remote_event(lua_State *L, i32 inst, int ev)
+{
+    if (is_class(inst, "ClickDetector") &&
+        (ev == EV_MOUSEENTER || ev == EV_MOUSELEAVE || ev == EV_B1CLICK || ev == EV_B2CLICK)) {
+        fire_player(L, inst, ev);
+    } else if (is_class(inst, "ProximityPrompt") &&
+               (ev == EV_TRIGGERED || ev == EV_TRIGGERENDED || ev == EV_HOLDBEGAN || ev == EV_HOLDENDED)) {
+        sprompt p;
+        memset(&p, 0, sizeof p);
+        p.inst = inst;
+        fire_prompt(L, &p, ev, false);
+    }
 }
 
 void interact_reset(void)
@@ -801,6 +820,7 @@ static i32 g_slot[MAX_SLOTS];
 static i32 g_equipped = -1, g_grip = -1;
 static u32 g_seen_spawn;
 static bool g_activated;
+static i32 g_client_held = -1;   /* a client: the tool it last saw held */
 static i32 g_hotbar = -1, g_hotbar_frames[MAX_SLOTS], g_hotbar_labels[MAX_SLOTS];
 static u32 g_hotbar_sig;
 #define g_backpack_hidden (S.g->hud.core_off[UB_CORE_BACKPACK])
@@ -1004,30 +1024,74 @@ static void draw_hotbar(void)
     }
 }
 
+/* a client: what the server equipped (the tool came into the character, or left it) */
+static void client_held(lua_State *L)
+{
+    if (g_equipped == g_client_held) return;
+    i32 old = g_client_held;
+    g_client_held = g_equipped;
+    if (old >= 0 && ub_world_alive(W, old)) {
+        if (g_activated) {
+            g_activated = false;
+            fire_signal(L, old, EV_DEACTIVATED, NULL, 0);
+        }
+        fire_signal(L, old, EV_UNEQUIPPED, NULL, 0);
+    }
+    if (g_equipped >= 0) {
+        push_inst(L, VIRT_MOUSE);
+        fire_signal(L, g_equipped, EV_EQUIPPED, NULL, 1);
+    }
+}
+
 static void tools_pump(lua_State *L)
 {
+    bool client = S.g->role == UB_ROLE_CLIENT;
     if (S.g->spawn_count != g_seen_spawn) {
         g_seen_spawn = S.g->spawn_count;
-        refill_backpack(L);
+        if (!client) refill_backpack(L); /* (a client's comes from the server) */
     }
-    if (S.g->dead && g_equipped >= 0) unequip(L);
+    if (S.g->dead && g_equipped >= 0 && !client) unequip(L);
     update_slots();
+    if (client) client_held(L);
     const ub_game_input *in = IN();
     if (!in->gui_keys && !S.g->dead && !g_backpack_hidden)
         for (int s = 0; s < MAX_SLOTS; ++s)
             if (in->key_pressed['1' + s]) {
-                if (g_slot[s] >= 0 && g_slot[s] == g_equipped) unequip(L);
-                else if (g_slot[s] >= 0) equip(L, g_slot[s]);
+                if (client) { /* the server equips it */
+                    if (g_slot[s] >= 0) net_tool(g_slot[s] == g_equipped ? NET_TOOL_UNEQUIP : NET_TOOL_EQUIP, g_slot[s]);
+                } else if (g_slot[s] >= 0 && g_slot[s] == g_equipped) {
+                    unequip(L);
+                } else if (g_slot[s] >= 0) {
+                    equip(L, g_slot[s]);
+                }
             }
     if (g_equipped >= 0 && is_tool(g_equipped)) {
         bool manual = tool_num(g_equipped, "ManualActivationOnly", 0) != 0;
-        if (in->pressed[0] && !in->gui_mouse && !manual) activate(L, g_equipped);
+        if (in->pressed[0] && !in->gui_mouse && !manual) {
+            activate(L, g_equipped);
+            if (client) net_tool(NET_TOOL_ACTIVATE, g_equipped);
+        }
         if (in->released[0] && g_activated) {
             g_activated = false;
             fire_signal(L, g_equipped, EV_DEACTIVATED, NULL, 0);
+            if (client) net_tool(NET_TOOL_DEACTIVATE, g_equipped);
         }
     }
-    draw_hotbar();
+    if (S.g->role != UB_ROLE_SERVER) draw_hotbar();
+}
+
+/* server: the client asked */
+void interact_remote_tool(lua_State *L, int action, i32 tool)
+{
+    update_slots();
+    if (action == NET_TOOL_EQUIP && is_tool(tool) && W->inst[tool].parent == S.g->backpack) equip(L, tool);
+    else if (action == NET_TOOL_UNEQUIP) unequip(L);
+    else if (action == NET_TOOL_ACTIVATE && tool == g_equipped && tool >= 0) activate(L, tool);
+    else if (action == NET_TOOL_DEACTIVATE && tool == g_equipped && tool >= 0 && g_activated) {
+        g_activated = false;
+        fire_signal(L, tool, EV_DEACTIVATED, NULL, 0);
+    }
+    update_slots();
 }
 
 /* Tool:Activate(), Tool:Deactivate(); Humanoid:EquipTool(tool), :UnequipTools() */
@@ -1051,6 +1115,10 @@ static int m_tool_deactivate(lua_State *L)
 static int m_equiptool(lua_State *L)
 {
     i32 t = check_inst(L, 2);
+    if (S.g->role == UB_ROLE_CLIENT) {
+        net_tool(NET_TOOL_EQUIP, t);
+        return 0;
+    }
     update_slots();
     equip(L, t);
     update_slots();
@@ -1059,7 +1127,10 @@ static int m_equiptool(lua_State *L)
 
 static int m_unequiptools(lua_State *L)
 {
-    (void)L;
+    if (S.g->role == UB_ROLE_CLIENT) {
+        net_tool(NET_TOOL_UNEQUIP, -1);
+        return 0;
+    }
     unequip(L);
     return 0;
 }
@@ -1090,7 +1161,7 @@ lua_CFunction tools_method(i32 idx, const char *k)
 void tools_reset(void)
 {
     for (int s = 0; s < MAX_SLOTS; ++s) g_slot[s] = -1;
-    g_equipped = g_grip = g_hotbar = -1;
+    g_equipped = g_grip = g_hotbar = g_client_held = -1;
     g_seen_spawn = 0;
     g_activated = false;
     g_hotbar_sig = 0;
@@ -1245,4 +1316,30 @@ void teams_pump(lua_State *L)
             return;
         }
     }
+}
+
+/* this file's state, one copy per script runtime (ub_script.c) */
+void interact_vars(ub_svar_fn f)
+{
+    f(&g_hover, sizeof g_hover);
+    f(&g_down, sizeof g_down);
+    f(&g_rdown, sizeof g_rdown);
+    f(g_p, sizeof g_p);
+    f(&g_np, sizeof g_np);
+    f(&g_scan_t, sizeof g_scan_t);
+    f(&g_scan_epoch, sizeof g_scan_epoch);
+    f(&g_core, sizeof g_core);
+    f(&g_state, sizeof g_state);
+    f(&g_last_speed, sizeof g_last_speed);
+    f(g_slot, sizeof g_slot);
+    f(&g_equipped, sizeof g_equipped);
+    f(&g_grip, sizeof g_grip);
+    f(&g_seen_spawn, sizeof g_seen_spawn);
+    f(&g_activated, sizeof g_activated);
+    f(&g_client_held, sizeof g_client_held);
+    f(&g_hotbar, sizeof g_hotbar);
+    f(g_hotbar_frames, sizeof g_hotbar_frames);
+    f(g_hotbar_labels, sizeof g_hotbar_labels);
+    f(&g_hotbar_sig, sizeof g_hotbar_sig);
+    f(&g_last_spawn_touch, sizeof g_last_spawn_touch);
 }

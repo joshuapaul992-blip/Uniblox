@@ -44,6 +44,12 @@ static inline i32 ub_floorf(f32 x) { i32 i = ub_rint(x); return (x < (f32)i) ? i
 static inline i32 ub_ceilf(f32 x) { i32 i = ub_rint(x); return (x > (f32)i) ? i + 1 : i; }
 
 /* Round to nearest integer, halves away from zero. */
-static inline i32 ub_roundf(f32 x) { return (i32)(x < 0 ? x - 0.5f : x + 0.5f); }
+/* Nearest, halves away from zero (without a truncating cast: see ub_rint). */
+static inline i32 ub_roundf(f32 x)
+{
+    i32 i = ub_rint(x);
+    f32 d = x - (f32)i;
+    return d == 0.5f ? i + 1 : d == -0.5f ? i - 1 : i;
+}
 
 #endif

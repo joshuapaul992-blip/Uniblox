@@ -18,12 +18,13 @@ enum {
     R_PROPS_ALL,    /* net, count, (key, value)...: replaces them all */
     R_PART,         /* tick, net, the part's fields */
     R_XFORM,        /* tick, net, position, rotation (exact): where it came to rest */
-    R_MOTION,       /* (unreliable) tick, count, (net, position, rotation in 6 bytes)... */
+    R_MOTION,       /* (unreliable) tick, count, (net, position to 1/64 stud, rotation in 4 bytes)... */
     R_LIGHTING,
     R_WORLD,        /* name, gravity, fallen-parts height */
     R_MESH,         /* server id, flags, counts, vertices, triangles, pieces */
     R_JOINED,       /* the first full copy is complete */
     R_ORDER,        /* parent net, count, nets...: these children go last, in this order */
+    R_COLOR,        /* net, colour (3 bytes), transparency: a part's looks when only those changed */
 };
 
 #define MAX_CLIENTS 32
@@ -247,6 +248,7 @@ typedef struct {
     i32 *tlist;            /* those parents, this tick */
     i32 ntl, tl_cap;
     i32 roll;              /* the next part of the rolling check */
+    i32 owned;             /* the subtree the client moves itself (its character), -1 none */
     ub_wbuf motion;        /* the unreliable message being filled */
     u32 motion_n;
     u32 motion_count_at;
@@ -333,10 +335,16 @@ int ub_repl_server_add(ub_repl_server *s, ub_conn *conn)
             memset(&s->c[i], 0, sizeof s->c[i]);
             s->c[i].used = true;
             s->c[i].conn = conn;
+            s->c[i].owned = -1;
             ub_wbuf_init(&s->c[i].motion, NULL, 0);
             return i;
         }
     return -1;
+}
+
+void ub_repl_server_set_owned(ub_repl_server *s, int client, i32 root)
+{
+    if (client >= 0 && client < MAX_CLIENTS && s->c[client].used) s->c[client].owned = root;
 }
 
 void ub_repl_server_remove(ub_repl_server *s, int client)
@@ -685,8 +693,8 @@ static void motion_add(ub_repl_server *s, rclient *c, i32 inst, const ub_part *p
         ub_w_u16(&c->motion, 0);
     }
     ub_w_varu(&c->motion, (u32)inst);
-    ub_w_vec3(&c->motion, p->pos);
-    ub_w_rot(&c->motion, &p->rot);
+    ub_w_pos64(&c->motion, p->pos); /* (where it comes to rest goes exactly, reliably) */
+    ub_w_rot32(&c->motion, &p->rot);
     c->motion_n++;
 }
 
@@ -699,6 +707,22 @@ static void check_part(ub_repl_server *s, rclient *c, i32 pi)
     rpart *rp = &c->parts[pi];
     if (!rp->has) return;
     const ub_part *p = &w->parts[pi];
+    bool owned = c->owned >= 0 && ub_world_is_descendant(w, inst, c->owned);
+    if ((p->color != rp->sent.color || p->transparency != rp->sent.transparency) &&
+        same_looks(p, &(ub_part){ .size = rp->sent.size, .color = p->color, .shape = rp->sent.shape,
+                                  .material = rp->sent.material, .transparency = p->transparency,
+                                  .flags = rp->sent.flags, .mesh = rp->sent.mesh, .look = rp->sent.look })) {
+        /* only its colour or transparency (a script animating it): a small message */
+        ub_wbuf *b = begin(s, R_COLOR);
+        ub_w_varu(b, (u32)inst);
+        ub_w_u8(b, (u8)(p->color >> 16));
+        ub_w_u8(b, (u8)(p->color >> 8));
+        ub_w_u8(b, (u8)p->color);
+        ub_w_u8(b, p->transparency);
+        send_msg(s, c);
+        rp->sent.color = p->color;
+        rp->sent.transparency = p->transparency;
+    }
     if (!same_looks(p, &rp->sent)) {
         ub_wbuf *b = begin(s, R_PART);
         ub_w_varu(b, s->tick);
@@ -711,7 +735,7 @@ static void check_part(ub_repl_server *s, rclient *c, i32 pi)
         rp->moving = false;
         return;
     }
-    if (same_place(&rp->sent, p->pos, &p->rot)) {
+    if (owned || same_place(&rp->sent, p->pos, &p->rot)) { /* (the client moves its own) */
         rp->moving = false;
         return;
     }
@@ -911,6 +935,7 @@ struct ub_repl_client {
     i32 npend, pend_cap;
     bool joined;
     scratch sc;
+    ub_repl_hooks hooks;
 };
 
 ub_repl_client *ub_repl_client_new(ub_world *w)
@@ -920,6 +945,14 @@ ub_repl_client *ub_repl_client_new(ub_world *w)
     memset(c, 0, sizeof *c);
     c->w = w;
     return c;
+}
+
+void ub_repl_client_set_world(ub_repl_client *c, ub_world *w) { c->w = w; }
+
+void ub_repl_client_hooks(ub_repl_client *c, const ub_repl_hooks *h)
+{
+    if (h) c->hooks = *h;
+    else memset(&c->hooks, 0, sizeof c->hooks);
 }
 
 void ub_repl_client_free(ub_repl_client *c)
@@ -1042,12 +1075,13 @@ static void destroy_local(ub_repl_client *c, i32 root)
             }
             list[n++] = ch;
         }
-    ub_world_destroy(w, root);
+    if (c->hooks.destroy) c->hooks.destroy(c->hooks.ctx, root);
+    else ub_world_destroy(w, root);
     for (i32 k = n - 1; k >= 0; --k) {
         i32 net = ub_repl_client_net(c, list[k]);
         unmap_local(c, list[k]);
         if (net >= 0) resolve_refs(c, net, -1);
-        ub_world_reclaim(w, list[k]);
+        if (!c->hooks.destroy) ub_world_reclaim(w, list[k]);
     }
     for (i32 k = 0; k < c->npend; ++k)
         if (!ub_world_alive(w, c->pend[k].inst)) c->pend[k--] = c->pend[--c->npend];
@@ -1106,6 +1140,7 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
             zero.rot = mat3_identity();
             inst = ub_world_add_part(w, parent, (ub_class)cls, cbuf, nbuf, &zero);
             if (inst >= 0) set_part(c, inst, &p, ptick);
+            if (inst >= 0 && c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 0, ptick);
         } else {
             inst = ub_world_add(w, parent, (ub_class)cls, cbuf, nbuf);
         }
@@ -1203,6 +1238,7 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
         get_part(&r, &p);
         if (r.err || inst < 0) return false;
         set_part(c, inst, &p, tick);
+        if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 0, tick);
         return true;
     }
     case R_XFORM: {
@@ -1219,14 +1255,15 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
         w->parts[pi].rot = rot;
         if (grow((void **)&c->ptick, &c->ptick_cap, pi + 1, sizeof(u32))) c->ptick[pi] = tick + 1;
         w->epoch++;
+        if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 1, tick);
         return true;
     }
     case R_MOTION: {
         u32 tick = ub_r_varu(&r), n = ub_r_u16(&r);
         for (u32 k = 0; k < n && !r.err; ++k) {
             i32 inst = ub_repl_client_local(c, ub_r_varu(&r));
-            vec3 pos = ub_r_vec3(&r);
-            mat3 rot = ub_r_rot(&r);
+            vec3 pos = ub_r_pos64(&r);
+            mat3 rot = ub_r_rot32(&r);
             if (r.err || inst < 0 || w->inst[inst].part < 0) continue;
             i32 pi = w->inst[inst].part;
             /* only if newer than what it shows (motion is unordered) */
@@ -1234,9 +1271,21 @@ bool ub_repl_client_apply(ub_repl_client *c, const u8 *msg, u32 len)
             w->parts[pi].pos = pos;
             w->parts[pi].rot = rot;
             if (grow((void **)&c->ptick, &c->ptick_cap, pi + 1, sizeof(u32))) c->ptick[pi] = tick + 1;
+            if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 2, tick);
         }
         w->epoch++;
         return !r.err;
+    }
+    case R_COLOR: {
+        i32 inst = ub_repl_client_local(c, ub_r_varu(&r));
+        u8 cr = ub_r_u8(&r), cg = ub_r_u8(&r), cb = ub_r_u8(&r), tr = ub_r_u8(&r);
+        if (r.err || inst < 0 || w->inst[inst].part < 0) return false;
+        ub_part *p = &w->parts[w->inst[inst].part];
+        p->color = (u32)cr << 16 | (u32)cg << 8 | cb;
+        p->transparency = tr;
+        w->epoch++;
+        if (c->hooks.part) c->hooks.part(c->hooks.ctx, inst, 3, 0);
+        return true;
     }
     case R_LIGHTING: {
         ub_lighting l;
