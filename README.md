@@ -478,6 +478,27 @@ Places and scripts control it with:
   `CFrame` a script sets; Fixed leaves it where it is. `CameraSubject` can
   also be a part.
 
+## Networking (in progress)
+
+Milestone 9D runs single-player as an in-process server and client that
+share nothing but messages, so milestone 10 only has to swap in UDP.
+The first half is built and tested, but the game doesn't use it yet:
+
+- **The network layer** (`src/net/`): messages in packets with sequence
+  numbers and acknowledgements. Reliable messages of any size arrive once
+  and in order; unreliable ones are sent once (positions).
+- **A simulated network:** the loopback link can add delay, jitter
+  (reordering), loss, duplicates and a bandwidth cap, to try a bad
+  connection or a 56k modem.
+- **Replication** (`src/net/ub_repl.c`): the server's world notes what
+  changes, and each client gets a copy of what it may see:
+  - ServerScriptService, ServerStorage and server Scripts' code stay on
+    the server.
+  - Instances, properties and parts' looks arrive reliably.
+  - Moving parts are sent unreliably while they move, then reliably once
+    they stop.
+  - Meshes and lighting are included.
+
 ## The editor
 
 `ubedit.exe` is a separate program for building places. It runs on the
@@ -654,6 +675,19 @@ fallback.
   count the door, survive a death, and be drawn, along with the sign and
   the door's label. The door's label is also drawn by the software
   renderer over the real scene, to check it sits in front of the wall.
+
+  For milestone 9D, the network tests:
+  - **2,000 messages (5 MB) each way:** sent over a perfect link (nothing
+    resent) and over one that loses 20%, duplicates 5% and reorders
+    (every message arrives once, in order).
+  - **56k:** 50 KB at 5 KB/s takes the line's 10 s.
+  - **Junk packets** do no harm.
+  - **Replication:** the demo place is copied to a client and must match
+    exactly. Then random changes run for hundreds of ticks over perfect
+    and bad links: making, moving, destroying and reusing instances,
+    properties of every kind and references, code, moving and changing
+    parts, meshes and lighting. Each time, the client's world must equal
+    what it may see of the server's, down to the order of children.
 
   For milestone 9C, the renderer tests draw a floor, a box over it and a
   ball at each fast quality level, and check five things:

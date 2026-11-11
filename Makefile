@@ -56,6 +56,7 @@ CORE_SRCS := \
 	src/physics/ub_character.c \
 	src/game/ub_game.c src/game/ub_rig.c src/game/ub_constraints.c \
 	src/game/ub_demo_place.c \
+	src/net/ub_netbuf.c src/net/ub_link.c src/net/ub_conn.c src/net/ub_repl.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \
 	src/render/ub_render.c \
@@ -152,7 +153,7 @@ LIBS := -lkernel32 -luser32 -lgdi32 -lwinmm $(LIBGCC)
 HOSTCC     ?= cc
 TEST_BIN   := build/host/uniblox_tests
 TEST_SRCS  := tests/test_main.c tests/test_render.c tests/test_crt.c tests/test_compress.c tests/test_world.c \
-	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/test_present.c tests/test_gui.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
+	tests/test_physics.c tests/test_libc.c tests/test_script.c tests/test_game.c tests/test_ui.c tests/test_editor.c tests/test_editor_app.c tests/test_present.c tests/test_gui.c tests/test_net.c tests/stub_platform.c $(CORE_SRCS) $(TOOL_SRCS) \
 	src/app/app_editor.c src/app/app_play.c src/app/app_hud.c
 TEST_FLAGS := -std=c99 -g -O1 -Wall -Wextra -Werror -Wno-unused-parameter -Isrc \
 	-fsanitize=address,undefined -fno-sanitize-recover=all

@@ -250,6 +250,7 @@ bool ub_world_set_prop(ub_world *w, i32 inst, u32 key, const ub_value *v)
     ub_value copy;
     if (!ub_value_copy(&copy, v)) return false;
     w->epoch++;
+    ub_world_note_key(w, inst, key);
     for (u16 i = 0; i < l->n; ++i)
         if (l->p[i].key == key) {
             ub_value_free(&l->p[i].val);
@@ -296,6 +297,7 @@ void ub_world_remove_prop(ub_world *w, i32 inst, u32 key)
             memmove(&l->p[i], &l->p[i + 1], sizeof(ub_prop) * (size_t)(l->n - i - 1));
             l->n--;
             w->epoch++;
+            ub_world_note_key(w, inst, key);
             return;
         }
 }
@@ -321,6 +323,7 @@ void ub_world_clear_props(ub_world *w, i32 inst)
     l->p = NULL;
     l->n = l->cap = 0;
     w->epoch++;
+    ub_world_note(w, inst, UB_JN_PROPS);
 }
 
 bool ub_world_copy_props(ub_world *w, i32 to, i32 from)
