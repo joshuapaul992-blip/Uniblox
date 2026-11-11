@@ -194,7 +194,40 @@ typedef struct {
     u32 epoch;            /* bumped by every change to the tree, names and properties */
     ub_wmesh *meshes;
     i32 mesh_count, mesh_cap;
+    struct ub_journal *journal; /* the changes noted for replication (milestone 9D), NULL when off */
 } ub_world;
+
+/* ------------------------------------------------------ the journal
+ *
+ * While on, the world notes which instances changed and how, for the
+ * server to replicate (net/ub_repl.c). Changes made through the functions
+ * here are noted; parts' fields written directly can be noted with
+ * ub_world_note (the replicator also compares parts itself). */
+enum {
+    UB_JN_NEW = 1,     /* made (or its slot reused) */
+    UB_JN_TREE = 2,    /* its parent changed (or it was destroyed) */
+    UB_JN_NAME = 4,
+    UB_JN_SOURCE = 8,
+    UB_JN_PART = 16,   /* its part's fields */
+    UB_JN_PROPS = 32,  /* properties: all of them */
+    UB_JN_KEYS = 64,   /* properties: the ones in `keys` */
+};
+typedef struct { i32 inst; u32 key; } ub_jkey;
+typedef struct ub_journal {
+    u8 *flags;         /* per instance: UB_JN_* */
+    u8 *nkeys;         /* per instance: keys noted (past 16, all props) */
+    i32 cap;
+    i32 *list;         /* instances with flags, in the order first noted */
+    i32 n, list_cap;
+    ub_jkey *keys;
+    i32 nk, keys_cap;
+} ub_journal;
+
+bool ub_world_journal_start(ub_world *w);
+void ub_world_journal_stop(ub_world *w);
+void ub_world_journal_clear(ub_world *w);  /* (after the replicator read it) */
+void ub_world_note(ub_world *w, i32 inst, u8 what);
+void ub_world_note_key(ub_world *w, i32 inst, u32 key);
 
 void ub_world_init(ub_world *w);
 void ub_world_free(ub_world *w);

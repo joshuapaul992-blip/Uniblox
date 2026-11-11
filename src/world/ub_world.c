@@ -55,6 +55,7 @@ static void free_meshes(ub_world *w)
 
 void ub_world_free(ub_world *w)
 {
+    ub_world_journal_stop(w);
     free_meshes(w);
     ub_world_free_props(w);
     plat_free(w->inst);
@@ -162,6 +163,7 @@ i32 ub_world_add(ub_world *w, i32 parent, ub_class cls, const char *class_name, 
     link_child(w, parent, idx);
     w->epoch++;
     if (cls == UB_CLASS_WORKSPACE && w->workspace < 0) w->workspace = idx;
+    ub_world_note(w, idx, UB_JN_NEW | UB_JN_TREE | UB_JN_PROPS);
     return idx;
 }
 
@@ -178,6 +180,7 @@ i32 ub_world_add_part(ub_world *w, i32 parent, ub_class cls, const char *class_n
     if ((i32)part->look > w->mesh_count) w->parts[pi].look = 0;
     w->part_inst[pi] = idx;
     w->inst[idx].part = pi;
+    ub_world_note(w, idx, UB_JN_PART);
     return idx;
 }
 
@@ -218,6 +221,7 @@ bool ub_world_set_parent(ub_world *w, i32 inst, i32 parent)
     w->epoch++;
     if (parent >= 0) w->inst[inst].flags &= (u16)~UB_INST_DETACHED;
     else w->inst[inst].flags |= UB_INST_DETACHED;
+    ub_world_note(w, inst, UB_JN_TREE);
     return true;
 }
 
@@ -226,6 +230,7 @@ void ub_world_destroy(ub_world *w, i32 inst)
     if (!ub_world_alive(w, inst)) return;
     ub_world_set_parent(w, inst, -1);
     w->epoch++;
+    ub_world_note(w, inst, UB_JN_TREE);
     /* flag the whole subtree (children stay linked, so walk it) */
     i32 stack_small[64];
     i32 *stack = stack_small, cap = 64, sp = 0;
@@ -363,6 +368,7 @@ bool ub_world_set_name(ub_world *w, i32 inst, const char *name)
     if (n == 0xFFFFFFFFu) return false;
     w->inst[inst].name = n;
     w->epoch++;
+    ub_world_note(w, inst, UB_JN_NAME);
     return true;
 }
 
@@ -372,6 +378,7 @@ bool ub_world_set_source(ub_world *w, i32 inst, const char *source)
     u32 n = add_string(w, source ? source : "");
     if (n == 0xFFFFFFFFu) return false;
     w->inst[inst].source = n;
+    ub_world_note(w, inst, UB_JN_SOURCE);
     return true;
 }
 
@@ -819,6 +826,92 @@ void ub_part_sanitize(ub_part *p)
             p->rot = mat3_identity();
             break;
         }
+}
+
+/* ------------------------------------------------------------ journal */
+
+bool ub_world_journal_start(ub_world *w)
+{
+    if (w->journal) return true;
+    w->journal = (ub_journal *)plat_alloc(sizeof(ub_journal));
+    if (!w->journal) return false;
+    memset(w->journal, 0, sizeof *w->journal);
+    return true;
+}
+
+void ub_world_journal_stop(ub_world *w)
+{
+    ub_journal *j = w->journal;
+    if (!j) return;
+    plat_free(j->flags);
+    plat_free(j->nkeys);
+    plat_free(j->list);
+    plat_free(j->keys);
+    plat_free(j);
+    w->journal = NULL;
+}
+
+void ub_world_journal_clear(ub_world *w)
+{
+    ub_journal *j = w->journal;
+    if (!j) return;
+    for (i32 i = 0; i < j->n; ++i) {
+        j->flags[j->list[i]] = 0;
+        j->nkeys[j->list[i]] = 0;
+    }
+    j->n = j->nk = 0;
+}
+
+static bool journal_room(ub_journal *j, i32 inst)
+{
+    if (inst < j->cap) return true;
+    i32 nc = j->cap ? j->cap : 1024;
+    while (nc <= inst) nc *= 2;
+    u8 *nf = (u8 *)plat_alloc((size_t)nc), *nk = (u8 *)plat_alloc((size_t)nc);
+    if (!nf || !nk) {
+        plat_free(nf);
+        plat_free(nk);
+        return false;
+    }
+    memset(nf, 0, (size_t)nc);
+    memset(nk, 0, (size_t)nc);
+    if (j->cap) {
+        memcpy(nf, j->flags, (size_t)j->cap);
+        memcpy(nk, j->nkeys, (size_t)j->cap);
+    }
+    plat_free(j->flags);
+    plat_free(j->nkeys);
+    j->flags = nf;
+    j->nkeys = nk;
+    j->cap = nc;
+    return true;
+}
+
+void ub_world_note(ub_world *w, i32 inst, u8 what)
+{
+    ub_journal *j = w->journal;
+    if (!j || inst < 0 || !journal_room(j, inst)) return;
+    if (!j->flags[inst]) {
+        if (!grow((void **)&j->list, &j->list_cap, j->n + 1, sizeof(i32))) return;
+        j->list[j->n++] = inst;
+    }
+    j->flags[inst] |= what;
+}
+
+void ub_world_note_key(ub_world *w, i32 inst, u32 key)
+{
+    ub_journal *j = w->journal;
+    if (!j || inst < 0 || !journal_room(j, inst)) return;
+    if (j->flags[inst] & UB_JN_PROPS) return;
+    if (j->nkeys[inst] >= 16 || !grow((void **)&j->keys, &j->keys_cap, j->nk + 1, sizeof(ub_jkey))) {
+        ub_world_note(w, inst, UB_JN_PROPS);
+        return;
+    }
+    j->keys[j->nk].inst = inst;
+    j->keys[j->nk].key = key;
+    j->nk++;
+    j->nkeys[inst]++;
+    ub_world_note(w, inst, UB_JN_KEYS);
 }
 
 /* ------------------------------------------------------------- meshes */

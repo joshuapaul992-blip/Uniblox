@@ -56,7 +56,7 @@ CORE_SRCS := \
 	src/physics/ub_character.c \
 	src/game/ub_game.c src/game/ub_rig.c src/game/ub_constraints.c \
 	src/game/ub_demo_place.c \
-	src/net/ub_netbuf.c src/net/ub_link.c src/net/ub_conn.c \
+	src/net/ub_netbuf.c src/net/ub_link.c src/net/ub_conn.c src/net/ub_repl.c \
 	src/render/ub_texture.c \
 	src/render/ub_mesh.c \
 	src/render/ub_render.c \

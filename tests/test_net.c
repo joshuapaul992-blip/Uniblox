@@ -7,6 +7,9 @@
 #include "net/ub_conn.h"
 #include "net/ub_link.h"
 #include "net/ub_netbuf.h"
+#include "net/ub_repl.h"
+#include "game/ub_demo_place.h"
+#include "world/ub_classes.h"
 #include "test.h"
 
 /* ------------------------------------------------------------ buffers */
@@ -239,8 +242,345 @@ static void test_connection(void)
     ub_conn_free(c);
 }
 
+/* -------------------------------------------------------- replication */
+
+static u32 g_rng = 1;
+static u32 rnd(void)
+{
+    g_rng ^= g_rng << 13;
+    g_rng ^= g_rng >> 17;
+    g_rng ^= g_rng << 5;
+    return g_rng;
+}
+static f32 rndf(f32 lo, f32 hi) { return lo + (hi - lo) * (f32)(rnd() % 10001) / 10000.0f; }
+
+typedef struct {
+    ub_world sw, cw;
+    ub_repl_server *rs;
+    ub_repl_client *rc;
+    ub_link *link;
+    ub_conn *a, *b;
+    u64 now;
+    u32 bad_msgs;
+} rig;
+
+static void rig_step(rig *g)
+{
+    ub_repl_server_tick(g->rs);
+    out_ctx oa = { g->link, 0, g->now }, ob = { g->link, 1, g->now };
+    ub_conn_flush(g->a, g->now, to_link, &oa);
+    ub_conn_flush(g->b, g->now, to_link, &ob);
+    g->now += 50000; /* 20 ticks a second */
+    static u8 pkt[UB_LINK_MTU];
+    int len;
+    while ((len = ub_link_recv(g->link, 1, pkt, sizeof pkt, g->now)) >= 0) ub_conn_receive(g->b, pkt, (u32)len, g->now);
+    while ((len = ub_link_recv(g->link, 0, pkt, sizeof pkt, g->now)) >= 0) ub_conn_receive(g->a, pkt, (u32)len, g->now);
+    const u8 *m;
+    u32 ml;
+    bool rel;
+    while (ub_conn_next(g->b, &m, &ml, &rel))
+        if (!ub_repl_client_apply(g->rc, m, ml)) {
+            if (g->bad_msgs++ < 5) printf("    message type %d refused\n", ml ? m[0] : -1);
+        }
+    while (ub_conn_next(g->a, &m, &ml, &rel)) {}
+}
+
+static void rig_open(rig *g, const ub_link_sim *sim)
+{
+    g->rs = ub_repl_server_new(&g->sw);
+    ub_world_init(&g->cw);
+    g->rc = ub_repl_client_new(&g->cw);
+    g->link = ub_link_new(sim);
+    g->a = ub_conn_new(0);
+    g->b = ub_conn_new(0);
+    g->now = 1000;
+    g->bad_msgs = 0;
+    CHECK(g->rs && g->rc && ub_repl_server_add(g->rs, g->a) == 0);
+}
+
+static void rig_close(rig *g)
+{
+    ub_repl_server_free(g->rs);
+    ub_repl_client_free(g->rc);
+    ub_conn_free(g->a);
+    ub_conn_free(g->b);
+    ub_link_free(g->link);
+    ub_world_free(&g->sw);
+    ub_world_free(&g->cw);
+}
+
+/* until everything sent has arrived and parts have come to rest */
+static void rig_settle(rig *g)
+{
+    for (int i = 0; i < 4000; ++i) {
+        rig_step(g);
+        if (i > 20 && ub_conn_backlog(g->a) == 0) break;
+    }
+    for (int i = 0; i < 20; ++i) rig_step(g);
+}
+
+static int g_diffs;
+static void diff(const char *what, i32 inst)
+{
+    if (g_diffs++ < 8) printf("    differs: %s (server instance %d)\n", what, inst);
+}
+
+static bool same_val(const rig *g, const ub_value *sv, const ub_value *cv)
+{
+    if (sv->type != cv->type) return false;
+    if (sv->type != UB_PV_REF) return ub_value_equal(sv, cv);
+    i32 want = sv->v.ref >= 0 && ub_repl_visible(&g->sw, sv->v.ref) ? ub_repl_client_local(g->rc, (u32)sv->v.ref) : -1;
+    return cv->v.ref == want;
+}
+
+/* the client's world is exactly what it may see of the server's */
+static void compare_worlds(const rig *g)
+{
+    const ub_world *s = &g->sw, *c = &g->cw;
+    g_diffs = 0;
+    i32 visible = 0;
+    for (i32 i = 0; i < s->count; ++i) {
+        if (!ub_repl_visible(s, i)) continue;
+        visible++;
+        i32 l = ub_repl_client_local(g->rc, (u32)i);
+        if (l < 0 || !ub_world_alive(c, l)) { diff("missing", i); continue; }
+        const ub_instance *a = &s->inst[i], *b = &c->inst[l];
+        if (strcmp(ub_world_str(s, a->class_name), ub_world_str(c, b->class_name)) || a->cls != b->cls) diff("class", i);
+        if (strcmp(ub_world_str(s, a->name), ub_world_str(c, b->name))) diff("name", i);
+        i32 sp = a->parent, cp = b->parent;
+        if ((sp < 0) != (cp < 0) || (sp >= 0 && ub_repl_client_local(g->rc, (u32)sp) != cp)) diff("parent", i);
+        /* children: the same visible ones, in the same order */
+        i32 sc = a->first_child, cc = b->first_child;
+        for (;;) {
+            while (sc >= 0 && !ub_repl_visible(s, sc)) sc = s->inst[sc].next_sibling;
+            if (sc < 0 || cc < 0) break;
+            if (ub_repl_client_local(g->rc, (u32)sc) != cc) { diff("child order", i); break; }
+            sc = s->inst[sc].next_sibling;
+            cc = c->inst[cc].next_sibling;
+        }
+        if ((sc < 0) != (cc < 0)) diff("children", i);
+        int np = ub_world_prop_count(s, i);
+        if (np != ub_world_prop_count(c, l)) {
+            diff("property count", i);
+            for (int k = 0; k < ub_world_prop_count(c, l); ++k) {
+                const char *kn = ub_world_key_name(c, ub_world_prop_at(c, l, k)->key);
+                if (!ub_world_prop_named(s, i, kn)) printf("      the client has %s too (%s)\n", kn, ub_world_str(s, a->class_name));
+            }
+        }
+        for (int k = 0; k < np; ++k) {
+            const ub_prop *p = ub_world_prop_at(s, i, k);
+            const ub_value *cv = ub_world_prop_named(c, l, ub_world_key_name(s, p->key));
+            if (!cv || !same_val(g, &p->val, cv)) diff(ub_world_key_name(s, p->key), i);
+        }
+        const char *cn = ub_world_str(s, a->class_name);
+        bool code = (a->flags & UB_INST_CLIENT) || !strcmp(cn, "LocalScript") || !strcmp(cn, "ModuleScript");
+        if (strcmp(code ? ub_world_source(s, i) : "", ub_world_source(c, l))) diff("source", i);
+        if ((a->part >= 0) != (b->part >= 0)) diff("part", i);
+        else if (a->part >= 0) {
+            const ub_part *x = &s->parts[a->part], *y = &c->parts[b->part];
+            if (memcmp(&x->pos, &y->pos, sizeof x->pos) || memcmp(&x->rot, &y->rot, sizeof x->rot)) diff("part place", i);
+            if (memcmp(&x->size, &y->size, sizeof x->size) || x->color != y->color || x->shape != y->shape ||
+                x->material != y->material || x->transparency != y->transparency || x->flags != y->flags)
+                diff("part looks", i);
+            if ((x->mesh != 0) != (y->mesh != 0) || (x->mesh && s->meshes[x->mesh - 1].nt != c->meshes[y->mesh - 1].nt))
+                diff("part mesh", i);
+        }
+    }
+    i32 alive = 0;
+    for (i32 i = 0; i < c->count; ++i) alive += ub_world_alive(c, i);
+    if (alive != visible) {
+        printf("    the client has %d instances, the server shows %d\n", alive, visible);
+        g_diffs++;
+    }
+    if (memcmp(&s->lighting, &c->lighting, sizeof s->lighting) || strcmp(s->name, c->name) || s->gravity != c->gravity)
+        diff("lighting or world", -1);
+    CHECK(g_diffs == 0);
+}
+
+static i32 pick(const ub_world *w, bool alive_only)
+{
+    for (int t = 0; t < 50; ++t) {
+        i32 i = (i32)(rnd() % (u32)w->count);
+        if (!alive_only || ub_world_alive(w, i)) return i;
+    }
+    return -1;
+}
+
+static bool is_service(const ub_world *w, i32 i) { return w->inst[i].parent < 0 && !(w->inst[i].flags & UB_INST_DETACHED); }
+
+static void mutate(rig *g, i32 storage, u16 mesh)
+{
+    ub_world *w = &g->sw;
+    u32 op = rnd() % 100;
+    i32 i = pick(w, true), j = pick(w, true);
+    if (i < 0 || j < 0) return;
+    char name[32];
+    snprintf(name, sizeof name, "n%u", rnd() % 1000);
+    if (op < 15) { /* make something */
+        i32 parent = rnd() % 4 == 0 ? storage : rnd() % 8 == 0 ? -1 : (is_service(w, j) || rnd() % 2 ? j : w->workspace);
+        if (rnd() % 2) {
+            ub_part p;
+            memset(&p, 0, sizeof p);
+            p.pos = v3(rndf(-50, 50), rndf(0, 20), rndf(-50, 50));
+            p.rot = mat3_from_euler(rndf(0, 6), rndf(0, 6), 0);
+            p.size = v3(rndf(1, 5), rndf(1, 5), rndf(1, 5));
+            p.color = rnd() & 0xFFFFFF;
+            p.flags = rnd() % 2 ? UB_PART_ANCHORED : 0;
+            p.mesh = rnd() % 5 == 0 ? mesh : 0;
+            ub_world_add_part(w, parent, UB_CLASS_PART, NULL, name, &p);
+        } else {
+            static const char *const cls[] = { "Folder", "Model", "LocalScript", "Script", "ModuleScript", "IntValue" };
+            const char *cn = cls[rnd() % 6];
+            i32 n = ub_world_add(w, parent, UB_CLASS_OTHER, cn, name);
+            if (n >= 0 && cn[1] != 'o' && cn[0] != 'F' && cn[0] != 'I') ub_world_set_source(w, n, "print('hi')");
+        }
+    } else if (op < 27) { /* move it somewhere */
+        if (!is_service(w, i)) ub_world_set_parent(w, i, rnd() % 5 == 0 ? storage : rnd() % 10 == 0 ? -1 : j);
+    } else if (op < 35) { /* destroy it (and sometimes free its slot for reuse) */
+        if (!is_service(w, i) && i != storage) {
+            ub_world_destroy(w, i);
+            if (rnd() % 2) ub_world_reclaim(w, i);
+        }
+    } else if (op < 42) {
+        ub_world_set_name(w, i, name);
+    } else if (op < 70) { /* properties of all kinds */
+        ub_value v;
+        memset(&v, 0, sizeof v);
+        static f32 seqk[8] = { 0, 1, 0, 1, 0.5f, 0, 1, 1 };
+        static const char *const keys[] = { "Value", "Target", "Text", "Size", "Color", "Ratio", "Flag", "Seq", "@Attr", "Font", "Where" };
+        int k = (int)(rnd() % 11);
+        switch (k) {
+        case 0: v = ub_vint((i32)(rnd() % 2000) - 1000); break;
+        case 1: v.type = UB_PV_REF; v.v.ref = rnd() % 3 ? j : -1; break;
+        case 2: v = ub_vstr(name, (u32)strlen(name)); break;
+        case 3: v.type = UB_PV_UDIM2; v.v.ud2.sx = rndf(0, 1); v.v.ud2.ox = (i32)(rnd() % 100); break;
+        case 4: v.type = UB_PV_COLOR3; v.v.c3.r = rndf(0, 1); v.v.c3.g = rndf(0, 1); v.v.c3.b = 0.5f; break;
+        case 5: v.type = UB_PV_DOUBLE; v.v.d = rndf(-1, 1) * 1e6; break;
+        case 6: v = ub_vbool(rnd() % 2); break;
+        case 7: v.type = UB_PV_NUMSEQ; v.v.seq.k = seqk; v.v.seq.n = 2; break;
+        case 8: v = ub_venum(rnd() % 50); break;
+        case 9: v.type = UB_PV_FONT; v.v.font.family = (char *)"rbxasset://fonts/families/Arial.json"; v.v.font.weight = 700; break;
+        default: {
+            static f32 cf[12];
+            for (int q = 0; q < 12; ++q) cf[q] = rndf(-3, 3);
+            v.type = UB_PV_CFRAME;
+            v.v.cf.m = cf;
+        }
+        }
+        if (rnd() % 8 == 0) ub_world_remove_prop(w, i, ub_world_key(w, keys[k]));
+        else ub_world_set_prop_named(w, i, keys[k], &v);
+    } else if (op < 75) {
+        if (w->inst[i].source != UB_NO_STRING) ub_world_set_source(w, i, rnd() % 2 ? "return 1" : "print(2)");
+    } else if (op < 97) { /* parts: they move (as physics moves them), change, rest */
+        i32 pi = w->inst[i].part;
+        if (pi < 0) return;
+        ub_part *p = &w->parts[pi];
+        u32 what = rnd() % 10;
+        if (what < 6) {
+            p->pos = v3_add(p->pos, v3(rndf(-1, 1), rndf(-1, 1), rndf(-1, 1)));
+            p->rot = mat3_from_euler(rndf(0, 6), rndf(0, 6), rndf(0, 6));
+            if (what == 0) p->flags &= (u8)~UB_PART_ANCHORED;
+        } else if (what < 8) {
+            p->color = rnd() & 0xFFFFFF;
+            p->size = v3(rndf(1, 5), 1, 1);
+        } else {
+            p->transparency = (u8)(rnd() % 256);
+            p->mesh = rnd() % 2 ? mesh : 0;
+        }
+        if (rnd() % 2) ub_world_note(w, i, UB_JN_PART); /* (half the time the replicator has to notice by itself) */
+    } else if (op < 99) {
+        w->lighting.clock_time = rndf(0, 24);
+    } else {
+        f32 v[9] = { 0, 0, 0, 1, 0, 0, 0, 1, rndf(0, 1) };
+        u32 tri[3] = { 0, 1, 2 }, pv = 3, pt = 1;
+        ub_world_add_mesh(w, v, 3, tri, 1, &pv, &pt, 1, 0);
+    }
+}
+
+static void test_replication(void)
+{
+    rig g;
+    /* the demo place, joined over a perfect link */
+    ub_demo_place(&g.sw);
+    i32 storage = ub_world_add(&g.sw, -1, UB_CLASS_OTHER, "ServerStorage", "ServerStorage");
+    ub_world_add(&g.sw, storage, UB_CLASS_FOLDER, NULL, "Secret");
+    f32 bv[24];
+    for (int k = 0; k < 8; ++k) {
+        bv[k * 3] = (k & 1) ? 0.5f : -0.5f;
+        bv[k * 3 + 1] = (k & 2) ? 0.5f : -0.5f;
+        bv[k * 3 + 2] = (k & 4) ? 0.5f : -0.5f;
+    }
+    u32 btri[36] = { 0, 2, 3, 0, 3, 1, 4, 5, 7, 4, 7, 6, 0, 1, 5, 0, 5, 4, 2, 6, 7, 2, 7, 3, 0, 4, 6, 0, 6, 2, 1, 3, 7, 1, 7, 5 };
+    u32 bpv = 8, bpt = 12;
+    u16 mesh = ub_world_add_mesh(&g.sw, bv, 8, btri, 12, &bpv, &bpt, 1, 0);
+    CHECK(mesh != 0);
+    rig_open(&g, NULL);
+    rig_step(&g);
+    rig_settle(&g);
+    CHECK(ub_repl_client_joined(g.rc) && g.bad_msgs == 0);
+    compare_worlds(&g);
+    ub_repl_stats st;
+    ub_repl_server_stats(g.rs, 0, &st);
+    u64 total = 0;
+    for (int t = 0; t <= UB_REPL_LAST; ++t) total += st.bytes[t];
+    printf("  the demo place joined: %d instances, %u KB\n", g.cw.count, (u32)(total / 1024));
+    /* the server's secrets stay there */
+    i32 secret = -1;
+    for (i32 i = 0; i < g.cw.count; ++i)
+        if (ub_world_alive(&g.cw, i) && (!strcmp(ub_world_str(&g.cw, g.cw.inst[i].name), "Secret") ||
+                                          !strcmp(ub_world_str(&g.cw, g.cw.inst[i].class_name), "ServerScriptService")))
+            secret = i;
+    CHECK(secret < 0);
+    /* parts moving: unreliable while they move, reliable where they stop */
+    ub_repl_server_stats(g.rs, 0, &st);
+    u64 before = st.bytes[12] + st.bytes[11]; /* (motion, rest) */
+    i32 moved = 0;
+    for (int tick = 0; tick < 40; ++tick) {
+        moved = 0;
+        for (i32 pi = 0; pi < g.sw.part_count && moved < 20; ++pi) {
+            if (g.sw.part_inst[pi] < 0 || !ub_repl_visible(&g.sw, g.sw.part_inst[pi])) continue;
+            g.sw.parts[pi].pos.y += 0.05f;
+            moved++;
+        }
+        rig_step(&g);
+    }
+    ub_repl_server_stats(g.rs, 0, &st);
+    printf("  20 parts moving, 2 s: %u bytes a second\n", (u32)((st.bytes[12] + st.bytes[11] - before) / 2));
+    rig_settle(&g);
+    compare_worlds(&g);
+    rig_close(&g);
+
+    /* fuzz: random changes, a lossy, reordering, duplicating link */
+    ub_link_sim bad = { 30, 80, 150, 50, 0, 77 };
+    int rounds = getenv("UB_FUZZ_ROUNDS") ? atoi(getenv("UB_FUZZ_ROUNDS")) : 3;
+    for (int round = 0; round < rounds; ++round) {
+        ub_world_init(&g.sw);
+        if (round % 3 == 2) ub_demo_place(&g.sw);
+        i32 ws = ub_world_workspace(&g.sw);
+        ub_world_add(&g.sw, -1, UB_CLASS_OTHER, "Lighting", "Lighting");
+        storage = ub_world_add(&g.sw, -1, UB_CLASS_OTHER, "ServerStorage", "ServerStorage");
+        ub_world_add(&g.sw, -1, UB_CLASS_OTHER, "ServerScriptService", "ServerScriptService");
+        for (int k = 0; k < 20; ++k) ub_world_add(&g.sw, k % 3 ? ws : storage, UB_CLASS_MODEL, NULL, "M");
+        mesh = ub_world_add_mesh(&g.sw, bv, 8, btri, 12, &bpv, &bpt, 1, 0);
+        g_rng = 1234567u + (u32)round;
+        rig_open(&g, round == 0 ? NULL : &bad);
+        int steps = round % 3 == 2 ? 200 : 400;
+        for (int t = 0; t < steps; ++t) {
+            for (int k = 0; k < 12; ++k) mutate(&g, storage, mesh);
+            rig_step(&g);
+        }
+        rig_settle(&g);
+        printf("  fuzz %d (%s link): %d server instances, %d on the client\n", round, round == 0 ? "perfect" : "bad",
+               g.sw.count, g.cw.count);
+        CHECK(g.bad_msgs == 0);
+        compare_worlds(&g);
+        rig_close(&g);
+    }
+}
+
 void test_net(void)
 {
     test_buffers();
     test_connection();
+    test_replication();
 }
