@@ -86,7 +86,7 @@ tests/          host unit tests (make test)
 | 9A | Client UI + a fast renderer for NT 3.51/4.0 | A 2021-style client UI (chat, player list with leaderstats, health, notifications, game menu); a renderer faster than the software one where there is no OpenGL (WINVBE) | **Built.** The client UI in Uniblox's own look, fed by `SetCore`, `SetCoreGuiEnabled` and `Chat:Chat`; the fast software renderer (sorted, coarse tile depth, longer perspective steps, packed texture coordinates, every processor), about twice as fast as the plain one on the demo place under Wine. Passes unit tests and the Wine smoke tests. Needs a run on a real install (NT 3.51/4.0 with WINVBE, ideally with two processors) |
 | 9B | Camera | Better zooming, first person, shift lock | **Built.** Eased zoom from 0.5 to 128 studs (wheel, I/O) with the place's limits, first person below 2 studs, shift lock (Shift), walls pulling the camera in, 80-degree pitch; CameraMode, zoom limits, mouse-lock and occlusion settings from StarterPlayer and Player, MouseBehavior, Scriptable and Fixed cameras. Passes unit tests and the Wine smoke tests. Needs a run on a real install |
 | 9C | A better-looking fast renderer | The NT 3.51/4.0 fast renderer looks closer to the OpenGL one | **Built.** Quality levels: medium adds coloured hemisphere and sun light, smooth (Gouraud) curved parts with highlights, level of detail, mipmaps, fog and the sun; high adds soft sun shadows (shadow map and a deferred pass). Passes unit tests and the Wine smoke tests. Needs a run on a real install |
-| 9D | Loopback networking | Single-player runs entirely through replication: an in-process server and client that share nothing but messages | **In progress.** PR 1 built (the network layer and replication, tested on their own); PR 2 (the server and the client in the game) next. Plan below |
+| 9D | Loopback networking | Single-player runs entirely through replication: an in-process server and client that share nothing but messages | **Done.** The network layer and replication (PR 1); the server and the client in the game and the editor's play test (PR 2). Notes below |
 | 10 | UDP multiplayer | 8 players on LAN; playable over a simulated 56k link | |
 | 11 | Platform services | Server browser, accounts, publish/download places | |
 
@@ -713,6 +713,41 @@ PR 1 notes:
    the F3 text shows traffic, round trip and the simulated link. The game
    tests run both ways with the same results; bandwidth within 2-4 KB/s per
    client on the demo place; a smoke run over a simulated 56k link.
+
+PR 2 notes:
+- Script runtimes: the script layer's variables (its state struct and
+  each file's own) are listed per file and swapped when the other side's
+  runtime is used; a new runtime starts from them as they were before any
+  script ran. Big tables (tweens, Debris) moved to the heap so a swap
+  copies about 20 KB. Values scripts keep that the world has no property
+  for (a Weld's C0, a value object's Value) are also put in the world as
+  `~name`, so they are saved and replicated; the rig's Motor6Ds carry their
+  offsets the same way and the client adopts the server's rig.
+- The server's game follows the client's reports: each physics step it
+  gives the character the velocity that takes it to the reported place
+  (so it still pushes loose parts), or teleports it there past 6 studs. A
+  report that moves faster than three times the walk speed plus 30 (or
+  rises faster than a jump allows) is refused and the client put back. The
+  server's own moves carry a number; reports from before the latest are
+  ignored.
+- The client's physics treats every part as kinematic (the server moves
+  them); parts the server moves are blended from replication's ticks,
+  shown 0.1 s behind on the server's clock (the least delay seen).
+- After each batch of replication the client reads its world's journal:
+  new or moved instances start their LocalScripts and fire ChildAdded,
+  DescendantAdded and AncestryChanged; changed properties fire Changed;
+  joints join. (ChildRemoved fires on destroys, not on reparenting.)
+- The server's messages wait for the next replication tick, so a remote
+  event never names an instance the client has not had.
+- The game tests run solo and networked; `PromptShown` is the client's
+  (as in Roblox), so the server-side test checks it only where IsClient.
+- Traffic on the demo place: about 1 KB/s down, 0.8 KB/s up; the first
+  copy is 23 KB. 20 moving parts cost 4.4 KB/s (was 7.7). Acknowledgements
+  alone wait up to 25 ms for data to ride with; an idle character reports
+  4 times a second.
+- Not yet: more than one client (milestone 10), validating clicks and
+  prompts by distance on the server, ChildRemoved for reparenting seen on
+  a client.
 
 ## Open items
 

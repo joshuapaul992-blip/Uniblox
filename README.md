@@ -478,26 +478,50 @@ Places and scripts control it with:
   `CFrame` a script sets; Fixed leaves it where it is. `CameraSubject` can
   also be a part.
 
-## Networking (in progress)
+## Networking
 
-Milestone 9D runs single-player as an in-process server and client that
-share nothing but messages, so milestone 10 only has to swap in UDP.
-The first half is built and tested, but the game doesn't use it yet:
+Since milestone 9D the game always runs as a **server** and a **client**
+in one program, sharing nothing but messages over a loopback link, so
+milestone 10 only has to swap in UDP. The editor's play test works the
+same way. The tests still run a place all-in-one (solo) too, as the
+reference both ways must match.
 
+- **The server** has the place as it really is. It runs the Scripts and
+  the physics of everything but the player's character, and saves with
+  F7.
+- **The client** has a copy of what it may see: ServerScriptService,
+  ServerStorage and server Scripts' code stay on the server. It runs the
+  LocalScripts (and the ModuleScripts they need) and moves the player's
+  character itself, as Roblox's network ownership does. It reports where
+  the character is 20 times a second; the server checks the speed, poses
+  the figure and fires Touched there.
+- **FilteringEnabled:** what a client's scripts change stays on that
+  client. `RunService:IsServer()`/`IsClient()` and `Players.LocalPlayer`
+  answer per side.
+- **Remotes cross the link:** `FireServer`, `FireClient`,
+  `FireAllClients`, and `InvokeServer`/`InvokeClient` (which wait for the
+  answer). Arguments may be nil, booleans, numbers, strings, Vector3,
+  Vector2, CFrame, Color3, UDim, UDim2, BrickColor, EnumItems, instances
+  the other side has (others arrive as nil) and tables of those.
+- **Also as messages:** chat (the server's `Player.Chatted`), clicks on
+  ClickDetectors, ProximityPrompts, equipping and using tools, the menu's
+  Reset, and the server's sounds (played on the client). Deaths, health,
+  speeds and the server moving the character (teleports, respawns, bounce
+  pads) come back.
+- **What moves smoothly:** parts the server moves are shown a tenth of a
+  second behind, blended between its last two positions, and they still
+  push the character.
+- **Traffic:** the demo place sends about 1 KB/s to the client and 0.8
+  KB/s back. Positions go to 1/64 stud and rotations in 4 bytes while
+  parts move, and exactly once they stop. A part whose colour a script
+  animates costs a few bytes a change.
+- **A simulated network** (`net_sim` in `uniblox.cfg`, or Esc, Settings,
+  Game): none, broadband (40 ms round trip) or a 56k modem (200 ms, 1%
+  lost, 5 KB/s). Over the modem the demo takes about 6 s to join. F3 shows
+  the traffic, the round trip and lost packets.
 - **The network layer** (`src/net/`): messages in packets with sequence
   numbers and acknowledgements. Reliable messages of any size arrive once
   and in order; unreliable ones are sent once (positions).
-- **A simulated network:** the loopback link can add delay, jitter
-  (reordering), loss, duplicates and a bandwidth cap, to try a bad
-  connection or a 56k modem.
-- **Replication** (`src/net/ub_repl.c`): the server's world notes what
-  changes, and each client gets a copy of what it may see:
-  - ServerScriptService, ServerStorage and server Scripts' code stay on
-    the server.
-  - Instances, properties and parts' looks arrive reliably.
-  - Moving parts are sent unreliably while they move, then reliably once
-    they stop.
-  - Meshes and lighting are included.
 
 ## The editor
 
@@ -676,7 +700,24 @@ fallback.
   the door's label. The door's label is also drawn by the software
   renderer over the real scene, to check it sits in front of the wall.
 
-  For milestone 9D, the network tests:
+  For milestone 9D's second half, the game tests also run networked (a
+  server and a client over loopback) and must give the same results: the
+  instance API, constraints, characters with tools and teams, and clicks,
+  prompts and jumping. Networked-only tests:
+  - **The door:** the client walks through; the server sees it, opens the
+    door and the client sees that.
+  - **Remotes:** events and an invoke both ways with tables, vectors and
+    instances; what the client makes stays there; IsServer, IsClient,
+    LocalPlayer and ServerStorage per side.
+  - **Death:** lava on the server kills; the client dies and respawns at
+    the spawn; chat sets the speed on the server, which the client gets;
+    the menu's Reset works.
+  - **The demo place:** the solo test's checks seen from the client (the
+    door, the spinner, the button's balls and Debris, the lava, the
+    panel's count by RemoteEvent, the lamp's prompt, chat commands). It
+    must stay under 4 KB/s. It runs again over a simulated 56k modem.
+
+  For milestone 9D's first half, the network tests:
   - **2,000 messages (5 MB) each way:** sent over a perfect link (nothing
     resent) and over one that loses 20%, duplicates 5% and reorders
     (every message arrives once, in order).
@@ -773,7 +814,9 @@ fallback.
   checks that the demo's loose parts settle and fall asleep, walks
   into the scripted door and checks the script opened it, checks that no
   script failed, opens a Roblox place from the command line, saves it with
-  F7, and opens the result through `place=`.
+  F7, and opens the result through `place=`. Last, it plays the demo over
+  a simulated 56k modem: the client must join and walking into the door
+  must open it on the server.
 
   The editor has its own. It clicks through building a place (insert, add
   a behaviour, open its script, Save as), play-tests it, then checks that

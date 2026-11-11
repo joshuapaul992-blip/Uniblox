@@ -894,6 +894,13 @@ void app_frame(ub_frame *frame, const ub_input *in, u32 dt_us)
         ub_debug("fps %u.%u at %dx%d, cap %u, slept %u us last frame", g_fps_x10 / 10, g_fps_x10 % 10,
                  frame->width, frame->height, frame->fps_cap, frame->sleep_us);
     }
+    if (g_sess && !ub_session_client(g_sess) && !g_menu_open) { /* (a slow link: the first copy takes a while) */
+        ub_session_stats ns;
+        ub_session_get_stats(g_sess, &ns);
+        char jl[96];
+        ub_fmt(jl, sizeof jl, "Joining the place... %u KB", (u32)(ns.down_bytes / 1024u));
+        ub_render_text(frame->width / 2 - ub_render_text_width(jl) / 2, frame->height / 2, jl, 0xFFFFFF);
+    }
     if ((!g_hide_overlay || g_bench) && !g_menu_open) {
         int lh = ub_render_line_height(), x = lh / 2, y = g_game_on && !g_bench ? hud_below_chat() : lh / 3;
         char line[192];
